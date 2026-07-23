@@ -1,0 +1,55 @@
+// main.dot -- Entry pipeline for the dot-graph remote git+https:// source
+// fixture set.
+//
+// Purpose: exercises amplifier-resolver-dot-graph's recursive
+// git+https:// DOT-source fetch/resolution machinery end-to-end:
+//   1. An IN-ORIGIN shape=folder subgraph reference (relative dot_file=)
+//      that itself recurses one more level (child.dot -> grandchild.dot).
+//   2. A CROSS-REPO shape=folder subgraph reference (a full
+//      git+https://github.com/<owner>/<repo>@<ref>#subdirectory=<path>
+//      URL) pointing at the sibling repo dot-graph-samples-lib.
+//   3. A tool_command node that proves the working directory used for
+//      real file writes is the actual workspace (context.target_dir),
+//      not an ephemeral fetch temp dir.
+//
+// Reference graph:
+//   main -> child -> grandchild        (in-origin, recursive)
+//   main -> [cross-repo] lib           (git+https:// origin switch)
+//
+// Tool-only (no LLM calls) -- deterministic, no API keys required.
+
+digraph MainEntry {
+  graph [
+    label="dot-graph-samples -- Remote Source Fixture (Entry)",
+    goal="Exercise recursive git+https:// DOT-source fetch and resolution.",
+    rankdir=LR,
+    default_max_retry=1,
+    default_fidelity="truncate"
+  ];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  WriteProof [
+    shape=parallelogram,
+    label="Write Workspace Proof",
+    tool_command="#!/bin/sh\nset -e\necho hello > proof.txt\nprintf 'proof_written'"
+  ];
+
+  InOriginChild [
+    shape=folder,
+    label="In-Origin Subgraph (child -> grandchild)",
+    dot_file="subgraphs/child.dot"
+  ];
+
+  CrossRepoLib [
+    shape=folder,
+    label="Cross-Repo Subgraph (dot-graph-samples-lib)",
+    dot_file="git+https://github.com/kenotron-ms/dot-graph-samples-lib@main#subdirectory=lib.dot"
+  ];
+
+  Start        -> WriteProof;
+  WriteProof   -> InOriginChild [label="proof written", condition="context.tool.last_line=proof_written"];
+  InOriginChild -> CrossRepoLib;
+  CrossRepoLib -> Exit;
+}

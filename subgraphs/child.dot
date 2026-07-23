@@ -1,0 +1,33 @@
+// child.dot -- In-origin subgraph, one level of recursion.
+//
+// Referenced by pipelines/main.dot via a relative dot_file=. Itself
+// contains a shape=folder node referencing grandchild.dot (also relative,
+// resolved against the SAME origin -- this repo) to exercise recursive,
+// multi-level fetching within a single origin.
+
+digraph ChildSubgraph {
+  graph [
+    label="dot-graph-samples -- Child Subgraph (recurses to grandchild)",
+    rankdir=LR,
+    default_fidelity="truncate"
+  ];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  MarkChildEntered [
+    shape=parallelogram,
+    label="Mark Child Entered",
+    tool_command="printf 'child_entered'"
+  ];
+
+  GrandchildRef [
+    shape=folder,
+    label="Nested Subgraph (grandchild)",
+    dot_file="grandchild.dot"
+  ];
+
+  Start            -> MarkChildEntered;
+  MarkChildEntered -> GrandchildRef [label="entered", condition="context.tool.last_line=child_entered"];
+  GrandchildRef    -> Exit;
+}
