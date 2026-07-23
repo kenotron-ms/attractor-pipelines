@@ -39,7 +39,7 @@ digraph MainEntry {
   InOriginChild [
     shape=folder,
     label="In-Origin Subgraph (child -> grandchild)",
-    dot_file="subgraphs/child.dot"
+    dot_file="../subgraphs/child.dot"
   ];
 
   CrossRepoLib [
