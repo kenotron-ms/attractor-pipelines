@@ -1,0 +1,98 @@
+// idea_to_shipped.dot
+//
+// Sample pipeline: full "idea to shipped" SDLC arc, mined from real
+// successful Amplifier Resolve session histories (think -> plan -> build ->
+// fix loop -> PR -> merge gate -> deploy gate).
+//
+// Flow:
+//   Start -> Brainstorm -> Plan -> Implement(subgraph: build_loop.dot, loops
+//   internally on verdict fail) -> DeliverPR(subgraph) -> MergeGate(subgraph,
+//   human hexagon) -> DeployGate(subgraph, human hexagon) -> Report -> Exit
+//
+// 8 top-level nodes (2 pipeline anchors, 3 folder subgraphs, 3 box/tool
+// nodes).
+//
+// Context inputs:
+//   $task              - the idea/problem statement kicking off the run
+//   $repo              - target repo slug (owner/name) for PR/merge/deploy
+//   $max_fix_rounds    - cap on build_loop fix iterations (default 3)
+//
+// Context outputs:
+//   brainstorm.design_doc   - path to the validated design written by Brainstorm
+//   plan.todo_path          - path to TODO.md written by Plan
+//   delivery.pr_url         - PR URL, set by DeliverPR subgraph
+//   delivery.merge_sha      - merge commit sha, set by MergeGate subgraph
+//   deploy.result           - deploy outcome, set by DeployGate subgraph
+
+digraph idea_to_shipped {
+  graph [
+    label="Idea to Shipped -- Full SDLC Pipeline",
+    goal="$task",
+    rankdir=LR,
+    default_max_retry=2,
+    default_fidelity="summary:high",
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; }"
+  ];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // --- Phase 1: Idea -> validated design (mirrors /think-like-ken) ---
+  Brainstorm [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Brainstorm / Think-like-ken",
+    prompt="Given the idea/problem statement in $task, explore intent, requirements, and design options as a design partner would (not a solution reviewer). Ask no questions back -- resolve ambiguity yourself using best judgment and note assumptions. Write the validated design to .resolve/design/design.md. Print the single line: brainstorm_done"
+  ];
+
+  // --- Phase 2: Design -> bite-sized task plan (mirrors /plan-like-ken) ---
+  Plan [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Plan / Plan-like-ken",
+    prompt="Read .resolve/design/design.md. Break it into a bite-sized (2-5 min each) task list suitable for TDD-style execution. Write .ai/plan.md (task list) and .ai/acceptance_criteria.md (measurable success criteria per task). Print the single line: plan_done"
+  ];
+
+  // --- Phase 3: Build with verdict-gated fix loop (see subgraphs/build_loop.dot) ---
+  Implement [
+    shape=folder, label="Implement (build + verify + fix loop)",
+    dot_file="subgraphs/build_loop.dot",
+    outputs="build.verdict,build.fix_rounds_used"
+  ];
+
+  // --- Phase 4: Open PR (see subgraphs/deliver_pr.dot) ---
+  DeliverPR [
+    shape=folder, label="Deliver PR",
+    dot_file="subgraphs/deliver_pr.dot",
+    outputs="delivery.pr_url,delivery.result"
+  ];
+
+  // --- Phase 5: Human merge gate + merge (see subgraphs/merge_gate.dot) ---
+  MergeGate [
+    shape=folder, label="Merge Gate",
+    dot_file="subgraphs/merge_gate.dot",
+    outputs="delivery.merge_sha,delivery.merge_result"
+  ];
+
+  // --- Phase 6: Human deploy gate + deploy (see subgraphs/deploy_gate.dot) ---
+  DeployGate [
+    shape=folder, label="Deploy Gate",
+    dot_file="subgraphs/deploy_gate.dot",
+    outputs="deploy.result"
+  ];
+
+  Report [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Report",
+    prompt="Summarize the full run: design decisions (.resolve/design/design.md), fix rounds used (${build.fix_rounds_used}), PR (${delivery.pr_url}), merge (${delivery.merge_sha}), and deploy result (${deploy.result}). Print the single line: reported"
+  ];
+
+  Start      -> Brainstorm;
+  Brainstorm -> Plan;
+  Plan       -> Implement;
+  Implement  -> DeliverPR;
+  DeliverPR  -> MergeGate  [condition="context.delivery.result=opened", weight="2"];
+  DeliverPR  -> Report     [condition="outcome=fail"];
+  MergeGate  -> DeployGate [condition="context.delivery.merge_result=merged", weight="2"];
+  MergeGate  -> Report     [condition="context.delivery.merge_result=rejected"];
+  DeployGate -> Report;
+  Report     -> Exit;
+}

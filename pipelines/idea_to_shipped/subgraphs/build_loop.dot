@@ -1,0 +1,71 @@
+// build_loop.dot
+//
+// Verdict-gated build loop: Implement -> VerifySpec -> QualityReview ->
+// VerdictGate -> (pass: exit) | (fail: CheckFixRounds -> BuildFixTasks ->
+// loop back to Implement). Modeled on amplifier-resolver-dot-graph's
+// develop.dot Ralph-loop pattern, mined from real fix-loop session arcs.
+//
+// Required context variables (injected by parent via graph attrs / $vars):
+//   $max_fix_rounds  - cap on fix iterations (default 3)
+//
+// Context outputs (declared via `outputs=` on the folder node in the parent):
+//   build.verdict          - final "pass" | "exhausted"
+//   build.fix_rounds_used  - integer count of fix rounds consumed
+
+digraph build_loop {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  Implement [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Implement Next Task",
+    prompt="Read .ai/plan.md. Implement the next unchecked [ ] task using TDD: write the failing test first, confirm it fails, then write minimal code to pass. Check the task off when green. Print the single line: implement_done"
+  ];
+
+  VerifySpec [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Spec/Verify Review",
+    prompt="Review the implementation against .ai/plan.md and .ai/acceptance_criteria.md. Write .resolve/verify/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: verify_done"
+  ];
+
+  QualityReview [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Quality Review",
+    prompt="Review code quality: readability, error handling, test coverage, no dead code. Write .resolve/quality/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: quality_done"
+  ];
+
+  VerdictGate [
+    shape=parallelogram, label="Verdict Gate",
+    tool_command="#!/bin/sh\nset -e\nv1=$(python3 -c \"import json;print(json.load(open('.resolve/verify/verdict.json'))['verdict'])\" 2>/dev/null || echo fail)\nv2=$(python3 -c \"import json;print(json.load(open('.resolve/quality/verdict.json'))['verdict'])\" 2>/dev/null || echo fail)\nif [ \"$v1\" = \"pass\" ] && [ \"$v2\" = \"pass\" ]; then printf 'pass'; else printf 'fail'; fi"
+  ];
+
+  CheckFixRounds [
+    shape=parallelogram, label="Check Fix Rounds",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .ai\ncount=$(python3 -c \"import json,os;p='.ai/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-3}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
+  ];
+
+  BuildFixTasks [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Build Fix Tasks",
+    prompt="Read the verdict findings in .resolve/verify/verdict.json and .resolve/quality/verdict.json. Append new [ ] tasks to .ai/plan.md addressing each failure, most specific/actionable first. Print the single line: fix_tasks_built"
+  ];
+
+  MoreTasks [
+    shape=parallelogram, label="More Tasks Pending?",
+    tool_command="#!/bin/sh\nset -e\nif grep -q '\\[ \\]' .ai/plan.md 2>/dev/null; then printf 'has_tasks'; else printf 'no_tasks'; fi"
+  ];
+
+  Start          -> Implement;
+  Implement      -> VerifySpec;
+  VerifySpec     -> QualityReview;
+  QualityReview  -> VerdictGate;
+  VerdictGate    -> MoreTasks       [condition="context.tool.last_line=pass", label="pass", weight="2"];
+  VerdictGate    -> CheckFixRounds  [condition="context.tool.last_line=fail", label="fail"];
+  CheckFixRounds -> BuildFixTasks   [condition="context.tool.last_line=fix_ok",       label="fix round"];
+  CheckFixRounds -> Exit            [condition="context.tool.last_line=fix_exhausted", label="exhausted"];
+  BuildFixTasks  -> Implement       [loop_restart="true", label="fix loop"];
+  MoreTasks      -> Implement       [condition="context.tool.last_line=has_tasks", loop_restart="true", label="next task"];
+  MoreTasks      -> Exit            [condition="context.tool.last_line=no_tasks"];
+}

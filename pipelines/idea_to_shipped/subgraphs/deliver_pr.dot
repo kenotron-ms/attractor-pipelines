@@ -1,0 +1,46 @@
+// deliver_pr.dot
+//
+// Commit, push, and open a PR; then a freeform human approval gate before
+// merge. Modeled on amplifier-resolver-dot-graph's deliver_pr.dot pattern.
+//
+// Required context variables: $repo (owner/name to open the PR against)
+// Context outputs: delivery.pr_url, delivery.result ("opened"|"failed")
+
+digraph deliver_pr {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  CommitPush [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Commit + Push",
+    prompt="Stage all changes, write a conventional commit message summarizing the work (reference .resolve/design/design.md and .ai/plan.md for context), commit, and push the current branch to origin. Print the single line: pushed"
+  ];
+
+  OpenPR [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Open PR",
+    prompt="Open a pull request for the pushed branch against $repo's default branch. Write a PR description summarizing the design, the task list completed, and verification evidence. Write the resulting PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
+  ];
+
+  OpenPR -> ExtractPRUrl;
+
+  ExtractPRUrl [
+    shape=parallelogram, label="Extract PR URL",
+    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
+    parse_json="true"
+  ];
+
+  Start      -> CommitPush;
+  CommitPush -> OpenPR      [condition="context.tool.last_line=pushed", weight="2"];
+  CommitPush -> Failed      [condition="outcome=fail"];
+  ExtractPRUrl -> Exit;
+
+  Failed [
+    shape=parallelogram, label="Mark Failed",
+    tool_command="printf '{\"delivery.result\": \"failed\"}'",
+    parse_json="true"
+  ];
+  Failed -> Exit;
+}
