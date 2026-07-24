@@ -1,15 +1,25 @@
 // idea_to_shipped.dot
 //
 // Sample pipeline: full "idea to shipped" SDLC arc, mined from real
-// successful Amplifier Resolve session histories (think -> plan -> build ->
-// fix loop -> PR -> merge gate -> deploy gate).
+// successful Amplifier Resolve session histories AND aligned faithfully to
+// the actual kenergy mode/agent prompts (think-like-ken, plan-like-ken,
+// build-like-ken, kenergy:implementer/verifier/quality-reviewer). Where this
+// pipeline's node prompt differs from the mode's real text, it is a
+// deliberate compression for a single autonomous LLM turn (the modes are
+// designed for interactive human dialogue; a DOT box node runs once,
+// unattended) -- called out inline.
 //
 // Flow:
 //   Start -> Brainstorm -> Plan -> PlanConfidenceCheck -> (confident: skip
 //   straight to Implement) | (needs_review: PlanApproval human gate -> revise
-//   or proceed) -> Implement(subgraph: build_loop.dot, loops internally on
-//   verdict fail) -> DeliverPR(subgraph) -> MergeGate(subgraph, human
+//   or proceed) -> Implement(subgraph: build_loop.dot, runs the real
+//   implementer -> verifier -> quality-reviewer pipeline per task, loops
+//   internally on FAIL) -> DeliverPR(subgraph) -> MergeGate(subgraph, human
 //   hexagon) -> DeployGate(subgraph, human hexagon) -> Report -> Exit
+//
+// File conventions (matched to the real kenergy modes, NOT invented paths):
+//   docs/plans/YYYY-MM-DD-<topic>-design.md            - design doc (Brainstorm)
+//   docs/plans/YYYY-MM-DD-<feature>-implementation.md  - plan doc (Plan)
 //
 // Context inputs:
 //   $task              - the idea/problem statement kicking off the run
@@ -18,7 +28,7 @@
 //
 // Context outputs:
 //   brainstorm.design_doc   - path to the validated design written by Brainstorm
-//   plan.todo_path          - path to TODO.md written by Plan
+//   plan.plan_doc           - path to the implementation plan written by Plan
 //   delivery.pr_url         - PR URL, set by DeliverPR subgraph
 //   delivery.merge_sha      - merge commit sha, set by MergeGate subgraph
 //   deploy.result           - deploy outcome, set by DeployGate subgraph
@@ -36,28 +46,37 @@ digraph idea_to_shipped {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
-  // --- Phase 1: Idea -> validated design (mirrors /think-like-ken) ---
+  // --- Phase 1: Idea -> validated design ---
+  // Real think-like-ken is INTERACTIVE: one question at a time, 2-3 approaches
+  // with tradeoffs, design presented in sections with a "Does this look right
+  // so far?" checkpoint after each, a 4-point self-review, then an adversarial
+  // spec review, then an explicit human approval gate before the design is
+  // considered done. A DOT box node is a single unattended turn, so this node
+  // compresses that entire dialogue into one pass -- it is NOT a faithful
+  // substitute for /think-like-ken, it is the closest unattended approximation.
   Brainstorm [
     shape=box, goal_gate=true, fidelity="full",
-    label="Brainstorm / Think-like-ken",
-    prompt="Given the idea/problem statement in $task, explore intent, requirements, and design options as a design partner would (not a solution reviewer). Ask no questions back -- resolve ambiguity yourself using best judgment and note assumptions. Write the validated design to .resolve/design/design.md. Print the single line: brainstorm_done"
+    label="Brainstorm / Think-like-ken (compressed, unattended)",
+    prompt="Given the idea/problem statement in $task: explore intent, propose 2-3 approaches with tradeoffs, pick the strongest and apply YAGNI ruthlessly. There is no human here to answer questions one-at-a-time as think-like-ken normally does -- resolve every ambiguity yourself using best judgment and record each assumption explicitly as an 'Open question' in the doc. Cover architecture, components, data flow, error handling, and testing/verification strategy. Run your own 4-point self-review before finishing: no [TBD]/[TODO] placeholders, internal consistency, every item traces to $task (no scope creep), no vague terms like 'handle errors appropriately'. Write the design to docs/plans/<date>-<topic>-design.md matching the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions). Print the single line: brainstorm_done"
   ];
 
-  // --- Phase 2: Design -> bite-sized task plan (mirrors /plan-like-ken) ---
-  // NOT TDD. This is Verification Driven Development: pick the CHEAPEST
-  // verification that actually proves a task works (static analysis -> run
-  // it directly -> curl/HTTP -> browser -> DTU/reality-check), per the VDD
-  // hierarchy. A unit test that mocks everything proves the mock works, not
-  // the product.
+  // --- Phase 2: Design -> implementation plan ---
+  // This IS Verification Driven Development, matching plan-like-ken.md
+  // verbatim: "Human attention is the most sacred resource. Do not waste it."
+  // NOT TDD. The question is never "does a test pass?" -- it's "does this
+  // actually work?" Every task gets the CHEAPEST verification level that
+  // actually proves it, chosen from the real hierarchy below -- not a
+  // reflexive "write a unit test."
   Plan [
     shape=box, goal_gate=true, fidelity="full",
-    label="Plan / Plan-like-ken (VDD)",
-    prompt="Read .resolve/design/design.md. Break it into a bite-sized (2-5 min each) task list. This is Verification Driven Development, NOT TDD -- do not default every task to 'write a unit test'. For EACH task, pick the cheapest verification level that actually proves it works: (1) native static analysis (ruff/ty/tsc) -- always, zero cost; (2) run the code directly; (3) curl/HTTP against a running server for endpoints; (4) browser via playwright-cli for UI changes; (5) DTU/reality-check only when true isolation is needed. Unit tests are right for library code, not a universal default. Also self-assess your CONFIDENCE per task: mark needs_review=true only if the design leaves real ambiguity (an unresolved ordering/scope/interface decision) -- most well-specified designs should NOT need review. Write .ai/plan.md (task list, each task with its exact verification command and expected output) and .ai/acceptance_criteria.md (measurable success criteria per task). Write .resolve/plan/confidence.json with {\"needs_review\": true|false, \"reasons\": [...]}. Print the single line: plan_done"
+    label="Plan / Plan-like-ken (Verification Driven Development)",
+    prompt="Read docs/plans/<date>-<topic>-design.md. Core philosophy, verbatim from plan-like-ken: human attention is the most sacred resource, do not waste it. This is Verification Driven Development, NOT TDD. The question for every task is never 'does a test pass?' -- it's 'does this actually work?' Unit tests are the right verification method for LIBRARIES; they are not a universal requirement. A unit test that mocks everything and passes proves nothing about whether the product works. The verification hierarchy -- pick the CHEAPEST one that proves the claim: (1) native static analysis (ruff/ty/uv/oxc/oxlint/tsc) -- always, zero cost, instant; (2) run the code directly -- anything with a main, a script, a CLI; (3) curl/HTTP call against a running server -- API endpoints; (4) browser via playwright-cli/browser-tester -- UI changes, see them light up for real; (5) Reality Check/DTU -- only when true isolation is needed. If you didn't run it, you didn't verify it. Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each, and for EACH task specify: exact file paths, complete copy-pasteable implementation, the exact static analysis command (always first), and the exact verification command at the right level with expected output -- never 'test it manually', never leave verification unspecified. Also self-assess CONFIDENCE: mark needs_review=true only if the design leaves genuine unresolved ambiguity (ordering, scope boundary, an interface not fully pinned down) -- a well-specified design should NOT need review. Write docs/plans/<date>-<feature>-implementation.md following the real plan structure (header with Goal/Architecture/Tech Stack/Verification approach, then Task N sections each with Files/Implementation/Static Analysis/Verification/Commit). Write .resolve/plan/confidence.json with {\"needs_review\": true|false, \"reasons\": [...]}. Print the single line: plan_done"
   ];
 
-  // --- Phase 2.5: Judgment gate. This is NOT a rubber-stamp on every run --
-  // most runs are confident and skip straight to Implement. Only pipe in a
-  // human when the plan itself flags real ambiguity.
+  // --- Phase 2.5: Judgment gate. NOT a rubber-stamp on every run -- most
+  // well-specified plans are confident and skip straight to Implement. This
+  // mirrors the user's actual practice: rarely reviews the plan personally,
+  // but wants escalation when the plan itself is genuinely unsure.
   PlanConfidenceCheck [
     shape=parallelogram, label="Plan Confidence Check",
     tool_command="#!/bin/sh\nset -e\nneeds=$(python3 -c \"import json;print(json.load(open('.resolve/plan/confidence.json'))['needs_review'])\" 2>/dev/null || echo True)\nif [ \"$needs\" = \"True\" ]; then printf 'needs_review'; else printf 'confident'; fi"
@@ -66,7 +85,7 @@ digraph idea_to_shipped {
   PlanApproval [
     shape=hexagon, mode="freeform",
     label="Plan Approval (only when unsure)",
-    prompt="The plan flagged real ambiguity before implementation begins -- see .resolve/plan/confidence.json for reasons. Review .ai/plan.md. Type 'approve'/'yes'/'ok' to proceed as planned, or reply with corrections to send back for revision."
+    prompt="The plan flagged real ambiguity before implementation begins -- see .resolve/plan/confidence.json for reasons. Review docs/plans/<date>-<feature>-implementation.md. Type 'approve'/'yes'/'ok' to proceed as planned, or reply with corrections to send back for revision."
   ];
 
   CheckPlanApproval [
@@ -77,12 +96,13 @@ digraph idea_to_shipped {
   RevisePlan [
     shape=box, goal_gate=true, fidelity="full",
     label="Revise Plan",
-    prompt="Incorporate the human's corrections (${last_response}) into .ai/plan.md and .resolve/plan/confidence.json. Print the single line: plan_revised"
+    prompt="Incorporate the human's corrections (${last_response}) into docs/plans/<date>-<feature>-implementation.md and .resolve/plan/confidence.json. Print the single line: plan_revised"
   ];
 
-  // --- Phase 3: Build with verdict-gated fix loop (see subgraphs/build_loop.dot) ---
+  // --- Phase 3: Build with the real three-agent pipeline, verdict-gated
+  // fix loop (see subgraphs/build_loop.dot) ---
   Implement [
-    shape=folder, label="Implement (build + verify + fix loop)",
+    shape=folder, label="Implement (implementer -> verifier -> quality-reviewer, fix loop)",
     dot_file="subgraphs/build_loop.dot",
     outputs="build.verdict,build.fix_rounds_used"
   ];
@@ -111,7 +131,7 @@ digraph idea_to_shipped {
   Report [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Report",
-    prompt="Summarize the full run: design decisions (.resolve/design/design.md), fix rounds used (${build.fix_rounds_used}), PR (${delivery.pr_url}), merge (${delivery.merge_sha}), and deploy result (${deploy.result}). Print the single line: reported"
+    prompt="Summarize the full run: design decisions (docs/plans/<date>-<topic>-design.md), fix rounds used (${build.fix_rounds_used}), PR (${delivery.pr_url}), merge (${delivery.merge_sha}), and deploy result (${deploy.result}). Print the single line: reported"
   ];
 
   Start                -> Brainstorm;
