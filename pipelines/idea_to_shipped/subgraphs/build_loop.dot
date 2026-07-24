@@ -5,6 +5,14 @@
 // loop back to Implement). Modeled on amplifier-resolver-dot-graph's
 // develop.dot Ralph-loop pattern, mined from real fix-loop session arcs.
 //
+// NOT TDD. This is Verification Driven Development (VDD): human attention
+// is sacred, so every task proves itself with the CHEAPEST verification
+// that actually shows it works (static analysis, run it directly, curl,
+// browser, DTU/reality-check) -- not a reflexive "write a unit test."
+// VerifySpec applies the restless-old-brian lens: is it REAL, proven
+// end-to-end as a user would experience it -- proof over claims, plumbing
+// before polish, fail loud over silent fallbacks.
+//
 // Required context variables (injected by parent via graph attrs / $vars):
 //   $max_fix_rounds  - cap on fix iterations (default 3)
 //
@@ -20,20 +28,20 @@ digraph build_loop {
 
   Implement [
     shape=box, goal_gate=true, fidelity="full",
-    label="Implement Next Task",
-    prompt="Read .ai/plan.md. Implement the next unchecked [ ] task using TDD: write the failing test first, confirm it fails, then write minimal code to pass. Check the task off when green. Print the single line: implement_done"
+    label="Implement Next Task (VDD)",
+    prompt="Read .ai/plan.md. Implement the next unchecked [ ] task. This is Verification Driven Development, NOT TDD -- do not default to writing a unit test first. Use the verification method specified for this task in the plan (static analysis, direct execution, curl/HTTP, browser, or DTU) and run it for real: if you didn't run it, you haven't verified it. Check the task off only once its actual verification command has been run and passes. Print the single line: implement_done"
   ];
 
   VerifySpec [
     shape=box, goal_gate=true, fidelity="full",
-    label="Spec/Verify Review",
-    prompt="Review the implementation against .ai/plan.md and .ai/acceptance_criteria.md. Write .resolve/verify/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: verify_done"
+    label="Spec/Verify Review (restless-old-brian lens)",
+    prompt="Review the implementation against .ai/plan.md and .ai/acceptance_criteria.md using the restless-old-brian lens: is this REAL and proven end-to-end, the way a user would actually experience it -- not just 'the code exists' or 'a mock passed'? Demand proof over claims. Re-run each task's stated verification command yourself and confirm the actual output, don't trust a prior claim of success. Flag any silent fallback or swallowed error as a fail -- fail loud, don't hide problems. Write .resolve/verify/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: verify_done"
   ];
 
   QualityReview [
     shape=box, goal_gate=true, fidelity="full",
     label="Quality Review",
-    prompt="Review code quality: readability, error handling, test coverage, no dead code. Write .resolve/quality/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: quality_done"
+    prompt="Review code quality: readability, error handling, test coverage where tests are the right verification (library code), no dead code. Write .resolve/quality/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: quality_done"
   ];
 
   VerdictGate [
@@ -49,7 +57,7 @@ digraph build_loop {
   BuildFixTasks [
     shape=box, goal_gate=true, fidelity="full",
     label="Build Fix Tasks",
-    prompt="Read the verdict findings in .resolve/verify/verdict.json and .resolve/quality/verdict.json. Append new [ ] tasks to .ai/plan.md addressing each failure, most specific/actionable first. Print the single line: fix_tasks_built"
+    prompt="Read the verdict findings in .resolve/verify/verdict.json and .resolve/quality/verdict.json. Append new [ ] tasks to .ai/plan.md addressing each failure, most specific/actionable first, each with its own exact verification command. Print the single line: fix_tasks_built"
   ];
 
   MoreTasks [

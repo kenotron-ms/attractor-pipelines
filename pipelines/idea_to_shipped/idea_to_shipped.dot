@@ -5,12 +5,11 @@
 // fix loop -> PR -> merge gate -> deploy gate).
 //
 // Flow:
-//   Start -> Brainstorm -> Plan -> Implement(subgraph: build_loop.dot, loops
-//   internally on verdict fail) -> DeliverPR(subgraph) -> MergeGate(subgraph,
-//   human hexagon) -> DeployGate(subgraph, human hexagon) -> Report -> Exit
-//
-// 8 top-level nodes (2 pipeline anchors, 3 folder subgraphs, 3 box/tool
-// nodes).
+//   Start -> Brainstorm -> Plan -> PlanConfidenceCheck -> (confident: skip
+//   straight to Implement) | (needs_review: PlanApproval human gate -> revise
+//   or proceed) -> Implement(subgraph: build_loop.dot, loops internally on
+//   verdict fail) -> DeliverPR(subgraph) -> MergeGate(subgraph, human
+//   hexagon) -> DeployGate(subgraph, human hexagon) -> Report -> Exit
 //
 // Context inputs:
 //   $task              - the idea/problem statement kicking off the run
@@ -45,10 +44,40 @@ digraph idea_to_shipped {
   ];
 
   // --- Phase 2: Design -> bite-sized task plan (mirrors /plan-like-ken) ---
+  // NOT TDD. This is Verification Driven Development: pick the CHEAPEST
+  // verification that actually proves a task works (static analysis -> run
+  // it directly -> curl/HTTP -> browser -> DTU/reality-check), per the VDD
+  // hierarchy. A unit test that mocks everything proves the mock works, not
+  // the product.
   Plan [
     shape=box, goal_gate=true, fidelity="full",
-    label="Plan / Plan-like-ken",
-    prompt="Read .resolve/design/design.md. Break it into a bite-sized (2-5 min each) task list suitable for TDD-style execution. Write .ai/plan.md (task list) and .ai/acceptance_criteria.md (measurable success criteria per task). Print the single line: plan_done"
+    label="Plan / Plan-like-ken (VDD)",
+    prompt="Read .resolve/design/design.md. Break it into a bite-sized (2-5 min each) task list. This is Verification Driven Development, NOT TDD -- do not default every task to 'write a unit test'. For EACH task, pick the cheapest verification level that actually proves it works: (1) native static analysis (ruff/ty/tsc) -- always, zero cost; (2) run the code directly; (3) curl/HTTP against a running server for endpoints; (4) browser via playwright-cli for UI changes; (5) DTU/reality-check only when true isolation is needed. Unit tests are right for library code, not a universal default. Also self-assess your CONFIDENCE per task: mark needs_review=true only if the design leaves real ambiguity (an unresolved ordering/scope/interface decision) -- most well-specified designs should NOT need review. Write .ai/plan.md (task list, each task with its exact verification command and expected output) and .ai/acceptance_criteria.md (measurable success criteria per task). Write .resolve/plan/confidence.json with {\"needs_review\": true|false, \"reasons\": [...]}. Print the single line: plan_done"
+  ];
+
+  // --- Phase 2.5: Judgment gate. This is NOT a rubber-stamp on every run --
+  // most runs are confident and skip straight to Implement. Only pipe in a
+  // human when the plan itself flags real ambiguity.
+  PlanConfidenceCheck [
+    shape=parallelogram, label="Plan Confidence Check",
+    tool_command="#!/bin/sh\nset -e\nneeds=$(python3 -c \"import json;print(json.load(open('.resolve/plan/confidence.json'))['needs_review'])\" 2>/dev/null || echo True)\nif [ \"$needs\" = \"True\" ]; then printf 'needs_review'; else printf 'confident'; fi"
+  ];
+
+  PlanApproval [
+    shape=hexagon, mode="freeform",
+    label="Plan Approval (only when unsure)",
+    prompt="The plan flagged real ambiguity before implementation begins -- see .resolve/plan/confidence.json for reasons. Review .ai/plan.md. Type 'approve'/'yes'/'ok' to proceed as planned, or reply with corrections to send back for revision."
+  ];
+
+  CheckPlanApproval [
+    shape=parallelogram, label="Check Plan Approval",
+    tool_command="bash -c 'if echo \"$last_response\" | grep -iEq \"approve|\\byes\\b|\\bok\\b\"; then echo approved; else echo revise; fi'"
+  ];
+
+  RevisePlan [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Revise Plan",
+    prompt="Incorporate the human's corrections (${last_response}) into .ai/plan.md and .resolve/plan/confidence.json. Print the single line: plan_revised"
   ];
 
   // --- Phase 3: Build with verdict-gated fix loop (see subgraphs/build_loop.dot) ---
@@ -85,14 +114,20 @@ digraph idea_to_shipped {
     prompt="Summarize the full run: design decisions (.resolve/design/design.md), fix rounds used (${build.fix_rounds_used}), PR (${delivery.pr_url}), merge (${delivery.merge_sha}), and deploy result (${deploy.result}). Print the single line: reported"
   ];
 
-  Start      -> Brainstorm;
-  Brainstorm -> Plan;
-  Plan       -> Implement;
-  Implement  -> DeliverPR;
-  DeliverPR  -> MergeGate  [condition="context.delivery.result=opened", weight="2"];
-  DeliverPR  -> Report     [condition="outcome=fail"];
-  MergeGate  -> DeployGate [condition="context.delivery.merge_result=merged", weight="2"];
-  MergeGate  -> Report     [condition="context.delivery.merge_result=rejected"];
-  DeployGate -> Report;
-  Report     -> Exit;
+  Start                -> Brainstorm;
+  Brainstorm           -> Plan;
+  Plan                 -> PlanConfidenceCheck;
+  PlanConfidenceCheck  -> Implement     [condition="context.tool.last_line=confident", weight="2"];
+  PlanConfidenceCheck  -> PlanApproval  [condition="context.tool.last_line=needs_review"];
+  PlanApproval         -> CheckPlanApproval;
+  CheckPlanApproval    -> Implement     [condition="context.tool.last_line=approved", weight="2"];
+  CheckPlanApproval    -> RevisePlan    [condition="context.tool.last_line=revise"];
+  RevisePlan           -> PlanConfidenceCheck [loop_restart="true"];
+  Implement            -> DeliverPR;
+  DeliverPR            -> MergeGate  [condition="context.delivery.result=opened", weight="2"];
+  DeliverPR            -> Report     [condition="outcome=fail"];
+  MergeGate            -> DeployGate [condition="context.delivery.merge_result=merged", weight="2"];
+  MergeGate            -> Report     [condition="context.delivery.merge_result=rejected"];
+  DeployGate           -> Report;
+  Report               -> Exit;
 }
