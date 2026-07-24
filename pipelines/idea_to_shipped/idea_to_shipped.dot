@@ -22,12 +22,13 @@
 //   docs/plans/YYYY-MM-DD-<feature>-implementation.md  - plan doc (Plan)
 //
 // Context inputs:
-//   $task              - the idea/problem statement kicking off the run
+//   $design            - a design blurb from a prior /think-like-ken session (already brainstormed, NOT re-derived here)
+//   $task              - short task/feature name (used in $repo context, commit messages, etc.)
 //   $repo              - target repo slug (owner/name) for PR/merge/deploy
 //   $max_fix_rounds    - cap on build_loop fix iterations (default 3)
 //
 // Context outputs:
-//   brainstorm.design_doc   - path to the validated design written by Brainstorm
+//   design.design_doc       - path to the design doc written by AcceptDesign (from the $design blurb)
 //   plan.plan_doc           - path to the implementation plan written by Plan
 //   delivery.pr_url         - PR URL, set by DeliverPR subgraph
 //   delivery.merge_sha      - merge commit sha, set by MergeGate subgraph
@@ -46,18 +47,19 @@ digraph idea_to_shipped {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
-  // --- Phase 1: Idea -> validated design ---
-  // Real think-like-ken is INTERACTIVE: one question at a time, 2-3 approaches
-  // with tradeoffs, design presented in sections with a "Does this look right
-  // so far?" checkpoint after each, a 4-point self-review, then an adversarial
-  // spec review, then an explicit human approval gate before the design is
-  // considered done. A DOT box node is a single unattended turn, so this node
-  // compresses that entire dialogue into one pass -- it is NOT a faithful
-  // substitute for /think-like-ken, it is the closest unattended approximation.
-  Brainstorm [
-    shape=box, goal_gate=true, fidelity="full",
-    label="Brainstorm / Think-like-ken (compressed, unattended)",
-    prompt="Given the idea/problem statement in $task: explore intent, propose 2-3 approaches with tradeoffs, pick the strongest and apply YAGNI ruthlessly. There is no human here to answer questions one-at-a-time as think-like-ken normally does -- resolve every ambiguity yourself using best judgment and record each assumption explicitly as an 'Open question' in the doc. Cover architecture, components, data flow, error handling, and testing/verification strategy. Run your own 4-point self-review before finishing: no [TBD]/[TODO] placeholders, internal consistency, every item traces to $task (no scope creep), no vague terms like 'handle errors appropriately'. Write the design to docs/plans/<date>-<topic>-design.md matching the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions). Print the single line: brainstorm_done"
+  // --- Phase 1: Accept an already-brainstormed design ---
+  // /think-like-ken is HIGHLY INTERACTIVE (one question at a time, sectioned
+  // design presented with a "Does this look right so far?" checkpoint after
+  // each part, adversarial spec review, explicit human approval) -- that
+  // process fundamentally does not fit an unattended DOT box node, so this
+  // pipeline does NOT attempt to run it. Brainstorming happens BEFORE this
+  // pipeline is invoked, in a real /think-like-ken conversation. This
+  // pipeline simply accepts the resulting design as input: a blurb ($design)
+  // handed in at submission time.
+  AcceptDesign [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Accept Design (from prior /think-like-ken)",
+    prompt="You are given an already-validated design blurb in $design -- the output of a human's /think-like-ken session, done BEFORE this pipeline was invoked. Do NOT re-derive, re-explore, or second-guess the design. Simply write it as-is (light formatting only -- do not add content, do not fill gaps, do not invent an architecture it doesn't describe) to docs/plans/<date>-<topic>-design.md using the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions -- leave any section blank/'not specified' if $design doesn't cover it, do not fabricate). Print the single line: design_accepted"
   ];
 
   // --- Phase 2: Design -> implementation plan ---
@@ -134,8 +136,8 @@ digraph idea_to_shipped {
     prompt="Summarize the full run: design decisions (docs/plans/<date>-<topic>-design.md), fix rounds used (${build.fix_rounds_used}), PR (${delivery.pr_url}), merge (${delivery.merge_sha}), and deploy result (${deploy.result}). Print the single line: reported"
   ];
 
-  Start                -> Brainstorm;
-  Brainstorm           -> Plan;
+  Start                -> AcceptDesign;
+  AcceptDesign         -> Plan;
   Plan                 -> PlanConfidenceCheck;
   PlanConfidenceCheck  -> Implement     [condition="context.tool.last_line=confident", weight="2"];
   PlanConfidenceCheck  -> PlanApproval  [condition="context.tool.last_line=needs_review"];
