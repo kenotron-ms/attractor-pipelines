@@ -1,0 +1,106 @@
+// build_loop.dot
+//
+// Faithful DOT rendering of build-like-ken's real three-agent pipeline:
+// kenergy:implementer -> kenergy:verifier -> kenergy:quality-reviewer, run
+// per task, with a fix loop on FAIL. Modeled on amplifier-resolver-dot-graph's
+// develop.dot Ralph-loop pattern for the loop mechanics; the node PROMPTS
+// below are drawn near-verbatim from the real agent files
+// (kenergy/agents/implementer.md, verifier.md, quality-reviewer.md) and the
+// build-like-ken.md mode, not invented text.
+//
+// NOT TDD. Verification Driven Development, verbatim from build-like-ken.md:
+// "Human attention is the most sacred resource. Do not waste it on theater."
+// The question after every task is not "does a test pass?" -- it's "does
+// this actually work?" Unit tests are correct for LIBRARY code. For
+// everything else, run the real thing. A unit test that mocks the thing
+// being tested proves the mock works -- that is not verification.
+//
+// Required context variables (injected by parent via graph attrs / $vars):
+//   $max_fix_rounds  - cap on fix iterations (default 3)
+//
+// Context outputs (declared via `outputs=` on the folder node in the parent):
+//   build.verdict          - final "pass" | "exhausted"
+//   build.fix_rounds_used  - integer count of fix rounds consumed
+
+digraph build_loop {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // Faithful to kenergy:implementer -- see agents/implementer.md verbatim:
+  // "You follow Verification Driven Development: run real things, prove
+  // real behavior, document actual output." Steps: understand task -> run
+  // static analysis FIRST -> implement minimally -> verify with REAL
+  // execution at the specified level -> commit -> self-review checklist.
+  Implement [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Implementer (VDD, not TDD)",
+    prompt="Read docs/plans/<date>-<feature>-implementation.md. Take the next Task N not yet marked complete. You follow Verification Driven Development: run real things, prove real behavior, document actual output. Steps: (1) understand the task -- files to touch, the verification method the plan specifies; (2) run static analysis FIRST (ruff/ty/tsc/oxlint -- whatever applies) and fix any pre-existing issues; (3) implement exactly what's specified -- no extra features, no 'while I'm here' improvements, no optimization unless required; (4) run static analysis again, then verify with REAL execution at the level the plan specified -- if it says curl, curl it; if playwright-cli, open the browser; if run the script, run it. Do NOT substitute a unit test unless the plan explicitly says so or this is library code. Document the ACTUAL output you saw, not a summary. (5) Commit atomically: 'feat: [what this does]'. Append your result to docs/plans/<feature>-status.md under this task's heading with the exact static-analysis output and the exact verification command + output. First line of your result must be STATUS: DONE, DONE_WITH_CONCERNS, NEEDS_CONTEXT, or BLOCKED. If NEEDS_CONTEXT or BLOCKED, do not guess -- stop and report the specific question. Print the single line: implement_done"
+  ];
+
+  // Faithful to kenergy:verifier -- see agents/verifier.md verbatim: "Spec
+  // compliance without real execution is a half-pass at best." Two required
+  // checks: (1) spec compliance -- read the actual code, don't trust the
+  // implementer's report; (2) real execution verification -- the VDD check.
+  // "FAIL if the only verification was a unit test that mocks the
+  // dependencies for non-library code. That proves the mock works, not the
+  // product." Also channels restless-old-brian's lens explicitly, since
+  // that's the real review voice used to drive this check: demand proof
+  // over claims, re-run the verification yourself, fail loud on any silent
+  // fallback or swallowed error rather than call it passing.
+  VerifySpec [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Verifier (spec compliance + real execution, restless-old-brian lens)",
+    prompt="You verify implementations against their specifications AND confirm real execution was performed. Spec compliance without real execution is a half-pass at best. Do NOT trust the implementer's report -- if the work looks suspiciously clean, look harder, read the actual code. Check 1, Spec Compliance: for each requirement in this task's spec from docs/plans/<date>-<feature>-implementation.md -- is it implemented? does behavior match exactly? any extras added beyond spec? Check 2, Real Execution: was static analysis run and output documented? was the verification method appropriate to the code type (API -> curl/HTTP against a running server; UI -> browser, actual screenshot/visual confirmation; script/CLI -> actually executed, output documented; library code -> pytest acceptable)? is the actual output documented, not just 'it passed'? does it match what the plan expected? FAIL if the only verification was a unit test mocking dependencies for non-library code -- that proves the mock works, not the product. Also apply the restless-old-brian lens: is this REAL and proven end-to-end the way a user would actually experience it? Demand proof over claims -- re-run the stated verification command yourself and confirm the actual output rather than trusting a prior claim. Flag any silent fallback or swallowed error as FAIL -- fail loud, never hide a problem. Write .resolve/verify/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: verify_done"
+  ];
+
+  // Faithful to kenergy:quality-reviewer -- see agents/quality-reviewer.md
+  // verbatim: runs AFTER verification is confirmed, does NOT re-check spec
+  // compliance or real execution (verifier's job). Reviews: code clarity,
+  // error handling, verification coverage appropriateness, design quality
+  // (single responsibility, no premature optimization), security where
+  // applicable, maintainability (DRY, no magic values), architecture
+  // compliance (YAGNI -- flag anything added speculatively, file
+  // decomposition, coupling, over-engineering).
+  QualityReview [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Quality Reviewer",
+    prompt="You review code quality AFTER verification has been confirmed -- not whether it matches requirements or whether it works (verifier's job). Run static analysis; a failure here is an automatic FAIL regardless of other findings. Review: code clarity (clear names, appropriate comments, logical organization); error handling (no swallowed exceptions, clear messages); verification coverage (was the chosen method appropriate for the code type -- real execution for non-library code, not mocks all the way down); design quality (single responsibility, no premature optimization, no unnecessary complexity); security where applicable; maintainability (DRY, no magic numbers/strings); architecture compliance -- YAGNI: flag any code added speculatively and not required by the task spec, file decomposition, coupling between modules, over-engineering beyond what the problem requires. Rate findings Critical (must fix) / Important (should fix) / Suggestion (nice to have). Write .resolve/quality/verdict.json with {\"verdict\": \"pass\"|\"fail\", \"findings\": [...]}. Print the single line: quality_done"
+  ];
+
+  VerdictGate [
+    shape=parallelogram, label="Verdict Gate",
+    tool_command="#!/bin/sh\nset -e\nv1=$(python3 -c \"import json;print(json.load(open('.resolve/verify/verdict.json'))['verdict'])\" 2>/dev/null || echo fail)\nv2=$(python3 -c \"import json;print(json.load(open('.resolve/quality/verdict.json'))['verdict'])\" 2>/dev/null || echo fail)\nif [ \"$v1\" = \"pass\" ] && [ \"$v2\" = \"pass\" ]; then printf 'pass'; else printf 'fail'; fi"
+  ];
+
+  // Mirrors build-like-ken.md's review-loop-limit rule: "After 3 review
+  // cycles without convergence -- escalate to user."
+  CheckFixRounds [
+    shape=parallelogram, label="Check Fix Rounds",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-3}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
+  ];
+
+  BuildFixTasks [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Build Fix Tasks",
+    prompt="Read the verdict findings in .resolve/verify/verdict.json and .resolve/quality/verdict.json. Append new Task entries to docs/plans/<date>-<feature>-implementation.md addressing each failure -- most specific/actionable first -- each with its own exact static analysis command and exact verification command per the VDD hierarchy (never a generic 'test it'). Print the single line: fix_tasks_built"
+  ];
+
+  MoreTasks [
+    shape=parallelogram, label="More Tasks Pending?",
+    tool_command="#!/bin/sh\nset -e\nif grep -qE '^### Task' docs/plans/*-implementation.md 2>/dev/null && ! grep -q 'ALL_TASKS_COMPLETE' docs/plans/*-status.md 2>/dev/null; then printf 'has_tasks'; else printf 'no_tasks'; fi"
+  ];
+
+  Start          -> Implement;
+  Implement      -> VerifySpec;
+  VerifySpec     -> QualityReview;
+  QualityReview  -> VerdictGate;
+  VerdictGate    -> MoreTasks       [condition="context.tool.last_line=pass", label="pass", weight="2"];
+  VerdictGate    -> CheckFixRounds  [condition="context.tool.last_line=fail", label="fail"];
+  CheckFixRounds -> BuildFixTasks   [condition="context.tool.last_line=fix_ok",       label="fix round"];
+  CheckFixRounds -> Exit            [condition="context.tool.last_line=fix_exhausted", label="exhausted"];
+  BuildFixTasks  -> Implement       [loop_restart="true", label="fix loop"];
+  MoreTasks      -> Implement       [condition="context.tool.last_line=has_tasks", loop_restart="true", label="next task"];
+  MoreTasks      -> Exit            [condition="context.tool.last_line=no_tasks"];
+}

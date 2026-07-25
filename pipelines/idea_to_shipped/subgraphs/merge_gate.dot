@@ -1,0 +1,68 @@
+// merge_gate.dot
+//
+// Human freeform approval gate before merge, then rebase + test + merge
+// with an outcome=fail fallback. Modeled on deliver_merge.dot's rebase/
+// test/merge sequence and deliver_pr.dot's freeform hexagon gate pattern.
+//
+// Required context variables: ${delivery.pr_url} (from deliver_pr.dot)
+// Context outputs: delivery.merge_sha, delivery.merge_result ("merged"|"rejected"|"failed")
+
+digraph merge_gate {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  HumanApproval [
+    shape=hexagon, mode="freeform",
+    label="Human Merge Approval",
+    prompt="A pull request is ready for review.\n\nPR URL: ${delivery.pr_url}\n\nType 'approve'/'lgtm'/'yes'/'ok'/'merge' to approve, or 'reject'/'no' to reject."
+  ];
+
+  CheckHumanResponse [
+    shape=parallelogram, label="Check Human Response",
+    tool_command="bash -c 'if echo \"$last_response\" | grep -iEq \"approve|lgtm|\\byes\\b|\\bok\\b|merge\"; then echo approved; else echo rejected; fi'"
+  ];
+
+  RebaseTest [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Rebase + Test",
+    prompt="Rebase the PR branch onto the latest default branch, resolve any conflicts, and run the full test suite. Print rc_pass if all tests pass after rebase, otherwise print rc_fail as the single last line."
+  ];
+
+  Merge [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Merge",
+    prompt="Merge the PR (squash or merge commit per repo convention). Write the merge commit sha to .resolve/delivery/merge_sha.txt. Print {\"merge_sha\": \"<sha>\"} as JSON."
+  ];
+
+  ExtractMergeSha [
+    shape=parallelogram, label="Extract Merge SHA",
+    tool_command="#!/bin/sh\nset -e\nsha=$(cat .resolve/delivery/merge_sha.txt)\nprintf '{\"delivery.merge_sha\": \"%s\", \"delivery.merge_result\": \"merged\"}' \"$sha\"",
+    parse_json="true"
+  ];
+
+  Rejected [
+    shape=parallelogram, label="Mark Rejected",
+    tool_command="printf '{\"delivery.merge_result\": \"rejected\"}'",
+    parse_json="true"
+  ];
+
+  MergeFailed [
+    shape=parallelogram, label="Mark Merge Failed",
+    tool_command="printf '{\"delivery.merge_result\": \"failed\"}'",
+    parse_json="true"
+  ];
+
+  Start              -> HumanApproval;
+  HumanApproval      -> CheckHumanResponse;
+  CheckHumanResponse -> RebaseTest [condition="context.tool.last_line=approved", weight="2"];
+  CheckHumanResponse -> Rejected   [condition="context.tool.last_line=rejected"];
+  RebaseTest         -> Merge      [condition="context.tool.last_line=rc_pass", weight="2"];
+  RebaseTest         -> MergeFailed [condition="context.tool.last_line=rc_fail"];
+  RebaseTest         -> MergeFailed [condition="outcome=fail"];
+  Merge              -> ExtractMergeSha;
+  ExtractMergeSha    -> Exit;
+  Rejected           -> Exit;
+  MergeFailed        -> Exit;
+}

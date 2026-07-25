@@ -1,0 +1,155 @@
+// idea_to_shipped.dot
+//
+// Sample pipeline: full "idea to shipped" SDLC arc, mined from real
+// successful Amplifier Resolve session histories AND aligned faithfully to
+// the actual kenergy mode/agent prompts (think-like-ken, plan-like-ken,
+// build-like-ken, kenergy:implementer/verifier/quality-reviewer). Where this
+// pipeline's node prompt differs from the mode's real text, it is a
+// deliberate compression for a single autonomous LLM turn (the modes are
+// designed for interactive human dialogue; a DOT box node runs once,
+// unattended) -- called out inline.
+//
+// Flow:
+//   Start -> Brainstorm -> Plan -> PlanConfidenceCheck -> (confident: skip
+//   straight to Implement) | (needs_review: PlanApproval human gate -> revise
+//   or proceed) -> Implement(subgraph: build_loop.dot, runs the real
+//   implementer -> verifier -> quality-reviewer pipeline per task, loops
+//   internally on FAIL) -> DeliverPR(subgraph) -> MergeGate(subgraph, human
+//   hexagon) -> DeployGate(subgraph, human hexagon) -> Report -> Exit
+//
+// File conventions (matched to the real kenergy modes, NOT invented paths):
+//   docs/plans/YYYY-MM-DD-<topic>-design.md            - design doc (Brainstorm)
+//   docs/plans/YYYY-MM-DD-<feature>-implementation.md  - plan doc (Plan)
+//
+// Context inputs:
+//   $design            - a design blurb from a prior /think-like-ken session (already brainstormed, NOT re-derived here)
+//   $task              - short task/feature name (used in $repo context, commit messages, etc.)
+//   $repo              - target repo slug (owner/name) for PR/merge/deploy
+//   $max_fix_rounds    - cap on build_loop fix iterations (default 3)
+//
+// Context outputs:
+//   design.design_doc       - path to the design doc written by AcceptDesign (from the $design blurb)
+//   plan.plan_doc           - path to the implementation plan written by Plan
+//   delivery.pr_url         - PR URL, set by DeliverPR subgraph
+//   delivery.merge_sha      - merge commit sha, set by MergeGate subgraph
+//   deploy.result           - deploy outcome, set by DeployGate subgraph
+
+digraph idea_to_shipped {
+  graph [
+    label="Idea to Shipped -- Full SDLC Pipeline",
+    goal="$task",
+    rankdir=LR,
+    default_max_retry=2,
+    default_fidelity="summary:high",
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; }"
+  ];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // --- Phase 1: Accept an already-brainstormed design ---
+  // /think-like-ken is HIGHLY INTERACTIVE (one question at a time, sectioned
+  // design presented with a "Does this look right so far?" checkpoint after
+  // each part, adversarial spec review, explicit human approval) -- that
+  // process fundamentally does not fit an unattended DOT box node, so this
+  // pipeline does NOT attempt to run it. Brainstorming happens BEFORE this
+  // pipeline is invoked, in a real /think-like-ken conversation. This
+  // pipeline simply accepts the resulting design as input: a blurb ($design)
+  // handed in at submission time.
+  AcceptDesign [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Accept Design (from prior /think-like-ken)",
+    prompt="You are given an already-validated design blurb in $design -- the output of a human's /think-like-ken session, done BEFORE this pipeline was invoked. Do NOT re-derive, re-explore, or second-guess the design. Simply write it as-is (light formatting only -- do not add content, do not fill gaps, do not invent an architecture it doesn't describe) to docs/plans/<date>-<topic>-design.md using the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions -- leave any section blank/'not specified' if $design doesn't cover it, do not fabricate). Print the single line: design_accepted"
+  ];
+
+  // --- Phase 2: Design -> implementation plan ---
+  // This IS Verification Driven Development, matching plan-like-ken.md
+  // verbatim: "Human attention is the most sacred resource. Do not waste it."
+  // NOT TDD. The question is never "does a test pass?" -- it's "does this
+  // actually work?" Every task gets the CHEAPEST verification level that
+  // actually proves it, chosen from the real hierarchy below -- not a
+  // reflexive "write a unit test."
+  Plan [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Plan / Plan-like-ken (Verification Driven Development)",
+    prompt="Read docs/plans/<date>-<topic>-design.md. Core philosophy, verbatim from plan-like-ken: human attention is the most sacred resource, do not waste it. This is Verification Driven Development, NOT TDD. The question for every task is never 'does a test pass?' -- it's 'does this actually work?' Unit tests are the right verification method for LIBRARIES; they are not a universal requirement. A unit test that mocks everything and passes proves nothing about whether the product works. The verification hierarchy -- pick the CHEAPEST one that proves the claim: (1) native static analysis (ruff/ty/uv/oxc/oxlint/tsc) -- always, zero cost, instant; (2) run the code directly -- anything with a main, a script, a CLI; (3) curl/HTTP call against a running server -- API endpoints; (4) browser via playwright-cli/browser-tester -- UI changes, see them light up for real; (5) Reality Check/DTU -- only when true isolation is needed. If you didn't run it, you didn't verify it. Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each, and for EACH task specify: exact file paths, complete copy-pasteable implementation, the exact static analysis command (always first), and the exact verification command at the right level with expected output -- never 'test it manually', never leave verification unspecified. Also self-assess CONFIDENCE: mark needs_review=true only if the design leaves genuine unresolved ambiguity (ordering, scope boundary, an interface not fully pinned down) -- a well-specified design should NOT need review. Write docs/plans/<date>-<feature>-implementation.md following the real plan structure (header with Goal/Architecture/Tech Stack/Verification approach, then Task N sections each with Files/Implementation/Static Analysis/Verification/Commit). Write .resolve/plan/confidence.json with {\"needs_review\": true|false, \"reasons\": [...]}. Print the single line: plan_done"
+  ];
+
+  // --- Phase 2.5: Judgment gate. NOT a rubber-stamp on every run -- most
+  // well-specified plans are confident and skip straight to Implement. This
+  // mirrors the user's actual practice: rarely reviews the plan personally,
+  // but wants escalation when the plan itself is genuinely unsure.
+  PlanConfidenceCheck [
+    shape=parallelogram, label="Plan Confidence Check",
+    tool_command="#!/bin/sh\nset -e\nneeds=$(python3 -c \"import json;print(json.load(open('.resolve/plan/confidence.json'))['needs_review'])\" 2>/dev/null || echo True)\nif [ \"$needs\" = \"True\" ]; then printf 'needs_review'; else printf 'confident'; fi"
+  ];
+
+  PlanApproval [
+    shape=hexagon, mode="freeform",
+    label="Plan Approval (only when unsure)",
+    prompt="The plan flagged real ambiguity before implementation begins -- see .resolve/plan/confidence.json for reasons. Review docs/plans/<date>-<feature>-implementation.md. Type 'approve'/'yes'/'ok' to proceed as planned, or reply with corrections to send back for revision."
+  ];
+
+  CheckPlanApproval [
+    shape=parallelogram, label="Check Plan Approval",
+    tool_command="bash -c 'if echo \"$last_response\" | grep -iEq \"approve|\\byes\\b|\\bok\\b\"; then echo approved; else echo revise; fi'"
+  ];
+
+  RevisePlan [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Revise Plan",
+    prompt="Incorporate the human's corrections (${last_response}) into docs/plans/<date>-<feature>-implementation.md and .resolve/plan/confidence.json. Print the single line: plan_revised"
+  ];
+
+  // --- Phase 3: Build with the real three-agent pipeline, verdict-gated
+  // fix loop (see subgraphs/build_loop.dot) ---
+  Implement [
+    shape=folder, label="Implement (implementer -> verifier -> quality-reviewer, fix loop)",
+    dot_file="subgraphs/build_loop.dot",
+    outputs="build.verdict,build.fix_rounds_used"
+  ];
+
+  // --- Phase 4: Open PR (see subgraphs/deliver_pr.dot) ---
+  DeliverPR [
+    shape=folder, label="Deliver PR",
+    dot_file="subgraphs/deliver_pr.dot",
+    outputs="delivery.pr_url,delivery.result"
+  ];
+
+  // --- Phase 5: Human merge gate + merge (see subgraphs/merge_gate.dot) ---
+  MergeGate [
+    shape=folder, label="Merge Gate",
+    dot_file="subgraphs/merge_gate.dot",
+    outputs="delivery.merge_sha,delivery.merge_result"
+  ];
+
+  // --- Phase 6: Human deploy gate + deploy (see subgraphs/deploy_gate.dot) ---
+  DeployGate [
+    shape=folder, label="Deploy Gate",
+    dot_file="subgraphs/deploy_gate.dot",
+    outputs="deploy.result"
+  ];
+
+  Report [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Report",
+    prompt="Summarize the full run: design decisions (docs/plans/<date>-<topic>-design.md), fix rounds used (${build.fix_rounds_used}), PR (${delivery.pr_url}), merge (${delivery.merge_sha}), and deploy result (${deploy.result}). Print the single line: reported"
+  ];
+
+  Start                -> AcceptDesign;
+  AcceptDesign         -> Plan;
+  Plan                 -> PlanConfidenceCheck;
+  PlanConfidenceCheck  -> Implement     [condition="context.tool.last_line=confident", weight="2"];
+  PlanConfidenceCheck  -> PlanApproval  [condition="context.tool.last_line=needs_review"];
+  PlanApproval         -> CheckPlanApproval;
+  CheckPlanApproval    -> Implement     [condition="context.tool.last_line=approved", weight="2"];
+  CheckPlanApproval    -> RevisePlan    [condition="context.tool.last_line=revise"];
+  RevisePlan           -> PlanConfidenceCheck [loop_restart="true"];
+  Implement            -> DeliverPR;
+  DeliverPR            -> MergeGate  [condition="context.delivery.result=opened", weight="2"];
+  DeliverPR            -> Report     [condition="outcome=fail"];
+  MergeGate            -> DeployGate [condition="context.delivery.merge_result=merged", weight="2"];
+  MergeGate            -> Report     [condition="context.delivery.merge_result=rejected"];
+  DeployGate           -> Report;
+  Report               -> Exit;
+}

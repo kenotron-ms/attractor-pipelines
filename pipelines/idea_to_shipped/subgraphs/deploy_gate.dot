@@ -1,0 +1,64 @@
+// deploy_gate.dot
+//
+// Multiple-choice human deploy gate (production / staging / hold), then
+// delegated deploy execution. Modeled on deliver_human_decides.dot's
+// multi-choice hexagon pattern -- note edges out of a multi-choice hexagon
+// MUST stay unconditional (no `condition=`) so the human's button click has
+// something to route on.
+//
+// Required context variables: ${delivery.merge_sha} (from merge_gate.dot)
+// Context outputs: deploy.result ("deployed_prod"|"deployed_staging"|"held")
+
+digraph deploy_gate {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  DeployDecision [
+    shape=hexagon,
+    label="Deploy Decision",
+    prompt="Merged commit ${delivery.merge_sha} is ready to deploy -- choose an action.",
+    description="${delivery.pr_url}"
+  ];
+
+  DeployProd [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Deploy to Production",
+    prompt="Deploy merged commit ${delivery.merge_sha} to production following this repo's standard deploy procedure. Print the single line: deployed_prod"
+  ];
+
+  DeployStaging [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Deploy to Staging",
+    prompt="Deploy merged commit ${delivery.merge_sha} to the staging environment. Print the single line: deployed_staging"
+  ];
+
+  Hold [
+    shape=parallelogram, label="Hold",
+    tool_command="printf '{\"deploy.result\": \"held\"}'",
+    parse_json="true"
+  ];
+
+  MarkProdDone [
+    shape=parallelogram, label="Mark Prod Deployed",
+    tool_command="printf '{\"deploy.result\": \"deployed_prod\"}'",
+    parse_json="true"
+  ];
+
+  MarkStagingDone [
+    shape=parallelogram, label="Mark Staging Deployed",
+    tool_command="printf '{\"deploy.result\": \"deployed_staging\"}'",
+    parse_json="true"
+  ];
+
+  Start          -> DeployDecision;
+  DeployDecision -> DeployProd    [label="[P] Deploy to production"];
+  DeployDecision -> DeployStaging [label="[S] Deploy to staging"];
+  DeployDecision -> Hold          [label="[H] Hold"];
+  DeployProd     -> MarkProdDone;
+  DeployStaging  -> MarkStagingDone;
+  MarkProdDone   -> Exit;
+  MarkStagingDone -> Exit;
+  Hold           -> Exit;
+}
