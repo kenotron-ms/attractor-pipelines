@@ -35,7 +35,7 @@ digraph deliver_pr {
 
   ExtractPRUrl [
     shape=parallelogram, label="Extract PR URL",
-    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
+    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\", \"delivery.result\": \"opened\"}' \"$url\"",
     parse_json="true"
   ];
 
