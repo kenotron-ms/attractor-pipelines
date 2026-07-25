@@ -15,7 +15,14 @@ digraph deliver_pr {
   CommitPush [
     shape=box, goal_gate=true, fidelity="full",
     label="Commit + Push",
-    prompt="Stage all changes, write a conventional commit message summarizing the work (reference .resolve/design/design.md and .ai/plan.md for context), commit, and push the current branch to origin. Print the single line: pushed"
+    prompt="Stage all changes, write a conventional commit message summarizing the work (reference .resolve/design/design.md and .ai/plan.md for context), commit, and push the current branch to origin. After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: pushed"
+  ];
+
+  CommitPush -> CheckPush;
+
+  CheckPush [
+    shape=parallelogram, label="Check Push",
+    tool_command="#!/bin/sh\nset -e\nif [ -f .resolve/delivery/push_status.txt ] && tail -1 .resolve/delivery/push_status.txt | grep -q pushed; then\n  printf 'pushed'\nelse\n  printf 'push_failed'\nfi"
   ];
 
   OpenPR [
@@ -32,9 +39,9 @@ digraph deliver_pr {
     parse_json="true"
   ];
 
-  Start      -> CommitPush;
-  CommitPush -> OpenPR      [condition="context.tool.last_line=pushed", weight="2"];
-  CommitPush -> Failed      [condition="outcome=fail"];
+  Start     -> CommitPush;
+  CheckPush -> OpenPR  [condition="context.tool.last_line=pushed", weight="2"];
+  CheckPush -> Failed  [condition="context.tool.last_line=push_failed"];
   ExtractPRUrl -> Exit;
 
   Failed [
