@@ -79,3 +79,29 @@ Point the resolver at it via:
 ```
 git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/idea_to_shipped/idea_to_shipped.dot
 ```
+
+## Sample: exhaustive PR review pipeline
+
+`pipelines/pr-review-exhaustive.dot` — a thread-isolated, five-lane pull
+request review pipeline, ported from
+[`microsoft/amplifier-app-actions`](https://github.com/microsoft/amplifier-app-actions)
+and reworked to run self-contained on this repo's engine. Five reviewer lanes
+(correctness, architecture, patterns, tests, pedantic) each run on their own
+`thread_id` (fresh LLM context), then a merge node deduplicates/prioritizes, an
+adversarial quality gate (`goal_gate` with a `retry_target` loop) checks the
+synthesis, and a final node posts one inline GitHub PR review plus labels — all
+via plain `curl`/`git` (only an anthropic provider, a bash tool, and `GH_TOKEN`
+are required).
+
+Like `idea_to_shipped`, this one is meant to be read and adapted. See
+[`pipelines/pr-review-exhaustive.md`](pipelines/pr-review-exhaustive.md) for the
+full walkthrough, runtime assumptions, and the intentionally-omitted broken
+"Path B" convergence branch. A ready-to-use `pull_request` workflow (never
+`pull_request_target`) lives at
+[`.github/workflows/pr-review-exhaustive.yml`](.github/workflows/pr-review-exhaustive.yml).
+
+Point the resolver at it via:
+
+```
+git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive.dot
+```

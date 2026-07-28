@@ -1,0 +1,54 @@
+# Exhaustive PR review — reference workflow for pipelines/pr-review-exhaustive.dot
+#
+# Runs the 5-lane exhaustive PR review sample from this repo
+# (pipelines/pr-review-exhaustive.dot): 5 thread-isolated reviewer lanes
+# (correctness, architecture, patterns, tests, pedantic), each with a fresh LLM
+# context, then a merge node, an adversarial quality gate, and a single inline
+# GitHub PR review (Files Changed tab) plus labels.
+#
+# RUNTIME: this workflow uses microsoft/amplifier-app-actions@main purely as the
+# GitHub Actions RUNNER for the loop-pipeline / attractor engine — the same
+# engine amplifier-resolver-dot-graph drives. `attractor_source` points at this
+# repo's .dot over git+https, so nothing is copied. The .dot itself is
+# self-contained: it only needs an anthropic provider, a bash tool, and
+# GH_TOKEN — it does NOT depend on any amplifier-app-actions custom bundle
+# profile or github_* tool.
+#
+# SECURITY: NEVER change this to pull_request_target. pull_request_target runs
+# with write permissions in the *base* branch context and can leak secrets to
+# untrusted fork code. Use pull_request only. See:
+# https://securitylab.github.com/research/github-actions-preventing-pwn-requests/
+#
+# Prerequisites:
+#   - Set the ANTHROPIC_API_KEY repository secret (provider auth).
+#   - GH_TOKEN is the built-in ${{ github.token }} — no extra secret needed for
+#     same-repo PRs. Fork PRs get a read-only token, so review posting/labels
+#     will be skipped for forks unless you provide a token with write scope.
+
+name: PR Review (Exhaustive)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: microsoft/amplifier-app-actions@main
+        with:
+          # Fetch the sample pipeline straight from this repo — no local copy.
+          attractor_source: git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive.dot
+        env:
+          # Provider auth for the anthropic model set in the graph's model_stylesheet.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Used directly by the curl/git commands inside the pipeline nodes.
+          GH_TOKEN: ${{ github.token }}
