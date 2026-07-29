@@ -7,14 +7,16 @@
 //   - NO PlanConfidenceCheck / PlanApproval human gate. Plan always flows
 //     straight into Implement. If the plan is under-specified, that surfaces
 //     as implementation friction, not an up-front review step nobody uses.
-//   - ONE combined Implement step plus an independent SelfEvaluate step
-//     instead of the three-agent implementer -> verifier -> quality-reviewer
-//     pipeline in build_loop.dot -- see subgraphs/build_verify.dot.
-//   - Completion is gated by RUBRIC ACHIEVEMENT, not a round count. Plan
-//     (below) writes a concrete, checkable rubric to .resolve/plan/rubric.json;
-//     SelfEvaluate independently checks every criterion against real
-//     evidence before the loop is allowed to exit. A round counter still
-//     exists in build_verify.dot as a safety BACKSTOP against a genuinely
+//   - ONE combined Implement step plus an independent SelfEvaluate (judge)
+//     step instead of the three-agent implementer -> verifier ->
+//     quality-reviewer pipeline in build_loop.dot -- see
+//     subgraphs/build_verify.dot.
+//   - Completion is gated by RUBRIC ACHIEVEMENT, not a round count, and the
+//     rubric itself follows the weighted, evidence-based methodology in
+//     https://github.com/microsoft/amplifier-bundle-evaluation/blob/main/context/methodology/rubric-design.md
+//     -- see the Plan node below and subgraphs/build_verify.dot's header
+//     for how that maps onto this pipeline. A round counter still exists
+//     in build_verify.dot as a safety BACKSTOP against a genuinely
 //     non-convergent loop (default 2 rounds) -- it is not how "done" is
 //     decided, and if it trips the pipeline reports failure honestly
 //     (build.verdict=escalated) rather than silently declaring success.
@@ -31,11 +33,20 @@
 // (rather than inlined here) is what keeps the rubric-driven exit
 // condition legible in one place and keeps this top-level graph short.
 //
-// Verification Driven Development, but with a NARROWER, prescriptive
-// hierarchy than idea_to_shipped's five-tier VDD ladder (native static
-// analysis / run directly / curl / browser / Reality-Check). Plan assigns
-// each task's rubric criterion ONE of exactly three verification tiers,
-// in this order of preference:
+// PLAN LIKE KEN: the Plan node below is written in the spirit of
+// plan-like-ken -- "human attention is the most sacred resource, do not
+// waste it" -- extended to the rubric itself. A rubric that only checks
+// whether files exist and commands exit 0 is dead weight: modern agents
+// clear that bar by default. The rubric has to say something about the
+// difference between "technically works" and "a user would actually be
+// satisfied with this" -- so criteria are written and judged from a USER's
+// vantage point (does this behave the way someone using the feature would
+// expect?), not an engineer's checklist (did the file get written?).
+//
+// Verification Driven Development still supplies the EVIDENCE-GATHERING
+// method underneath the rubric -- Plan assigns each task ONE of exactly
+// three verification tiers (narrower than idea_to_shipped's five-tier
+// ladder), in this order of preference:
 //
 //   1. Unit tests (pytest / vitest / whatever the repo already uses) for
 //      LIBRARY code -- pure functions, data transforms, business logic with
@@ -51,6 +62,10 @@
 //      behavior), visual layout truth. This tier should be the EXCEPTION,
 //      not the default -- most tasks should resolve at tier 1 or 2.
 //
+// These tiers feed the rubric's evidence-gathering "steps" (what to run
+// before judging), but the rubric's criteria themselves ask whether a user
+// would be satisfied, not just whether the command exited 0.
+//
 // Context inputs:
 //   $design            - a design blurb from a prior /think-like-ken session
 //   $task              - short task/feature name
@@ -62,14 +77,16 @@
 // Context outputs:
 //   design.design_doc     - path to the design doc written by AcceptDesign
 //   plan.plan_doc         - path to the implementation plan written by Plan
+//   plan.rubric           - path to the rubric written by Plan (.resolve/plan/rubric.json)
 //   build.verdict         - final "rubric_met" | "escalated" (from build_verify.dot)
 //   build.fix_rounds_used - integer count of fix rounds consumed
+//   build.rubric_score    - final weighted score (0.0-1.0) achieved
 //   delivery.pr_url       - PR URL, set by DeliverPR subgraph
 //   delivery.result       - "opened" | "failed"
 
 digraph idea_to_pr {
   graph [
-    label="Idea to PR -- Lite (VDD, no plan-approval gate, rubric-gated build)",
+    label="Idea to PR -- Lite (VDD evidence + weighted user-facing rubric, no plan-approval gate)",
     goal="$task",
     rankdir=LR,
     default_max_retry=2,
@@ -87,21 +104,23 @@ digraph idea_to_pr {
     prompt="You are given an already-validated design blurb in $design -- the output of a human's /think-like-ken session, done BEFORE this pipeline was invoked. Do NOT re-derive, re-explore, or second-guess the design. Simply write it as-is (light formatting only) to docs/plans/<date>-<topic>-design.md using the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions -- leave any section blank/'not specified' if $design doesn't cover it, do not fabricate). Print the single line: design_accepted"
   ];
 
-  // --- Phase 2: Plan, with the NARROWER three-tier VDD verification hierarchy,
-  // PLUS an explicit, checkable rubric -- this is what build_verify.dot's
-  // SelfEvaluate gates completion against instead of a round count. ---
+  // --- Phase 2: Plan Like Ken -- three-tier VDD evidence hierarchy for HOW
+  // to gather proof, PLUS a weighted, user-facing rubric (points, CRITICAL
+  // markers, observable-from-a-user's-seat criteria) for WHAT counts as
+  // actually done. This rubric -- not a round count -- is what
+  // build_verify.dot's SelfEvaluate judges against. ---
   Plan [
     shape=box, goal_gate=true, fidelity="full",
-    label="Plan (three-tier VDD + rubric authoring)",
-    prompt="Read docs/plans/<date>-<topic>-design.md. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each. For EACH task, classify it and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. Use the repo's existing unit test runner (pytest, vitest, etc). (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state management, anything touching a simulated DOM but not needing a real browser engine (vitest/jest with environment=jsdom or equivalent). This should be the default for anything involving UI logic that isn't tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for the genuinely hardest-to-verify things: focus management, keyboard navigation, accessibility (ARIA roles/labels, screen reader behavior), visual layout truth. This tier is the EXCEPTION -- most tasks should resolve at tier 1 or 2; do not reach for a real browser just because the code touches HTML. For EACH task specify: exact file paths, complete copy-pasteable implementation, the exact static analysis command (always run first, e.g. ruff/ty/tsc/oxlint), which of the three tiers applies and why, and the exact verification command with expected output. Never leave verification unspecified, never say 'test it manually'. Write docs/plans/<date>-<feature>-implementation.md following the standard plan structure (header with Goal/Architecture/Tech Stack/Verification approach, then Task N sections each with Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit).\n\nTHEN author the rubric that Implement and SelfEvaluate will be gated against -- this replaces round-counting as the actual definition of done. This is where tightness matters MOST: a rubric criterion this pipeline can't realistically satisfy in 1-2 full implement+verify loops (a 'loop' is one complete pass through Implement -> SelfEvaluate -> Fix -> SelfEvaluate again -- NOT a conversational turn; a single loop can involve many turns) is a sign the TASK is too big, not that the loop budget needs raising. Before finalizing each criterion, ask yourself: 'could a competent implementer satisfy exactly this, and nothing more, on the first attempt, or at worst fix it once and pass?' If the honest answer is no -- because the criterion bundles multiple behaviors, depends on ambiguous scope, or requires exploratory work to even know what 'done' looks like -- SPLIT the task into smaller tasks with their own narrower criteria, don't write a loose or compound criterion and hope the fix loop absorbs the difference. Concretely: (a) ONE criterion tests ONE specific behavior -- never 'the feature works end to end' as a single criterion, decompose that into its constituent checks across multiple task criteria; (b) prefer criteria whose `check` command is a single test file or a single targeted test case, not 'run the whole suite and eyeball it'; (c) if a criterion's `check` itself requires nontrivial setup/exploration to even run, that setup is its own task with its own criterion, done BEFORE the task that depends on it; (d) every task's criterion should be satisfiable using only files/behavior already nailed down in the design doc -- if satisfying it requires a design decision that isn't pinned yet, that's a planning gap to fix now, not a fix-loop problem to defer. Write .resolve/plan/rubric.json with: {\"criteria\": [one entry per task -- {\"id\": \"task-N-verification\", \"task\": N, \"criterion\": \"<one concrete, checkable, single-behavior statement, e.g. 'unit test suite for parseConfig() passes'>\", \"check\": \"<exact, narrowly-targeted command that independently proves it>\"}], \"overall\": [at minimum {\"id\": \"static-analysis-clean\", \"criterion\": \"No new static analysis warnings/errors introduced\", \"check\": \"<exact command>\"} and {\"id\": \"no-regressions\", \"criterion\": \"Full existing test suite still passes\", \"check\": \"<exact command>\"}, plus any design-specific overall criteria worth checking -- keep these few and load-bearing, not an exhaustive wish list]}. Every criterion must be independently verifiable by re-running its `check` command -- no vague criteria like 'code is good' or 'feature works', and no criterion that only becomes checkable after more design work happens. Print the single line: plan_done"
+    label="Plan Like Ken (VDD evidence + weighted rubric)",
+    prompt="Read docs/plans/<date>-<topic>-design.md. Human attention is the most sacred resource -- do not waste it, and do not waste the pipeline's effort on a rubric that only checks the obvious. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work, the way a user experiencing this feature would judge it?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each.\n\nSTEP A -- EVIDENCE METHOD per task: classify each task and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state, anything touching a simulated DOM but not needing a real browser. This is the default for UI logic not tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for focus management, keyboard navigation, accessibility, visual layout truth -- the exception, never the default. For EACH task write: exact file paths, complete copy-pasteable implementation, the static analysis command (always first), which tier applies and why, and the exact command to run for that tier. Write docs/plans/<date>-<feature>-implementation.md with the standard structure (Goal/Architecture/Tech Stack/Verification approach, then Task N: Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit).\n\nSTEP B -- WEIGHTED RUBRIC (the real definition of done, following https://github.com/microsoft/amplifier-bundle-evaluation rubric-design methodology): before writing a single criterion, name the 2-3 things that would separate a genuinely good result on THIS feature from a competent-looking but shallow one -- a subtle requirement buried in the design that a skimming implementer would miss, a behavior only visible if you actually use the feature the way a user would, or a failure mode you can already picture (e.g. 'the error message technically appears but doesn't tell the user what to actually do'). These become your heavy-weighted, CRITICAL: criteria. Then for EVERY criterion: (1) phrase it as an OBSERVABLE QUESTION a judge can answer by looking at or using the artifact -- 'Does the README include (a) install steps (b) the exact run command (c) expected output?' not 'is the README good?'; 'Does submitting the form with an empty required field show an inline error naming which field is missing, not just a generic failure banner?' not 'does validation work?'. If you cannot phrase a criterion as something concrete and pointable, find the observable property underneath it or cut it. (2) THINK LIKE A USER, NOT AN ENGINEER, for both writing and later judging -- the question is never 'did the function get called' but 'would someone using this feature actually get what they came for, notice if it broke, or be confused by the result'. (3) Cut any criterion every implementation will trivially pass (file exists, script exits 0) -- those are gates that belong in the VDD evidence steps, not point-bearing rubric entries. (4) Allocate points by discriminating power: the 2-3 criteria from above should hold roughly HALF the total points combined; trivial-but-required checks get small slices. Mark heavy criteria with a 'CRITICAL:' prefix in their description. (5) Where partial credit is possible, spell out exactly how it's earned in the description (e.g. 'full credit for handling all 3 listed edge cases, 33% credit per case if some but not all are handled') so the judge isn't inventing a scale. (6) Write a short 'steps' evidence-gathering plan alongside the criteria -- what to run, read, or actually try as a user before scoring, mapped to the VDD tiers from Step A -- so every criterion has something concrete backing its judgment; gate on failure explicitly ('if the script errors or times out, score 0 for every criterion in this task's evidence'). Write .resolve/plan/rubric.json: {\\\"steps\\\": \\\"<ordered evidence-gathering plan: what to run/read/try, referencing the VDD tier commands from the plan doc>\\\", \\\"pass_threshold\\\": 0.85, \\\"criteria\\\": {\\\"<snake_case_name>\\\": {\\\"points\\\": <int>, \\\"task\\\": <N or null for an overall/cross-cutting criterion>, \\\"description\\\": \\\"<observable, user-facing question; prefix with 'CRITICAL:' if this is one of the 2-3 heavy-weighted ones>\\\"}, ...}}. Do not let this become mechanical busywork disconnected from what the feature is actually for -- if a criterion wouldn't matter to someone using the result, it doesn't belong.\n\nSTEP C -- REFERENCE THE RUBRIC FROM THE PLAN DOC: since the rubric lives in its own file (rubric.json), don't leave docs/plans/<date>-<feature>-implementation.md silent about it. Under each Task N section, add a short 'Acceptance' subsection listing that task's criterion name(s), points, and one-line description verbatim from rubric.json, plus the line 'Full rubric: .resolve/plan/rubric.json'. Do the same under an 'Overall Acceptance' section near the top for the cross-cutting criteria. A human skimming the plan doc alone should understand what 'done' means without having to open the JSON separately.\n\nSTEP D -- TIGHTNESS CHECK: a rubric criterion this pipeline can't realistically earn full points on in 1-2 full implement+verify loops (a 'loop' is one complete Implement -> SelfEvaluate -> Fix -> SelfEvaluate cycle, NOT a conversational turn) means the underlying TASK is too big or too ambiguous -- split it further rather than writing a loose criterion and hoping the fix loop absorbs the gap. Every criterion must be answerable using only what's already pinned down in the design doc.\n\nPrint the single line: plan_done"
   ];
 
-  // --- Phase 3: Build, gated by rubric achievement (not a round count),
-  // with a safety-backstop fix loop (see subgraphs/build_verify.dot) ---
+  // --- Phase 3: Build, gated by weighted rubric achievement (not a round
+  // count), with a safety-backstop fix loop (see subgraphs/build_verify.dot) ---
   Implement [
-    shape=folder, label="Implement + Self-Evaluate Against Rubric",
+    shape=folder, label="Implement + Self-Evaluate Against Weighted Rubric",
     dot_file="subgraphs/build_verify.dot",
-    outputs="build.verdict,build.fix_rounds_used,build.rubric_result"
+    outputs="build.verdict,build.fix_rounds_used,build.rubric_result,build.rubric_score"
   ];
 
   // --- Phase 4: Open PR (see subgraphs/deliver_pr.dot) ---
@@ -114,7 +133,7 @@ digraph idea_to_pr {
   Report [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Report",
-    prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'escalated' (the fix-round safety backstop tripped before the rubric was met), say so plainly and list which rubric criteria remain unmet -- do not claim success. Print the single line: reported"
+    prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), final weighted rubric score (${build.rubric_score}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'escalated' (the fix-round safety backstop tripped before the rubric's pass_threshold was met), say so plainly and list which specific criteria are still short of full points and why -- do not claim success. Print the single line: reported"
   ];
 
   Start        -> AcceptDesign;

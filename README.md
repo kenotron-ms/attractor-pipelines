@@ -81,18 +81,31 @@ three-agent build loop. Differences from `idea_to_shipped`:
 
 - No `PlanConfidenceCheck` / `PlanApproval` human gate — Plan always flows
   straight into Implement.
-- One combined Implement step plus an independent SelfEvaluate step,
-  instead of separate implementer / verifier / quality-reviewer agents.
-- **Completion is gated by rubric achievement, not a round count.** Plan
-  writes a concrete, checkable rubric (`.resolve/plan/rubric.json` — one
-  criterion per task plus overall criteria like "no regressions", each with
-  an exact command that independently proves it) rather than leaving
-  "done" to a bare self-report. SelfEvaluate re-checks every criterion
-  against real evidence before the loop can exit — it does not trust
-  Implement's own claim. A round counter still exists as a **safety
-  backstop** (default 2) against a truly non-convergent loop, but it isn't
-  the completion mechanism — if it trips, the pipeline reports
-  `build.verdict=escalated` and lists the unmet criteria rather than
+- One combined Implement step plus an independent SelfEvaluate (judge)
+  step, instead of separate implementer / verifier / quality-reviewer
+  agents.
+- **Completion is gated by a weighted, user-facing rubric, not a round
+  count and not a bare pass/fail self-report.** Plan follows the
+  [rubric-design methodology](https://github.com/microsoft/amplifier-bundle-evaluation/blob/main/context/methodology/rubric-design.md):
+  name the 2-3 things that separate genuinely good work from
+  competent-looking-but-shallow work first, phrase every criterion as an
+  *observable question judged from a user's vantage point* (not "does the
+  file exist" — "does submitting an empty required field show an inline
+  error naming which field is missing?"), mark the heavy-hitting criteria
+  `CRITICAL:`, and weight points by discriminating power rather than
+  splitting them evenly. The rubric (`.resolve/plan/rubric.json`) also
+  carries its own evidence-gathering `steps` and a `pass_threshold`
+  (default 0.85). Since the rubric lives in its own file, Plan is required
+  to reference it back into the human-readable plan doc — an "Acceptance"
+  subsection per task naming its criteria, points, and description — so a
+  human skimming the plan alone understands what "done" means. SelfEvaluate
+  gathers/re-gathers that evidence itself and scores every criterion
+  (partial credit per the criterion's own stated rule, not an invented
+  scale) before the loop can exit — it does not trust Implement's own
+  claim. A round counter still exists as a **safety backstop** (default 2)
+  against a truly non-convergent loop, but it isn't the completion
+  mechanism — if it trips, the pipeline reports `build.verdict=escalated`
+  and lists which criteria are still short of full points rather than
   silently declaring success.
 - Stops after opening the PR — no `MergeGate` / `DeployGate` subgraphs. The
   normal GitHub PR review is the human gate, and the `ship_ready` pipeline
