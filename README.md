@@ -90,7 +90,7 @@ three-agent build loop. Differences from `idea_to_shipped`:
   "done" to a bare self-report. SelfEvaluate re-checks every criterion
   against real evidence before the loop can exit — it does not trust
   Implement's own claim. A round counter still exists as a **safety
-  backstop** (default 3) against a truly non-convergent loop, but it isn't
+  backstop** (default 2) against a truly non-convergent loop, but it isn't
   the completion mechanism — if it trips, the pipeline reports
   `build.verdict=escalated` and lists the unmet criteria rather than
   silently declaring success.

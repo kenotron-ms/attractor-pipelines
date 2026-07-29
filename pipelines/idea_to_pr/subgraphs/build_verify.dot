@@ -24,6 +24,15 @@
 // attempts (e.g. transient LLM errors), it does not limit how many times
 // the graph loops back through an edge.
 //
+// A "loop" here means one full Implement -> SelfEvaluate -> Fix ->
+// SelfEvaluate cycle -- NOT a conversational turn (a single loop can span
+// many turns). The parent's Plan phase is required to write rubric
+// criteria narrow enough that a well-formed task typically clears the
+// rubric on loop 1, and worst-case converges by loop 2 (one Fix pass). If
+// this backstop is regularly tripping, that's a signal the RUBRIC/TASKS
+// were too loose or too broad going in -- fix the plan's task
+// decomposition, don't just raise $max_fix_rounds to paper over it.
+//
 // RUBRIC CONTRACT (written by the parent's Plan node to
 // .resolve/plan/rubric.json, read by both Implement and SelfEvaluate):
 //   {
@@ -56,10 +65,13 @@
 //      accessibility, visual layout truth. The exception, not the default.
 //
 // Required context variables (injected by parent via graph attrs / $vars):
-//   $max_fix_rounds  - safety-backstop cap on fix iterations (default 3).
+//   $max_fix_rounds  - safety-backstop cap on fix iterations (default 2).
 //                      This is NOT how completion is decided -- rubric
-//                      achievement is. It only prevents a truly stuck loop
-//                      from spinning forever.
+//                      achievement is. A tightly-planned task should clear
+//                      the rubric within 1-2 loops; 2 gives exactly one
+//                      Fix pass of headroom beyond the first attempt
+//                      before escalating, rather than a large arbitrary
+//                      budget that masks an over-broad task/criterion.
 //
 // Context outputs (declared via `outputs=` on the folder node in the parent):
 //   build.verdict          - final "rubric_met" | "escalated"
@@ -96,13 +108,15 @@ digraph build_verify {
     tool_command="bash -c 'if echo \"$last_response\" | grep -q rubric_verdict=pass; then echo pass; else echo fail; fi'"
   ];
 
-  // Safety backstop ONLY -- not the completion mechanism. Default 3 is
-  // generous enough that a genuinely converging fix doesn't get cut off
-  // by an arbitrary attempt count, while still guaranteeing the pipeline
-  // cannot loop ad nauseam on a truly stuck task.
+  // Safety backstop ONLY -- not the completion mechanism. Default 2
+  // matches the "typically 1-2 loops per task" expectation a tight rubric
+  // should produce: attempt 1 (Implement's own pass), then at most one
+  // Fix pass. If the rubric was scoped correctly, this rarely trips; if
+  // it trips often, the fix is tighter task decomposition in Plan, not a
+  // larger number here.
   CheckFixRounds [
     shape=parallelogram, label="Check Fix Rounds (safety backstop)",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-3}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-2}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
   ];
 
   Fix [
