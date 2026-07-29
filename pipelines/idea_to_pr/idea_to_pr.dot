@@ -7,12 +7,17 @@
 //   - NO PlanConfidenceCheck / PlanApproval human gate. Plan always flows
 //     straight into Implement. If the plan is under-specified, that surfaces
 //     as implementation friction, not an up-front review step nobody uses.
-//   - ONE combined Implement+Verify step instead of the three-agent
-//     implementer -> verifier -> quality-reviewer pipeline in build_loop.dot
-//     -- see subgraphs/build_verify.dot.
-//   - Fix loop capped at 1 round by default (not 3), via an explicit
-//     fix_rounds_used counter in context -- NOT via max_retries. See
-//     subgraphs/build_verify.dot's CheckFixRounds for the mechanism.
+//   - ONE combined Implement step plus an independent SelfEvaluate step
+//     instead of the three-agent implementer -> verifier -> quality-reviewer
+//     pipeline in build_loop.dot -- see subgraphs/build_verify.dot.
+//   - Completion is gated by RUBRIC ACHIEVEMENT, not a round count. Plan
+//     (below) writes a concrete, checkable rubric to .resolve/plan/rubric.json;
+//     SelfEvaluate independently checks every criterion against real
+//     evidence before the loop is allowed to exit. A round counter still
+//     exists in build_verify.dot as a safety BACKSTOP against a genuinely
+//     non-convergent loop (default 3 rounds) -- it is not how "done" is
+//     decided, and if it trips the pipeline reports failure honestly
+//     (build.verdict=escalated) rather than silently declaring success.
 //   - Stops after DeliverPR. No MergeGate / DeployGate subgraphs here --
 //     the normal GitHub PR review is the human gate, and the
 //     pipelines/ship_ready pipeline (triggered by the PR itself via GitHub
@@ -20,17 +25,17 @@
 //     only job is idea -> plan -> build -> open PR.
 //
 // Like idea_to_shipped, the heavy lifting lives in subgraphs (shape=folder
-// delegation) -- this top-level file is just the arc: accept design, plan,
-// delegate to build_verify, delegate to deliver_pr, report. Keeping build
-// logic in its own file (rather than inlined here) is what keeps the fix
-// loop's cap legible in one place and keeps this top-level graph short.
+// delegation) -- this top-level file is just the arc: accept design, plan
+// (including the rubric), delegate to build_verify, delegate to
+// deliver_pr, report. Keeping build/self-evaluation logic in its own file
+// (rather than inlined here) is what keeps the rubric-driven exit
+// condition legible in one place and keeps this top-level graph short.
 //
 // Verification Driven Development, but with a NARROWER, prescriptive
 // hierarchy than idea_to_shipped's five-tier VDD ladder (native static
-// analysis / run directly / curl / browser / Reality-Check). This pipeline
-// picks ONE of exactly three verification tiers per task (assigned during
-// Plan, applied during build_verify.dot's Implement step), in this order
-// of preference:
+// analysis / run directly / curl / browser / Reality-Check). Plan assigns
+// each task's rubric criterion ONE of exactly three verification tiers,
+// in this order of preference:
 //
 //   1. Unit tests (pytest / vitest / whatever the repo already uses) for
 //      LIBRARY code -- pure functions, data transforms, business logic with
@@ -50,19 +55,21 @@
 //   $design            - a design blurb from a prior /think-like-ken session
 //   $task              - short task/feature name
 //   $repo              - target repo slug (owner/name) for the PR
-//   $max_fix_rounds    - cap on build_verify fix iterations (default 1)
+//   $max_fix_rounds    - safety-backstop cap on build_verify fix iterations
+//                        (default 3) -- NOT the completion mechanism, see
+//                        subgraphs/build_verify.dot.
 //
 // Context outputs:
 //   design.design_doc     - path to the design doc written by AcceptDesign
 //   plan.plan_doc         - path to the implementation plan written by Plan
-//   build.verdict         - final "pass" | "exhausted" (from build_verify.dot)
+//   build.verdict         - final "rubric_met" | "escalated" (from build_verify.dot)
 //   build.fix_rounds_used - integer count of fix rounds consumed
 //   delivery.pr_url       - PR URL, set by DeliverPR subgraph
 //   delivery.result       - "opened" | "failed"
 
 digraph idea_to_pr {
   graph [
-    label="Idea to PR -- Lite (VDD, no plan-approval gate, single fix round)",
+    label="Idea to PR -- Lite (VDD, no plan-approval gate, rubric-gated build)",
     goal="$task",
     rankdir=LR,
     default_max_retry=2,
@@ -80,19 +87,21 @@ digraph idea_to_pr {
     prompt="You are given an already-validated design blurb in $design -- the output of a human's /think-like-ken session, done BEFORE this pipeline was invoked. Do NOT re-derive, re-explore, or second-guess the design. Simply write it as-is (light formatting only) to docs/plans/<date>-<topic>-design.md using the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions -- leave any section blank/'not specified' if $design doesn't cover it, do not fabricate). Print the single line: design_accepted"
   ];
 
-  // --- Phase 2: Plan, with the NARROWER three-tier VDD verification hierarchy ---
+  // --- Phase 2: Plan, with the NARROWER three-tier VDD verification hierarchy,
+  // PLUS an explicit, checkable rubric -- this is what build_verify.dot's
+  // SelfEvaluate gates completion against instead of a round count. ---
   Plan [
     shape=box, goal_gate=true, fidelity="full",
-    label="Plan (three-tier VDD)",
-    prompt="Read docs/plans/<date>-<topic>-design.md. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each. For EACH task, classify it and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. Use the repo's existing unit test runner (pytest, vitest, etc). (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state management, anything touching a simulated DOM but not needing a real browser engine (vitest/jest with environment=jsdom or equivalent). This should be the default for anything involving UI logic that isn't tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for the genuinely hardest-to-verify things: focus management, keyboard navigation, accessibility (ARIA roles/labels, screen reader behavior), visual layout truth. This tier is the EXCEPTION -- most tasks should resolve at tier 1 or 2; do not reach for a real browser just because the code touches HTML. For EACH task specify: exact file paths, complete copy-pasteable implementation, the exact static analysis command (always run first, e.g. ruff/ty/tsc/oxlint), which of the three tiers applies and why, and the exact verification command with expected output. Never leave verification unspecified, never say 'test it manually'. Write docs/plans/<date>-<feature>-implementation.md following the standard plan structure (header with Goal/Architecture/Tech Stack/Verification approach, then Task N sections each with Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit). Print the single line: plan_done"
+    label="Plan (three-tier VDD + rubric authoring)",
+    prompt="Read docs/plans/<date>-<topic>-design.md. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each. For EACH task, classify it and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. Use the repo's existing unit test runner (pytest, vitest, etc). (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state management, anything touching a simulated DOM but not needing a real browser engine (vitest/jest with environment=jsdom or equivalent). This should be the default for anything involving UI logic that isn't tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for the genuinely hardest-to-verify things: focus management, keyboard navigation, accessibility (ARIA roles/labels, screen reader behavior), visual layout truth. This tier is the EXCEPTION -- most tasks should resolve at tier 1 or 2; do not reach for a real browser just because the code touches HTML. For EACH task specify: exact file paths, complete copy-pasteable implementation, the exact static analysis command (always run first, e.g. ruff/ty/tsc/oxlint), which of the three tiers applies and why, and the exact verification command with expected output. Never leave verification unspecified, never say 'test it manually'. Write docs/plans/<date>-<feature>-implementation.md following the standard plan structure (header with Goal/Architecture/Tech Stack/Verification approach, then Task N sections each with Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit).\n\nTHEN author the rubric that Implement and SelfEvaluate will be gated against -- this replaces round-counting as the actual definition of done. Write .resolve/plan/rubric.json with: {\"criteria\": [one entry per task -- {\"id\": \"task-N-verification\", \"task\": N, \"criterion\": \"<concrete, checkable statement, e.g. 'unit test suite for parseConfig() passes'>\", \"check\": \"<exact command that independently proves it>\"}], \"overall\": [at minimum {\"id\": \"static-analysis-clean\", \"criterion\": \"No new static analysis warnings/errors introduced\", \"check\": \"<exact command>\"} and {\"id\": \"no-regressions\", \"criterion\": \"Full existing test suite still passes\", \"check\": \"<exact command>\"}, plus any design-specific overall criteria worth checking]}. Every criterion must be independently verifiable by re-running its `check` command -- no vague criteria like 'code is good' or 'feature works'. Print the single line: plan_done"
   ];
 
-  // --- Phase 3: Build with a single combined Implement+Verify step and a
-  // fix loop capped at 1 round (see subgraphs/build_verify.dot) ---
+  // --- Phase 3: Build, gated by rubric achievement (not a round count),
+  // with a safety-backstop fix loop (see subgraphs/build_verify.dot) ---
   Implement [
-    shape=folder, label="Implement + Verify (combined, capped fix loop)",
+    shape=folder, label="Implement + Self-Evaluate Against Rubric",
     dot_file="subgraphs/build_verify.dot",
-    outputs="build.verdict,build.fix_rounds_used"
+    outputs="build.verdict,build.fix_rounds_used,build.rubric_result"
   ];
 
   // --- Phase 4: Open PR (see subgraphs/deliver_pr.dot) ---
@@ -105,14 +114,14 @@ digraph idea_to_pr {
   Report [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Report",
-    prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), and PR (${delivery.pr_url}). If build_verdict never reached pass, say so plainly -- do not claim success. Print the single line: reported"
+    prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'escalated' (the fix-round safety backstop tripped before the rubric was met), say so plainly and list which rubric criteria remain unmet -- do not claim success. Print the single line: reported"
   ];
 
   Start        -> AcceptDesign;
   AcceptDesign -> Plan;
   Plan         -> Implement;                                    // no PlanConfidenceCheck / PlanApproval gate
-  Implement    -> DeliverPR [condition="context.build.verdict=pass", weight="2"];
-  Implement    -> Report    [condition="context.build.verdict=exhausted"];
+  Implement    -> DeliverPR [condition="context.build.verdict=rubric_met", weight="2"];
+  Implement    -> Report    [condition="context.build.verdict=escalated"];
   DeliverPR    -> Report    [condition="context.delivery.result=opened", weight="2"];
   DeliverPR    -> Report    [condition="outcome=fail"];
   Report       -> Exit;

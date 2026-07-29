@@ -81,12 +81,19 @@ three-agent build loop. Differences from `idea_to_shipped`:
 
 - No `PlanConfidenceCheck` / `PlanApproval` human gate — Plan always flows
   straight into Implement.
-- One combined Implement+Verify step instead of separate
-  implementer / verifier / quality-reviewer agents.
-- Fix loop capped at **1** round by default (not 3), via an explicit
-  `fix_rounds_used` context counter — not `max_retries`, which only bounds a
-  single node's own execution attempts, not how many times the graph loops
-  back through an edge.
+- One combined Implement step plus an independent SelfEvaluate step,
+  instead of separate implementer / verifier / quality-reviewer agents.
+- **Completion is gated by rubric achievement, not a round count.** Plan
+  writes a concrete, checkable rubric (`.resolve/plan/rubric.json` — one
+  criterion per task plus overall criteria like "no regressions", each with
+  an exact command that independently proves it) rather than leaving
+  "done" to a bare self-report. SelfEvaluate re-checks every criterion
+  against real evidence before the loop can exit — it does not trust
+  Implement's own claim. A round counter still exists as a **safety
+  backstop** (default 3) against a truly non-convergent loop, but it isn't
+  the completion mechanism — if it trips, the pipeline reports
+  `build.verdict=escalated` and lists the unmet criteria rather than
+  silently declaring success.
 - Stops after opening the PR — no `MergeGate` / `DeployGate` subgraphs. The
   normal GitHub PR review is the human gate, and the `ship_ready` pipeline
   (below), triggered by the PR itself, handles preview/prod deploy.
@@ -99,16 +106,17 @@ three-agent build loop. Differences from `idea_to_shipped`:
   visual layout truth — not the default path.
 
 Like `idea_to_shipped`, the build logic lives in its own subgraph rather
-than being inlined into the top-level file -- this is what keeps the fix
-loop's cap legible in one place (see `subgraphs/build_verify.dot`) and
-keeps the top-level graph itself short: accept design, plan, delegate to
-build_verify, delegate to deliver_pr, report.
+than being inlined into the top-level file -- this is what keeps the
+rubric-driven exit condition legible in one place (see
+`subgraphs/build_verify.dot`) and keeps the top-level graph itself short:
+accept design, plan (including the rubric), delegate to build_verify,
+delegate to deliver_pr, report.
 
 ```
 pipelines/idea_to_pr/
   idea_to_pr.dot            # entry pipeline (arc only -- delegates via shape=folder)
   subgraphs/
-    build_verify.dot         # combined implement+verify, fix loop capped at 1 round
+    build_verify.dot         # implement -> self-evaluate against rubric -> fix (backstop-capped)
     deliver_pr.dot            # commit, push, open PR
 ```
 
