@@ -2,7 +2,7 @@
 //
 // Sample pipeline: Exhaustive Parallel-Lane PR Code Review.
 //
-// Ported into kenotron-ms/dot-graph-samples from
+// Ported into kenotron-ms/attractor-pipelines from
 // microsoft/amplifier-app-actions' pipelines/pr-review-exhaustive.dot. The
 // review LOGIC is faithful to the source; the runtime coupling has been
 // reworked so this sample runs on THIS repo's runtime
@@ -76,7 +76,7 @@
 //   - $goal must carry a PR reference (a full PR URL, OWNER/REPO#N, or #N).
 //
 // USAGE (dot-graph resolver, remote source — no local checkout needed):
-//   git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive.dot
+//   git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-exhaustive.dot
 //
 // See .github/workflows/pr-review-exhaustive.yml in this repo for a working
 // pull_request workflow, and pipelines/pr-review-exhaustive.md for details.

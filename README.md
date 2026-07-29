@@ -1,20 +1,21 @@
-# dot-graph-samples
+# attractor-pipelines
 
-Sample DOT pipelines for
-[`amplifier-resolver-dot-graph`](https://github.com/microsoft/amplifier-resolver-dot-graph),
-meant to be read and adapted as real-world examples of the resolver's
-pipeline format.
+Public, real-world DOT pipelines for
+[`amplifier-resolver-dot-graph`](https://github.com/microsoft/amplifier-resolver-dot-graph)
+(the attractor engine), shared for reference and reuse — not fixtures,
+not throwaway samples. Fetch one directly via `git+https://` subdirectory
+URLs, or copy and adapt it for your own pipeline.
 
 ## Convention
 
-Each sample lives in its own `pipelines/[name]/` folder containing its
+Each pipeline lives in its own `pipelines/[name]/` folder containing its
 entry `.dot` file (`pipelines/[name]/[name].dot`), any `subgraphs/`, and
 optional companion docs (e.g. `[name].md`).
 
-## Sample: idea-to-shipped SDLC pipeline
+## Pipeline: idea-to-shipped SDLC pipeline
 
 `pipelines/idea_to_shipped/idea_to_shipped.dot` — a full "idea to shipped"
-lifecycle sample pipeline, mined from real successful Amplifier Resolve
+lifecycle pipeline, mined from real successful Amplifier Resolve
 session arcs (brainstorm/think -> plan -> build with a verdict-gated
 fix loop -> PR -> human merge gate -> human deploy gate -> report).
 
@@ -43,10 +44,10 @@ pipelines/idea_to_shipped/
 Point the resolver at it via:
 
 ```
-git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/idea_to_shipped/idea_to_shipped.dot
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/idea_to_shipped/idea_to_shipped.dot
 ```
 
-## Sample: exhaustive PR review pipeline
+## Pipeline: exhaustive PR review pipeline
 
 `pipelines/pr-review-exhaustive/pr-review-exhaustive.dot` — a thread-isolated, five-lane pull
 request review pipeline, ported from
@@ -69,5 +70,5 @@ full walkthrough, runtime assumptions, and the intentionally-omitted broken
 Point the resolver at it via:
 
 ```
-git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
 ```

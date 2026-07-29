@@ -66,7 +66,7 @@ The graph runs on any resolver runtime that provides:
 **dot-graph resolver (remote source — no local checkout):**
 
 ```
-git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
 ```
 
 **GitHub Actions:** see
