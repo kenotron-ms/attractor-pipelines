@@ -83,19 +83,28 @@ digraph ship_ready {
   WriteWorkflow [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Write CI/CD Workflow",
-    prompt="Write .github/workflows/deploy.yml with exactly two jobs: (1) a `pull_request` job that runs `vercel deploy --token=$${VERCEL_TOKEN} --yes` (using the vercel-action or plain CLI), captures the preview URL, and comments it on the PR via the GitHub API; (2) a `push` job restricted to the default branch that runs `vercel deploy --prod --token=$${VERCEL_TOKEN} --yes` followed by `supabase db push --db-url $${SUPABASE_DB_URL} --yes`. Both jobs should invoke this same repo's ship_ready pipeline (git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot) as the actual deploy runner, passing through GITHUB_EVENT_NAME and the required secrets (VERCEL_TOKEN, SUPABASE_DB_URL, GH_TOKEN) as env vars -- do not duplicate the deploy logic directly in YAML shell steps. Required repo secrets: VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN. Include the literal comment '# ship_ready-marker-v1' somewhere in the file so future idempotency checks can detect this exact template version. Print the single line: workflow_written"
+    prompt="Confirm you are operating against the real target repo: run `git remote -v` and verify origin points at https://github.com/$repo (if it does not, run `git remote set-url origin https://github.com/$repo.git` or clone $repo fresh -- do not proceed against any other checkout, e.g. a local scratch/placeholder repo). Create a new branch off $repo's default branch named ship-ready-workflow-<short timestamp, e.g. ship-ready-workflow-20260729143000>. On that branch, write .github/workflows/deploy.yml with exactly two jobs: (1) a `pull_request` job that runs `vercel deploy --token=$${VERCEL_TOKEN} --yes` (using the vercel-action or plain CLI), captures the preview URL, and comments it on the PR via the GitHub API; (2) a `push` job restricted to the default branch that runs `vercel deploy --prod --token=$${VERCEL_TOKEN} --yes` followed by `supabase db push --db-url $${SUPABASE_DB_URL} --yes`. Both jobs should invoke this same repo's ship_ready pipeline (git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot) as the actual deploy runner, passing through GITHUB_EVENT_NAME and the required secrets (VERCEL_TOKEN, SUPABASE_DB_URL, GH_TOKEN) as env vars -- do not duplicate the deploy logic directly in YAML shell steps. Required repo secrets: VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN. Include the literal comment '# ship_ready-marker-v1' somewhere in the file so future idempotency checks can detect this exact template version. Do NOT commit yet -- the next step (DeliverPR) handles staging, commit, push, and opening the PR against $repo. Print the single line: workflow_written"
   ];
 
-  CommitWorkflow [
-    shape=box, goal_gate=true, fidelity="summary:high",
-    label="Commit Workflow",
-    prompt="Stage .github/workflows/deploy.yml, commit with message 'ci: add ship_ready deploy workflow (Vercel preview/prod + Supabase migrations)', and push to the current branch. Print the single line: workflow_committed"
+  // Reuses the same deliver_pr.dot subgraph pattern as hello_world /
+  // idea_to_pr / idea_to_shipped: stage, commit, push, and VERIFY the push
+  // actually landed (CheckPush gate inside the subgraph, evidence-based --
+  // not a self-reported "committed" line) before opening a PR against
+  // $repo's default branch. Replaces the old bespoke CommitWorkflow box
+  // node, whose self-reported "workflow_committed" line was trusted without
+  // ever confirming the push reached the real GitHub repo (repro: instance
+  // ebab2de8354f committed against a local Gitea scratch placeholder
+  // instead of $repo, and BootstrapReport falsely claimed success).
+  DeliverPR [
+    shape=folder, label="Deliver Workflow PR",
+    dot_file="subgraphs/deliver_pr.dot",
+    outputs="delivery.pr_url,delivery.result"
   ];
 
   BootstrapReport [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Bootstrap Report",
-    prompt="Report the bootstrap outcome: was .github/workflows/deploy.yml already current, or did this run write and commit it? Remind the human which secrets must be set on the repo (VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN) if it was just written. Print the single line: bootstrap_reported"
+    prompt="Report the bootstrap outcome: was .github/workflows/deploy.yml already current (no PR needed), or did this run write it and open a PR? If ${delivery.result} is 'opened', state the PR URL (${delivery.pr_url}) plainly -- that URL is the evidence the workflow actually reached $repo, not a self-reported claim. If ${delivery.result} is 'failed', say so plainly and do NOT claim the workflow was written or committed. Remind the human which secrets must be set on the repo (VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN) if a PR was just opened. Print the single line: bootstrap_reported"
   ];
 
   // ═══════════════════ PULL_REQUEST BRANCH ═══════════════════
@@ -158,8 +167,9 @@ digraph ship_ready {
 
   CheckWorkflow -> WriteWorkflow      [condition="context.tool.last_line=missing"];
   CheckWorkflow -> BootstrapReport    [condition="context.tool.last_line=current", weight="2"];
-  WriteWorkflow -> CommitWorkflow;
-  CommitWorkflow -> BootstrapReport;
+  WriteWorkflow -> DeliverPR;
+  DeliverPR     -> BootstrapReport [condition="context.delivery.result=opened", weight="2"];
+  DeliverPR     -> BootstrapReport [condition="outcome=fail"];
   BootstrapReport -> Exit;
 
   DeployVercelPreview -> VerifyPreviewLive;
