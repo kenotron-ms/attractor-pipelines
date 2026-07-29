@@ -1,4 +1,4 @@
-// pr-review-fast.dot
+// pr_review.dot
 //
 // Redux of pipelines/pr-review-exhaustive/pr-review-exhaustive.dot, built
 // for turnaround measured in MINUTES rather than exhaustive thoroughness.
@@ -54,7 +54,7 @@
 // $goal carrying a PR reference (full URL, OWNER/REPO#N, or #N).
 //
 // USAGE:
-//   git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-fast/pr-review-fast.dot
+//   git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr_review/pr_review.dot
 
 digraph pr_review_fast {
 

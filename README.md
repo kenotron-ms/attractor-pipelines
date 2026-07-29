@@ -74,7 +74,7 @@ git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelin
 
 ## Pipeline: idea-to-shipped (lite)
 
-`pipelines/idea_to_shipped_lite/idea_to_shipped_lite.dot` — a lower-ceremony
+`pipelines/idea_to_pr/idea_to_pr.dot` — a lower-ceremony
 derivative of `idea_to_shipped`, for the common case: idea -> plan -> build
 according to plan, without the full pipeline's plan-approval gate or
 three-agent build loop. Differences from `idea_to_shipped`:
@@ -88,7 +88,7 @@ three-agent build loop. Differences from `idea_to_shipped`:
   single node's own execution attempts, not how many times the graph loops
   back through an edge.
 - Stops after opening the PR — no `MergeGate` / `DeployGate` subgraphs. The
-  normal GitHub PR review is the human gate, and the `ship-ready` pipeline
+  normal GitHub PR review is the human gate, and the `ship_ready` pipeline
   (below), triggered by the PR itself, handles preview/prod deploy.
 - A **narrower, three-tier Verification Driven Development hierarchy**
   (vs. `idea_to_shipped`'s five-tier ladder), picked in this preference
@@ -99,8 +99,8 @@ three-agent build loop. Differences from `idea_to_shipped`:
   visual layout truth — not the default path.
 
 ```
-pipelines/idea_to_shipped_lite/
-  idea_to_shipped_lite.dot    # entry pipeline
+pipelines/idea_to_pr/
+  idea_to_pr.dot    # entry pipeline
   subgraphs/
     deliver_pr.dot            # commit, push, open PR
 ```
@@ -108,12 +108,12 @@ pipelines/idea_to_shipped_lite/
 Point the attractor bundle at it via:
 
 ```
-git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/idea_to_shipped_lite/idea_to_shipped_lite.dot
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/idea_to_pr/idea_to_pr.dot
 ```
 
 ## Pipeline: fast parallel PR review
 
-`pipelines/pr-review-fast/pr-review-fast.dot` — a redux of
+`pipelines/pr_review/pr_review.dot` — a redux of
 `pr-review-exhaustive` built for turnaround measured in minutes rather than
 exhaustive thoroughness. The exhaustive pipeline's 5 reviewer lanes run on
 separate `thread_id`s (session isolation) but still **sequentially** through
@@ -134,24 +134,24 @@ fixes that with genuine wall-clock parallelism:
   goes straight to posting the review.
 
 ```
-pipelines/pr-review-fast/
-  pr-review-fast.dot         # entry pipeline (self-contained, no subgraphs)
+pipelines/pr_review/
+  pr_review.dot         # entry pipeline (self-contained, no subgraphs)
 ```
 
 Point the attractor bundle at it via:
 
 ```
-git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-fast/pr-review-fast.dot
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr_review/pr_review.dot
 ```
 
-## Pipeline: ship-ready (CI/CD bootstrap + Vercel/Supabase deploy)
+## Pipeline: ship_ready (CI/CD bootstrap + Vercel/Supabase deploy)
 
-`pipelines/ship-ready/ship-ready.dot` — ensures a repo has a working
+`pipelines/ship_ready/ship_ready.dot` — ensures a repo has a working
 CI/CD pipeline, then drives its actual deploys. One graph, two modes,
 selected by a router node (`DetectMode`) reading `$github_event_name`:
 
 - **Bootstrap mode** (no GitHub event context — run manually against a
-  repo, or from `idea_to_shipped_lite`): idempotently writes
+  repo, or from `idea_to_pr`): idempotently writes
   `.github/workflows/deploy.yml` if missing or stale (detected via a stable
   marker comment, not just file existence), configuring it to deploy a
   Vercel **preview** on every `pull_request` and Vercel **prod** + a
@@ -164,19 +164,19 @@ selected by a router node (`DetectMode`) reading `$github_event_name`:
   graph-level LLM retries) before declaring success — never claims a
   deploy is live without proving it.
 
-Together with the other two pipelines in this repo: `idea_to_shipped_lite`
-opens a PR, `pr-review-fast` posts a fast automated review on it, and this
+Together with the other two pipelines in this repo: `idea_to_pr`
+opens a PR, `pr_review` posts a fast automated review on it, and this
 pipeline's `pull_request` job (via the PR's own GitHub Actions run) gives it
 a live Vercel preview — merging to main then triggers a real Vercel prod
 deploy + Supabase migration.
 
 ```
-pipelines/ship-ready/
-  ship-ready.dot             # entry pipeline (self-contained, no subgraphs)
+pipelines/ship_ready/
+  ship_ready.dot             # entry pipeline (self-contained, no subgraphs)
 ```
 
 Point the attractor bundle at it via:
 
 ```
-git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship-ready/ship-ready.dot
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot
 ```

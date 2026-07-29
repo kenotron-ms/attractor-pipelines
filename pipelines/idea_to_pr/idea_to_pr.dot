@@ -1,4 +1,4 @@
-// idea_to_shipped_lite.dot
+// idea_to_pr.dot
 //
 // Simplified derivative of pipelines/idea_to_shipped/idea_to_shipped.dot.
 // Same "idea -> plan -> build" arc, but with the ceremony that pipeline
@@ -16,7 +16,7 @@
 //     for the fuller version of this same pattern.
 //   - Stops after DeliverPR. No MergeGate / DeployGate subgraphs here --
 //     the normal GitHub PR review is the human gate, and the
-//     pipelines/ship-ready pipeline (triggered by the PR itself via GitHub
+//     pipelines/ship_ready pipeline (triggered by the PR itself via GitHub
 //     Actions) handles preview + prod deploy automatically. This pipeline's
 //     only job is idea -> plan -> build -> open PR.
 //
@@ -54,7 +54,7 @@
 //   delivery.pr_url       - PR URL, set by DeliverPR subgraph
 //   delivery.result       - "opened" | "failed"
 
-digraph idea_to_shipped_lite {
+digraph idea_to_pr {
   graph [
     label="Idea to Shipped -- Lite (VDD, no plan-approval gate, single fix round)",
     goal="$task",

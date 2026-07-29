@@ -1,10 +1,10 @@
-// ship-ready.dot
+// ship_ready.dot
 //
 // A pipeline with two jobs, dispatched from one graph based on how it was
 // invoked:
 //
 //   1. BOOTSTRAP MODE (no GitHub event context -- e.g. run once manually
-//      against a repo, or by idea_to_shipped_lite / a human setting up a
+//      against a repo, or by idea_to_pr / a human setting up a
 //      new project): ensure a `.github/workflows/deploy.yml` exists and is
 //      configured to (a) deploy a Vercel PREVIEW + comment its URL on every
 //      pull_request, and (b) deploy to Vercel PROD + run Supabase
@@ -26,9 +26,9 @@
 // it across two DOT files.
 //
 // TOGETHER WITH THE OTHER TWO PIPELINES IN THIS REPO:
-//   idea_to_shipped_lite  -- opens a PR
-//   pr-review-fast        -- posts a fast automated review on that PR
-//   ship-ready (this one) -- the PR's own GitHub Actions run gives it a
+//   idea_to_pr  -- opens a PR
+//   pr_review        -- posts a fast automated review on that PR
+//   ship_ready (this one) -- the PR's own GitHub Actions run gives it a
 //                            live Vercel preview; merging to main triggers
 //                            a real Vercel prod deploy + Supabase migration
 //
@@ -77,19 +77,19 @@ digraph ship_ready {
   // "file exists but is stale/hand-edited" -- grep the marker, not just -f.
   CheckWorkflow [
     shape=parallelogram, label="Check Workflow Exists",
-    tool_command="bash -c 'if [ -f .github/workflows/deploy.yml ] && grep -q ship-ready-marker-v1 .github/workflows/deploy.yml; then echo current; else echo missing; fi'"
+    tool_command="bash -c 'if [ -f .github/workflows/deploy.yml ] && grep -q ship_ready-marker-v1 .github/workflows/deploy.yml; then echo current; else echo missing; fi'"
   ];
 
   WriteWorkflow [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Write CI/CD Workflow",
-    prompt="Write .github/workflows/deploy.yml with exactly two jobs: (1) a `pull_request` job that runs `vercel deploy --token=$${VERCEL_TOKEN} --yes` (using the vercel-action or plain CLI), captures the preview URL, and comments it on the PR via the GitHub API; (2) a `push` job restricted to the default branch that runs `vercel deploy --prod --token=$${VERCEL_TOKEN} --yes` followed by `supabase db push --db-url $${SUPABASE_DB_URL} --yes`. Both jobs should invoke this same repo's ship-ready pipeline (git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship-ready/ship-ready.dot) as the actual deploy runner, passing through GITHUB_EVENT_NAME and the required secrets (VERCEL_TOKEN, SUPABASE_DB_URL, GH_TOKEN) as env vars -- do not duplicate the deploy logic directly in YAML shell steps. Required repo secrets: VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN. Include the literal comment '# ship-ready-marker-v1' somewhere in the file so future idempotency checks can detect this exact template version. Print the single line: workflow_written"
+    prompt="Write .github/workflows/deploy.yml with exactly two jobs: (1) a `pull_request` job that runs `vercel deploy --token=$${VERCEL_TOKEN} --yes` (using the vercel-action or plain CLI), captures the preview URL, and comments it on the PR via the GitHub API; (2) a `push` job restricted to the default branch that runs `vercel deploy --prod --token=$${VERCEL_TOKEN} --yes` followed by `supabase db push --db-url $${SUPABASE_DB_URL} --yes`. Both jobs should invoke this same repo's ship_ready pipeline (git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot) as the actual deploy runner, passing through GITHUB_EVENT_NAME and the required secrets (VERCEL_TOKEN, SUPABASE_DB_URL, GH_TOKEN) as env vars -- do not duplicate the deploy logic directly in YAML shell steps. Required repo secrets: VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN. Include the literal comment '# ship_ready-marker-v1' somewhere in the file so future idempotency checks can detect this exact template version. Print the single line: workflow_written"
   ];
 
   CommitWorkflow [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Commit Workflow",
-    prompt="Stage .github/workflows/deploy.yml, commit with message 'ci: add ship-ready deploy workflow (Vercel preview/prod + Supabase migrations)', and push to the current branch. Print the single line: workflow_committed"
+    prompt="Stage .github/workflows/deploy.yml, commit with message 'ci: add ship_ready deploy workflow (Vercel preview/prod + Supabase migrations)', and push to the current branch. Print the single line: workflow_committed"
   ];
 
   BootstrapReport [
