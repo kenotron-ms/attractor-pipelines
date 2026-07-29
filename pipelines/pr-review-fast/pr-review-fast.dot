@@ -1,0 +1,246 @@
+// pr-review-fast.dot
+//
+// Redux of pipelines/pr-review-exhaustive/pr-review-exhaustive.dot, built
+// for turnaround measured in MINUTES rather than exhaustive thoroughness.
+//
+// pr-review-exhaustive runs its 5 reviewer lanes on separate thread_ids
+// (session isolation) but STILL SEQUENTIALLY through the DOT graph -- lane
+// N+1 does not start until lane N finishes. That buys contamination
+// avoidance, not speed. This pipeline fixes that by fanning the 5 lanes out
+// as genuinely concurrent branches using `shape=component` (the attractor
+// engine's ParallelHandler: one asyncio task per outgoing edge, each with
+// its own cloned/isolated context, joined via `shape=tripleoctagon`).
+//
+// It also drops the `quality_eval` adversarial retry loop that
+// pr-review-exhaustive has around `merge_findings` -- that loop exists to
+// catch synthesis mistakes at the cost of extra sequential rounds. For a
+// "few minutes, good enough, iterate on review comments like a human PR
+// thread" pipeline, that round-trip isn't worth the time; if the merge
+// synthesis has a gap, a human reviewer catches it same as any human-posted
+// review would.
+//
+// THREAD MAP:
+//   review-thread      -- checkout_and_read, collect_lane_results, merge_findings, comment_draft (pipeline anchor)
+//   correctness-thread, arch-thread, patterns-thread, tests-thread, pedantic-thread
+//     -- one per lane, each a genuinely concurrent branch under fan_out
+//
+// CROSS-BRANCH DATA HANDOFF (the one real gotcha with `shape=component`):
+// parallel branches get a CLONED context -- a lane's context_updates do NOT
+// automatically merge back into the parent; only `context.parallel.results`
+// (a list of {node_id, status, context_updates, ...}) reaches fan_in, and
+// even that requires code to unpack it. Rather than depend on undocumented
+// parallel.results plumbing, each lane instead writes its findings directly
+// to a fixed file path (the same idiom pr-review-exhaustive uses for
+// .resolve/*.json state) -- .resolve/review/<lane>.json. A single tool node
+// after fan_in (collect_lane_results) reads all 5 files back into flat
+// $variables with the exact same names pr-review-exhaustive's
+// merge_findings expects, so the merge/post logic below is otherwise
+// unchanged from that pipeline.
+//
+// PIPELINE STATE:
+//   checkout_and_read    -> pr_owner, pr_repo, pr_number, pr_url, pr_title,
+//                           pr_description, pr_head_branch, pr_head_sha,
+//                           diff_content, changed_files_list
+//   lane_*               -> writes .resolve/review/<lane>.json (NOT context_updates)
+//   collect_lane_results -> correctness_findings, correctness_comments,
+//                           arch_findings, arch_comments, patterns_findings,
+//                           patterns_comments, tests_findings, tests_comments,
+//                           pedantic_findings, pedantic_comments
+//   merge_findings        -> merged_review, review_verdict, review_summary,
+//                            review_comments_json
+//
+// RUNTIME ASSUMPTIONS (same as pr-review-exhaustive): anthropic provider
+// (claude-sonnet-4-6), a bash tool, ANTHROPIC_API_KEY + GH_TOKEN in env,
+// $goal carrying a PR reference (full URL, OWNER/REPO#N, or #N).
+//
+// USAGE:
+//   git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-fast/pr-review-fast.dot
+
+digraph pr_review_fast {
+
+    label             = "Fast Parallel PR Review"
+    description       = "5 genuinely-concurrent reviewer lanes (shape=component) -> merge -> one inline PR review, no retry loop"
+    labelloc          = t
+    rankdir           = TB
+    compound          = true
+    fontname          = "Helvetica"
+    nodesep           = 0.6
+    ranksep           = 0.9
+
+    goal              = "$goal"
+    default_fidelity  = "full"
+    default_thread_id = "review-thread"
+
+    model_stylesheet  = "* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #lane_correctness { reasoning_effort: high; } #lane_architecture { reasoning_effort: high; } #merge_findings { reasoning_effort: high; }"
+
+    node [fontname="Helvetica", fontsize=11, style="filled"]
+    edge [fontname="Helvetica", fontsize=10, color="#555555"]
+
+    // ═══════════════════════════════════════════════════════════
+    // PIPELINE NODES
+    // ═══════════════════════════════════════════════════════════
+
+    start [
+        label     = "Start",
+        shape     = Mdiamond,
+        fillcolor = "#C8E6C9"
+    ]
+
+    // ── Phase 1: Checkout ──────────────────────────────────────
+    // Identical role to pr-review-exhaustive's checkout_and_read: fetch PR
+    // metadata + unified diff once, before fan-out, so every lane's cloned
+    // context already has these values via $variable interpolation.
+    checkout_and_read [
+        label     = "Checkout & Read",
+        shape     = box,
+        fillcolor = "#E8F5E9",
+        timeout   = "6m",
+        prompt    = "You are the checkout node in a fast parallel PR review pipeline. Your ONLY job is to fetch PR metadata and the unified diff, then emit them as JSON context_updates. Do NOT write any review findings. Do NOT post any GitHub comments.\n\nSTEP 1 -- Parse the PR reference from $goal: extract owner, repo, and PR number (full URL, OWNER/REPO#N, or #N for current repo). Store as OWNER, REPO, NUMBER.\n\nSTEP 2 -- Fetch PR metadata:\n  curl -s -H \"Authorization: token ${GH_TOKEN}\" \\\n       \"https://api.github.com/repos/OWNER/REPO/pulls/NUMBER\" \\\n       -o /tmp/pr_meta.json\nExtract .title, .body (first 400 chars), .head.ref, .head.sha (store as PR_HEAD_SHA).\n\nSTEP 3 -- Fetch the unified diff:\n  curl -s -H \"Authorization: token ${GH_TOKEN}\" \\\n       -H \"Accept: application/vnd.github.diff\" \\\n       \"https://api.github.com/repos/OWNER/REPO/pulls/NUMBER\" \\\n       -o /tmp/pr.diff\nIf over 150KB, include only the first 700 lines and append '[DIFF TRUNCATED]'.\n\nSTEP 4 -- Get changed file list from the pulls/NUMBER/files endpoint, join filenames newline-separated.\n\nSTEP 5 -- Also create the shared results directory for the lanes to write into: mkdir -p .resolve/review\n\nSTEP 6 -- Output ONLY this JSON: {\"status\": \"success\", \"context_updates\": {\"pr_owner\": \"OWNER\", \"pr_repo\": \"REPO\", \"pr_number\": \"NUMBER\", \"pr_url\": \"https://github.com/OWNER/REPO/pull/NUMBER\", \"pr_title\": \"...\", \"pr_description\": \"...\", \"pr_head_branch\": \"...\", \"pr_head_sha\": \"PR_HEAD_SHA\", \"diff_content\": \"...\", \"changed_files_list\": \"...\"}}"
+    ]
+
+    // ── Phase 2: Parallel Review Lanes ─────────────────────────
+    //
+    // fan_out spawns one genuinely concurrent asyncio branch per outgoing
+    // edge (max_parallel=5 -- all 5 run at once, no queueing). Each lane
+    // gets an isolated cloned context AND its own thread_id (fresh LLM
+    // session) -- both session isolation and wall-clock concurrency, not
+    // just one or the other.
+    fan_out [
+        label      = "Fan Out: Review Lanes",
+        shape      = component,
+        fillcolor  = "#FFF3E0",
+        max_parallel = 5,
+        join_policy  = "wait_all",
+        error_policy = "continue"
+    ]
+
+    // Each lane below writes its findings to a fixed file path
+    // (.resolve/review/<lane>.json) rather than relying on context_updates
+    // surviving the parallel-branch clone/join. Same checklist content as
+    // pr-review-exhaustive's lanes, condensed for a faster turnaround
+    // (still checks every category, just asks for a tighter writeup).
+
+    lane_correctness [
+        label     = "Lane: Correctness",
+        shape     = box,
+        fillcolor = "#FFEBEE",
+        thread_id = "correctness-thread",
+        timeout   = "6m",
+        prompt    = "You are the CORRECTNESS reviewer, running concurrently with 4 other lanes. Find logic bugs, edge case gaps, exception handling failures, race conditions ONLY -- other dimensions are other lanes' jobs.\n\nPR: $pr_url ($pr_title), repo $pr_owner/$pr_repo, head branch $pr_head_branch\n\nDIFF:\n$diff_content\n\nCHANGED FILES:\n$changed_files_list\n\nWORKFLOW: clone the PR head branch (git clone --depth 1 --branch \"$pr_head_branch\" \"https://x-access-token:${GH_TOKEN}@github.com/$pr_owner/$pr_repo\" /tmp/pr_repo_correctness && cd /tmp/pr_repo_correctness), read changed files in full, apply the checklist: off-by-one/boundary errors, unhandled None/empty/zero/negative inputs, swallowed or wrong exceptions, race conditions/shared-state mutation, wrong API-contract assumptions, resource leaks. Cite file:line for every finding; if none, state '(none found)'.\n\nWrite your findings AND a JSON array of structured inline-comment objects ({\"path\":..., \"line\":..., \"body\":..., \"suggestion\": null-or-string}) to two files:\n  echo \"<findings prose>\" > .resolve/review/correctness_findings.txt\n  echo '<comments JSON array>' > .resolve/review/correctness_comments.json\nPrint the single line: correctness_done"
+    ]
+
+    lane_architecture [
+        label     = "Lane: Architecture",
+        shape     = box,
+        fillcolor = "#E8EAF6",
+        thread_id = "arch-thread",
+        timeout   = "6m",
+        prompt    = "You are the ARCHITECTURE reviewer, running concurrently with 4 other lanes. Find wrong-layer code, tight coupling, leaky abstractions, violated module boundaries ONLY -- other dimensions are other lanes' jobs.\n\nPR: $pr_url ($pr_title), repo $pr_owner/$pr_repo, head branch $pr_head_branch\n\nDIFF:\n$diff_content\n\nCHANGED FILES:\n$changed_files_list\n\nWORKFLOW: clone the PR head branch (git clone --depth 1 --branch \"$pr_head_branch\" \"https://x-access-token:${GH_TOKEN}@github.com/$pr_owner/$pr_repo\" /tmp/pr_repo_arch && cd /tmp/pr_repo_arch), read changed files plus adjacent modules/interfaces, apply the checklist: wrong layer, tight coupling, leaky abstraction, violated boundary, circular dependency, mixed responsibilities, premature abstraction. Cite file:line (or file+symbol); if none, state '(none found)'.\n\nWrite findings AND structured inline-comment JSON array to:\n  echo \"<findings prose>\" > .resolve/review/arch_findings.txt\n  echo '<comments JSON array>' > .resolve/review/arch_comments.json\nPrint the single line: arch_done"
+    ]
+
+    lane_patterns [
+        label     = "Lane: Patterns",
+        shape     = box,
+        fillcolor = "#E0F7FA",
+        thread_id = "patterns-thread",
+        timeout   = "5m",
+        prompt    = "You are the PATTERNS reviewer, running concurrently with 4 other lanes. Find API misuse, naming problems, non-idiomatic code, dead code, magic values ONLY -- other dimensions are other lanes' jobs.\n\nPR: $pr_url ($pr_title), repo $pr_owner/$pr_repo, head branch $pr_head_branch\n\nDIFF:\n$diff_content\n\nCHANGED FILES:\n$changed_files_list\n\nWORKFLOW: clone the PR head branch (git clone --depth 1 --branch \"$pr_head_branch\" \"https://x-access-token:${GH_TOKEN}@github.com/$pr_owner/$pr_repo\" /tmp/pr_repo_patterns && cd /tmp/pr_repo_patterns), read changed files plus enough surrounding code for consistency, apply the checklist: API misuse, misleading names, non-idiomatic constructs, convention violations, import hygiene, magic numbers/strings, dead code, inconsistent patterns. Cite file:line; if none, state '(none found)'.\n\nWrite findings AND structured inline-comment JSON array to:\n  echo \"<findings prose>\" > .resolve/review/patterns_findings.txt\n  echo '<comments JSON array>' > .resolve/review/patterns_comments.json\nPrint the single line: patterns_done"
+    ]
+
+    lane_tests [
+        label     = "Lane: Tests",
+        shape     = box,
+        fillcolor = "#FFF8E1",
+        thread_id = "tests-thread",
+        timeout   = "5m",
+        prompt    = "You are the TESTS reviewer, running concurrently with 4 other lanes. Find test coverage gaps and test quality problems ONLY -- other dimensions are other lanes' jobs.\n\nPR: $pr_url ($pr_title), repo $pr_owner/$pr_repo, head branch $pr_head_branch\n\nDIFF:\n$diff_content\n\nCHANGED FILES:\n$changed_files_list\n\nWORKFLOW: clone the PR head branch (git clone --depth 1 --branch \"$pr_head_branch\" \"https://x-access-token:${GH_TOKEN}@github.com/$pr_owner/$pr_repo\" /tmp/pr_repo_tests && cd /tmp/pr_repo_tests), read test files in full plus the production code they cover, apply the checklist: untested new functions/branches/edge cases, missing regression test for a claimed bug fix, weak assertions, unclear test names, flakiness risks (sleep/random/network in unit tests), incorrect mocking, missing integration coverage where a unit test alone is insufficient. Cite the missing scenario AND the production file:line; if coverage is complete, state '(none found)'.\n\nWrite findings AND structured inline-comment JSON array to:\n  echo \"<findings prose>\" > .resolve/review/tests_findings.txt\n  echo '<comments JSON array>' > .resolve/review/tests_comments.json\nPrint the single line: tests_done"
+    ]
+
+    lane_pedantic [
+        label     = "Lane: Pedantic",
+        shape     = box,
+        fillcolor = "#F3E5F5",
+        thread_id = "pedantic-thread",
+        timeout   = "4m",
+        prompt    = "You are the PEDANTIC reviewer, running concurrently with 4 other lanes. Find spelling, grammar, docstring gaps, TODO/commented-out code ONLY -- all findings are LOW severity. This lane reviews the diff only, no clone needed.\n\nPR: $pr_url ($pr_title)\n\nDIFF:\n$diff_content\n\nCHECKLIST (examine only new/changed lines): spelling errors, grammar errors in docstrings/comments, missing docstring on new public symbols, stale docstrings, unreferenced TODO/FIXME, commented-out code, inconsistent capitalization, trailing whitespace. Cite file:line from the diff; if none, state '(none found)'.\n\nWrite findings AND structured inline-comment JSON array (with a `suggestion` field for simple 1-4 line fixes) to:\n  echo \"<findings prose>\" > .resolve/review/pedantic_findings.txt\n  echo '<comments JSON array>' > .resolve/review/pedantic_comments.json\nPrint the single line: pedantic_done"
+    ]
+
+    // ── Phase 3: Fan In + Collect ──────────────────────────────
+    //
+    // tripleoctagon is the ParallelHandler's join-point shape. Results land
+    // in context.parallel.results, but we deliberately do NOT depend on
+    // unpacking that structure -- collect_lane_results reads the 10 fixed
+    // files each lane wrote directly, which works regardless of how
+    // parallel.results happens to be shaped in a given engine version.
+    fan_in [
+        label     = "Fan In",
+        shape     = tripleoctagon,
+        fillcolor = "#FFE0B2"
+    ]
+
+    collect_lane_results [
+        label     = "Collect Lane Results",
+        shape     = parallelogram,
+        fillcolor = "#ECEFF1",
+        tool_command = "#!/bin/sh\nset -e\nread_or_default() { [ -f \"$1\" ] && cat \"$1\" || printf '%s' \"$2\"; }\ncf=$(read_or_default .resolve/review/correctness_findings.txt '(lane did not report)')\ncc=$(read_or_default .resolve/review/correctness_comments.json '[]')\naf=$(read_or_default .resolve/review/arch_findings.txt '(lane did not report)')\nac=$(read_or_default .resolve/review/arch_comments.json '[]')\npf=$(read_or_default .resolve/review/patterns_findings.txt '(lane did not report)')\npc=$(read_or_default .resolve/review/patterns_comments.json '[]')\ntf=$(read_or_default .resolve/review/tests_findings.txt '(lane did not report)')\ntc=$(read_or_default .resolve/review/tests_comments.json '[]')\ndf=$(read_or_default .resolve/review/pedantic_findings.txt '(lane did not report)')\ndc=$(read_or_default .resolve/review/pedantic_comments.json '[]')\npython3 -c \"import json,sys; print(json.dumps({'correctness_findings': sys.argv[1], 'correctness_comments': sys.argv[2], 'arch_findings': sys.argv[3], 'arch_comments': sys.argv[4], 'patterns_findings': sys.argv[5], 'patterns_comments': sys.argv[6], 'tests_findings': sys.argv[7], 'tests_comments': sys.argv[8], 'pedantic_findings': sys.argv[9], 'pedantic_comments': sys.argv[10]}))\" \"$cf\" \"$cc\" \"$af\" \"$ac\" \"$pf\" \"$pc\" \"$tf\" \"$tc\" \"$df\" \"$dc\"",
+        parse_json = "true"
+    ]
+
+    // ── Phase 4: Merge (no retry loop) ──────────────────────────
+    //
+    // Same synthesis rules as pr-review-exhaustive's merge_findings, minus
+    // the $quality_feedback retry-cycle plumbing -- this pipeline does not
+    // loop back to re-synthesize.
+    merge_findings [
+        label     = "Merge Findings",
+        shape     = box,
+        fillcolor = "#E8F0FE",
+        timeout   = "5m",
+        prompt    = "You are the synthesis node in a fast parallel PR review pipeline. You receive structured findings from 5 concurrently-run reviewer lanes and must produce ONE comprehensive, deduplicated, prioritized review.\n\nPR: $pr_url -- $pr_title\nRepository: $pr_owner/$pr_repo\n\nRAW LANE FINDINGS:\n--- CORRECTNESS ---\n$correctness_findings\n--- ARCHITECTURE ---\n$arch_findings\n--- PATTERNS ---\n$patterns_findings\n--- TESTS ---\n$tests_findings\n--- PEDANTIC ---\n$pedantic_findings\n\nRAW LANE INLINE COMMENTS (JSON arrays, may be empty []):\n--- CORRECTNESS --- $correctness_comments\n--- ARCHITECTURE --- $arch_comments\n--- PATTERNS --- $patterns_comments\n--- TESTS --- $tests_comments\n--- PEDANTIC --- $pedantic_comments\n\nSYNTHESIS RULES: (1) INCLUDE ALL -- every finding from every lane must appear; (2) DEDUPLICATE -- merge overlapping file:line findings into one entry noting all contributing dimensions; (3) PRIORITIZE CRITICAL -> HIGH -> MEDIUM -> LOW, grouped by file within each tier; (4) ELEVATE by one severity tier when 2+ lanes independently flag the same file; (5) VERDICT: CHANGES_REQUESTED if any CRITICAL/HIGH finding exists, else PASS; (6) NO INVENTION -- do not add findings not present in lane output; (7) PRESERVE CITATIONS -- every finding keeps its file:line.\n\nOutput ONLY this JSON (use \\n for newlines inside string values): {\"status\": \"success\", \"context_updates\": {\"merged_review\": \"<full organized review text>\", \"review_verdict\": \"PASS\"|\"CHANGES_REQUESTED\", \"review_summary\": \"<3-5 sentence summary>\", \"review_comments_json\": \"<merged JSON array of inline comment objects as a string>\"}}"
+    ]
+
+    // ── Phase 5: Post Review ───────────────────────────────────
+    comment_draft [
+        label     = "Post Review",
+        shape     = box,
+        fillcolor = "#E8F0FE",
+        timeout   = "5m",
+        prompt    = "Post the merged PR review as an inline GitHub PR review (Files Changed tab) using bash + curl. Uses GH_TOKEN from env.\n\nPR URL: $pr_url\nPR Number: $pr_number\nPR Owner/Repo: $pr_owner/$pr_repo\nPR Head SHA: $pr_head_sha\nVerdict: $review_verdict\nSummary: $review_summary\nInline comments JSON: $review_comments_json\n\nSTEP 1 -- write the summary body: concise verdict + most critical finding (or confirm all checks pass), note count of findings across 5 lanes, end with 'Full details in the inline comments on Files Changed.' plus a verdict line (VERDICT: PASS or VERDICT: CHANGES_REQUESTED) and this humility caveat: '> \u26a0\ufe0f Automated fast parallel review -- 5 concurrent lanes (correctness, architecture, patterns, tests, pedantic), each with fresh context, no synthesis retry loop. Optimized for turnaround, not exhaustiveness. Human maintainer should give final approval before merging.'\n\nSTEP 2 -- POST via bash+curl+python3 (build payload safely to handle JSON escaping): POST https://api.github.com/repos/$pr_owner/$pr_repo/pulls/$pr_number/reviews with {commit_id: $pr_head_sha, body: <summary>, event: REQUEST_CHANGES if CHANGES_REQUESTED else APPROVE, comments: <parsed comments array>}. On HTTP 422 (inline comments rejected, e.g. stale diff position), fall back to a single top-level issue comment with the full merged review instead. Apply labels 'reviewed' or 'changes-requested' via the issues/$pr_number/labels endpoint matching the verdict. Print the single line: posted"
+    ]
+
+    // Pipeline exit
+    done [
+        label     = "Done",
+        shape     = Msquare,
+        fillcolor = "#FFCDD2"
+    ]
+
+    // ═══════════════════════════════════════════════════════════
+    // EDGES
+    // ═══════════════════════════════════════════════════════════
+
+    start -> checkout_and_read
+
+    checkout_and_read -> fan_out
+
+    // Fan-out edges are the branches themselves, not conditional routes --
+    // no condition= here. The component handler spawns one concurrent task
+    // per outgoing edge, bounded by max_parallel.
+    fan_out -> lane_correctness
+    fan_out -> lane_architecture
+    fan_out -> lane_patterns
+    fan_out -> lane_tests
+    fan_out -> lane_pedantic
+
+    lane_correctness  -> fan_in
+    lane_architecture -> fan_in
+    lane_patterns     -> fan_in
+    lane_tests        -> fan_in
+    lane_pedantic     -> fan_in
+
+    fan_in -> collect_lane_results
+    collect_lane_results -> merge_findings
+    merge_findings -> comment_draft
+    comment_draft -> done
+
+}
