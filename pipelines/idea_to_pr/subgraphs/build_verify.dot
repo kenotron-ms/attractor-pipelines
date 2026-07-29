@@ -125,19 +125,33 @@ digraph build_verify {
     prompt="Read .resolve/verify/rubric_result.json. For EVERY criterion with met=false, fix the specific gap its evidence points to -- no broad rewrite, address exactly what's unmet. Re-run that criterion's check command directly and confirm the new output actually satisfies it before moving to the next unmet criterion. Update docs/plans/<feature>-status.md with what changed and the fresh command output. Print the single line: fix_attempted"
   ];
 
-  ExtractVerdict [
-    shape=parallelogram, label="Extract Verdict",
-    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"%s\", \"build.fix_rounds_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\"}' \"$1\" \"$count\"",
+  // Split into two literal-outcome nodes rather than one shared node that
+  // relied on a positional "$1" shell argument -- nothing in this graph
+  // ever passed an argument into a bare tool_command invocation, so that
+  // argument was always empty, making build.verdict always "" and
+  // guaranteeing "no matching edge" in the parent graph on EVERY run,
+  // regardless of whether the rubric actually passed or the backstop
+  // tripped. Each node below hard-codes its own literal verdict instead.
+  ExtractVerdictMet [
+    shape=parallelogram, label="Extract Verdict (rubric met)",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"rubric_met\", \"build.fix_rounds_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\"}' \"$count\"",
+    parse_json="true"
+  ];
+
+  ExtractVerdictEscalated [
+    shape=parallelogram, label="Extract Verdict (escalated)",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"escalated\", \"build.fix_rounds_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\"}' \"$count\"",
     parse_json="true"
   ];
 
   Start          -> Implement;
   Implement      -> SelfEvaluate;
   SelfEvaluate   -> CheckRubric;
-  CheckRubric    -> ExtractVerdict [condition="context.tool.last_line=pass", weight="2", label="rubric met"];
-  CheckRubric    -> CheckFixRounds [condition="context.tool.last_line=fail", label="rubric unmet"];
-  CheckFixRounds -> Fix            [condition="context.tool.last_line=fix_ok",       label="fix round (backstop max $max_fix_rounds)"];
-  CheckFixRounds -> ExtractVerdict [condition="context.tool.last_line=fix_exhausted", label="backstop tripped -- escalate"];
-  Fix            -> SelfEvaluate   [loop_restart="true"];
-  ExtractVerdict -> Exit;
+  CheckRubric    -> ExtractVerdictMet       [condition="context.tool.last_line=pass", weight="2", label="rubric met"];
+  CheckRubric    -> CheckFixRounds          [condition="context.tool.last_line=fail", label="rubric unmet"];
+  CheckFixRounds -> Fix                     [condition="context.tool.last_line=fix_ok",       label="fix round (backstop max $max_fix_rounds)"];
+  CheckFixRounds -> ExtractVerdictEscalated [condition="context.tool.last_line=fix_exhausted", label="backstop tripped -- escalate"];
+  Fix            -> SelfEvaluate            [loop_restart="true"];
+  ExtractVerdictMet       -> Exit;
+  ExtractVerdictEscalated -> Exit;
 }
