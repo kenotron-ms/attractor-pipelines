@@ -11,6 +11,30 @@ Each pipeline lives in its own `pipelines/[name]/` folder containing its
 entry `.dot` file (`pipelines/[name]/[name].dot`), any `subgraphs/`, and
 optional companion docs (e.g. `[name].md`).
 
+## Pipeline: hello world
+
+`pipelines/hello_world/hello_world.dot` — the minimal end-to-end demo in
+this repo: given `$repo`, write a `hello_world.txt` file and open a PR with
+it. No planning, no rubric, no verification tiers, no fix loop — just
+write → commit → push → open PR. Useful as a smoke test for a
+resolver/runtime setup (prove the engine can reach a repo, write a file,
+and open a PR end to end) and as the simplest possible reference for the
+`shape=folder` delegation pattern (`subgraphs/deliver_pr.dot`) used
+throughout this repo's other pipelines.
+
+```
+pipelines/hello_world/
+  hello_world.dot           # entry pipeline
+  subgraphs/
+    deliver_pr.dot            # commit, push, open PR
+```
+
+Point the attractor bundle at it via:
+
+```
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/hello_world/hello_world.dot
+```
+
 ## Pipeline: idea-to-shipped SDLC pipeline
 
 `pipelines/idea_to_shipped/idea_to_shipped.dot` — a full "idea to shipped"

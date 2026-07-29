@@ -1,0 +1,65 @@
+// hello_world.dot
+//
+// The minimal end-to-end demo pipeline in this repo: given a repo, write a
+// hello_world.txt file and open a PR with it. No planning, no rubric, no
+// verification tiers, no fix loop -- just clone-context -> write -> commit
+// -> push -> open PR. Useful as a smoke test for a resolver/runtime setup
+// (prove the attractor engine can reach a repo, write a file, and open a
+// PR end to end) and as the simplest possible reference for the
+// shape=folder delegation pattern used throughout this repo's other
+// pipelines (see subgraphs/deliver_pr.dot).
+//
+// Context inputs:
+//   $repo   - target repo slug (owner/name) to open the PR against. The
+//             runtime is expected to already have this repo checked out
+//             (same assumption idea_to_pr / idea_to_shipped make -- this
+//             pipeline does not itself clone anything).
+//
+// Context outputs:
+//   delivery.pr_url  - PR URL, set by DeliverPR subgraph
+//   delivery.result  - "opened" | "failed"
+
+digraph hello_world {
+  graph [
+    label="Hello World -- minimal write-a-file-and-open-a-PR demo",
+    goal="$repo",
+    rankdir=LR,
+    default_max_retry=2,
+    default_fidelity="summary:high",
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; }"
+  ];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // One box node does the entire "work": create a branch and write the
+  // file. Deliberately not split further -- there is no plan, no rubric,
+  // no verification tier to assign here; this pipeline exists to be
+  // trivial, not to demonstrate VDD.
+  WriteHelloWorld [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Write hello_world.txt",
+    prompt="Create a new branch off the repo's default branch named hello-world-<short timestamp, e.g. hello-world-20260729143000>. On that branch, write a file named hello_world.txt at the repo root with exactly this content:\n\nHello, World!\n\nThis file was created by the hello_world pipeline in kenotron-ms/attractor-pipelines -- a minimal end-to-end demo: write a file, commit it, push it, and open a PR.\n\nDo NOT commit yet -- the next step handles staging, commit, push, and opening the PR. Print the single line: hello_world_written"
+  ];
+
+  // Reuses the same deliver_pr.dot subgraph pattern as idea_to_pr /
+  // idea_to_shipped: stage everything, commit, push, open the PR against
+  // $repo's default branch.
+  DeliverPR [
+    shape=folder, label="Deliver PR",
+    dot_file="subgraphs/deliver_pr.dot",
+    outputs="delivery.pr_url,delivery.result"
+  ];
+
+  Report [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Report",
+    prompt="Report the outcome: if ${delivery.result} is 'opened', state the PR URL (${delivery.pr_url}) plainly. If it's 'failed', say so plainly and do not claim success. Print the single line: reported"
+  ];
+
+  Start           -> WriteHelloWorld;
+  WriteHelloWorld -> DeliverPR;
+  DeliverPR       -> Report [condition="context.delivery.result=opened", weight="2"];
+  DeliverPR       -> Report [condition="outcome=fail"];
+  Report          -> Exit;
+}
