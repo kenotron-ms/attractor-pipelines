@@ -224,7 +224,7 @@ digraph pr_review_exhaustive {
     // NOTE: reasoning_effort is an unquoted identifier (not a string).
     quality_eval [
         label            = "Quality Gate",
-        shape            = diamond,
+        shape            = box,
         fillcolor        = "#FFF9C4",
         goal_gate        = true,
         retry_target     = "merge_findings",
@@ -257,9 +257,16 @@ digraph pr_review_exhaustive {
     // Post Review comment above for the incident this fixes). Modeled on
     // quality_eval's goal_gate + retry_target pattern, applied here to an
     // external-side-effect claim instead of a content-quality claim.
+    //
+    // shape=box (not diamond): per docs/primer.md's foot-gun card, diamond
+    // is documented as a conditional/router shape on the reference engine
+    // that can return its own SUCCESS regardless of prompt content --
+    // exactly the failure class an LLM adversarial-verification node must
+    // NOT risk. box is the shape proven elsewhere in this file (comment_draft,
+    // merge_findings) to actually execute prompts and report real outcome.
     verify_review_posted [
         label            = "Verify Review Posted",
-        shape            = diamond,
+        shape            = box,
         fillcolor        = "#FFF9C4",
         goal_gate        = true,
         retry_target     = "comment_draft",

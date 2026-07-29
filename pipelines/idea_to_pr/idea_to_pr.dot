@@ -97,6 +97,20 @@ digraph idea_to_pr {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
+  // Idempotency: build_verify.dot's CheckFixRounds increments a persistent
+  // .resolve/fix_state.json counter with no reset of its own. Per
+  // docs/primer.md doctrine #4.8 (idempotency widens the basin), re-running
+  // this pipeline against a working directory that still has a stale
+  // fix_state.json from a prior invocation (e.g. a reused CI checkout)
+  // would start the fix-round backstop already elevated, tripping the
+  // escalation path prematurely on a run that hasn't actually earned it.
+  // Clearing it here makes every fresh pipeline run start from a clean
+  // fix-round budget regardless of what a previous run left behind.
+  ResetFixState [
+    shape=parallelogram, label="Reset Fix State",
+    tool_command="rm -f .resolve/fix_state.json && printf 'reset'"
+  ];
+
   // --- Phase 1: Accept an already-brainstormed design (same as idea_to_shipped) ---
   AcceptDesign [
     shape=box, goal_gate=true, fidelity="summary:high",
@@ -136,12 +150,13 @@ digraph idea_to_pr {
     prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), final weighted rubric score (${build.rubric_score}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'escalated' (the fix-round safety backstop tripped before the rubric's pass_threshold was met), say so plainly and list which specific criteria are still short of full points and why -- do not claim success. Print the single line: reported"
   ];
 
-  Start        -> AcceptDesign;
+  Start        -> ResetFixState;
+  ResetFixState -> AcceptDesign;
   AcceptDesign -> Plan;
   Plan         -> Implement;                                    // no PlanConfidenceCheck / PlanApproval gate
   Implement    -> DeliverPR [condition="context.build.verdict=rubric_met", weight="2"];
   Implement    -> Report    [condition="context.build.verdict=escalated"];
   DeliverPR    -> Report    [condition="context.delivery.result=opened", weight="2"];
-  DeliverPR    -> Report    [condition="outcome=fail"];
+  DeliverPR    -> Report    [condition="context.delivery.result=failed"];
   Report       -> Exit;
 }

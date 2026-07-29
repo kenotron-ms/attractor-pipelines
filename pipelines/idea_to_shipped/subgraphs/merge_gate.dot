@@ -55,7 +55,12 @@ digraph merge_gate {
   ];
 
   Start              -> HumanApproval;
-  HumanApproval      -> CheckHumanResponse;
+  // fidelity="full" (overriding default_fidelity="summary:high"): same
+  // last_response-truncation risk as idea_to_shipped.dot's
+  // CheckPlanApproval -- see docs/primer.md foot-gun card #3. This gate
+  // authorizes an actual merge, so a truncated human reply must not be
+  // misread.
+  HumanApproval      -> CheckHumanResponse [fidelity="full"];
   CheckHumanResponse -> RebaseTest [condition="context.tool.last_line=approved", weight="2"];
   CheckHumanResponse -> Rejected   [condition="context.tool.last_line=rejected"];
   RebaseTest         -> Merge      [condition="context.tool.last_line=rc_pass", weight="2"];

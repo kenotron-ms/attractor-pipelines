@@ -80,10 +80,28 @@ digraph ship_ready {
     tool_command="bash -c 'if [ -f .github/workflows/deploy.yml ] && grep -q ship_ready-marker-v1 .github/workflows/deploy.yml; then echo current; else echo missing; fi'"
   ];
 
+  // Deterministic evidence gate, not prompt-level advisory text: confirms
+  // the local checkout's origin actually points at $repo BEFORE any LLM
+  // node writes/commits anything. This is what closes the "wrong-but-
+  // plausible" gap in the original fix -- a model having a bad day and
+  // skipping a prose instruction can no longer silently write against the
+  // wrong checkout (e.g. an empty Gitea scratch placeholder), because the
+  // graph itself won't route to WriteWorkflow until this check passes.
+  VerifyRepoTarget [
+    shape=parallelogram, label="Verify Repo Target",
+    tool_command="bash -c 'url=$(git remote get-url origin 2>/dev/null || echo \"\"); case \"$url\" in *github.com*$repo*|*github.com:$repo*) echo ok ;; *) git remote set-url origin \"https://github.com/$repo.git\" 2>/dev/null && echo fixed || echo mismatch ;; esac'"
+  ];
+
+  RepoTargetEscalation [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Repo Target Escalation",
+    prompt="VerifyRepoTarget could not make the local checkout's git remote 'origin' point at https://github.com/$repo (neither the existing remote matched nor could it be corrected with `git remote set-url`). Do NOT write or commit anything. Report this as a blocking failure requiring human/operator attention: the working directory is not a valid checkout of $repo. Print the single line: repo_target_escalated"
+  ];
+
   WriteWorkflow [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Write CI/CD Workflow",
-    prompt="Confirm you are operating against the real target repo: run `git remote -v` and verify origin points at https://github.com/$repo (if it does not, run `git remote set-url origin https://github.com/$repo.git` or clone $repo fresh -- do not proceed against any other checkout, e.g. a local scratch/placeholder repo). Create a new branch off $repo's default branch named ship-ready-workflow-<short timestamp, e.g. ship-ready-workflow-20260729143000>. On that branch, write .github/workflows/deploy.yml with exactly two jobs: (1) a `pull_request` job that runs `vercel deploy --token=$${VERCEL_TOKEN} --yes` (using the vercel-action or plain CLI), captures the preview URL, and comments it on the PR via the GitHub API; (2) a `push` job restricted to the default branch that runs `vercel deploy --prod --token=$${VERCEL_TOKEN} --yes` followed by `supabase db push --db-url $${SUPABASE_DB_URL} --yes`. Both jobs should invoke this same repo's ship_ready pipeline (git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot) as the actual deploy runner, passing through GITHUB_EVENT_NAME and the required secrets (VERCEL_TOKEN, SUPABASE_DB_URL, GH_TOKEN) as env vars -- do not duplicate the deploy logic directly in YAML shell steps. Required repo secrets: VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN. Include the literal comment '# ship_ready-marker-v1' somewhere in the file so future idempotency checks can detect this exact template version. Do NOT commit yet -- the next step (DeliverPR) handles staging, commit, push, and opening the PR against $repo. Print the single line: workflow_written"
+    prompt="The repo target has already been mechanically verified (VerifyRepoTarget confirmed origin points at https://github.com/$repo) -- you do not need to re-check this, but do not switch to any other checkout either. Create a new branch off $repo's default branch named ship-ready-workflow-<short timestamp, e.g. ship-ready-workflow-20260729143000>. On that branch, write .github/workflows/deploy.yml with exactly two jobs: (1) a `pull_request` job that runs `vercel deploy --token=$${VERCEL_TOKEN} --yes` (using the vercel-action or plain CLI), captures the preview URL, and comments it on the PR via the GitHub API; (2) a `push` job restricted to the default branch that runs `vercel deploy --prod --token=$${VERCEL_TOKEN} --yes` followed by `supabase db push --db-url $${SUPABASE_DB_URL} --yes`. Both jobs should invoke this same repo's ship_ready pipeline (git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot) as the actual deploy runner, passing through GITHUB_EVENT_NAME and the required secrets (VERCEL_TOKEN, SUPABASE_DB_URL, GH_TOKEN) as env vars -- do not duplicate the deploy logic directly in YAML shell steps. Required repo secrets: VERCEL_TOKEN, SUPABASE_DB_URL, ANTHROPIC_API_KEY, GH_TOKEN. Include the literal comment '# ship_ready-marker-v1' somewhere in the file so future idempotency checks can detect this exact template version. Do NOT commit yet -- the next step (DeliverPR) handles staging, commit, push, and opening the PR against $repo. Print the single line: workflow_written"
   ];
 
   // Reuses the same deliver_pr.dot subgraph pattern as hello_world /
@@ -165,11 +183,15 @@ digraph ship_ready {
   DetectMode -> DeployVercelPreview   [condition="context.tool.last_line=pull_request"];
   DetectMode -> DeployVercelProd      [condition="context.tool.last_line=push"];
 
-  CheckWorkflow -> WriteWorkflow      [condition="context.tool.last_line=missing"];
+  CheckWorkflow -> VerifyRepoTarget   [condition="context.tool.last_line=missing"];
+  VerifyRepoTarget -> WriteWorkflow        [condition="context.tool.last_line=ok",      weight="2"];
+  VerifyRepoTarget -> WriteWorkflow        [condition="context.tool.last_line=fixed"];
+  VerifyRepoTarget -> RepoTargetEscalation [condition="context.tool.last_line=mismatch"];
+  RepoTargetEscalation -> BootstrapReport;
   CheckWorkflow -> BootstrapReport    [condition="context.tool.last_line=current", weight="2"];
   WriteWorkflow -> DeliverPR;
   DeliverPR     -> BootstrapReport [condition="context.delivery.result=opened", weight="2"];
-  DeliverPR     -> BootstrapReport [condition="outcome=fail"];
+  DeliverPR     -> BootstrapReport [condition="context.delivery.result=failed"];
   BootstrapReport -> Exit;
 
   DeployVercelPreview -> VerifyPreviewLive;

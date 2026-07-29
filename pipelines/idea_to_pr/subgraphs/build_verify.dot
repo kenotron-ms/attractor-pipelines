@@ -111,9 +111,21 @@ digraph build_verify {
     prompt="Read .resolve/plan/rubric.json in full (its 'steps', 'pass_threshold', and every criterion) and docs/plans/<feature>-status.md. First, work through rubric.json's 'steps' yourself right now -- re-run commands, read the actual files, and where a criterion is about user-facing behavior, actually use the feature the way a real user would rather than reading the code and assuming. If status.md's account looks incomplete, inconsistent, or suspiciously clean anywhere, that is exactly when to re-verify directly rather than trust it. Then, for EACH criterion in rubric.json: think like a user, not an engineer -- award points_awarded from 0 up to that criterion's max points based on what the evidence actually shows, using any partial-credit rule stated in the criterion's own description (do not invent your own scale). A 'CRITICAL:' criterion failing should cost real points, not a token deduction. Do not award points for something merely claimed in status.md without evidence backing it. Do not invent criteria that aren't in rubric.json, and do not skip any that are. Compute overall_score = sum(points_awarded) / sum(points) across all criteria. Write .resolve/verify/rubric_result.json: {\\\"overall_score\\\": <float 0-1>, \\\"pass_threshold\\\": <copied from rubric.json>, \\\"results\\\": [{\\\"id\\\": \\\"<criterion id>\\\", \\\"points\\\": <max>, \\\"points_awarded\\\": <awarded>, \\\"reasoning\\\": \\\"<what evidence you checked and why this many points>\\\"}, ...]}. Print the single line: rubric_verdict=pass if overall_score >= pass_threshold, or rubric_verdict=fail otherwise, followed on the next line by rubric_score=<overall_score>."
   ];
 
+  // Reads .resolve/verify/rubric_result.json directly rather than grepping
+  // $last_response for the "rubric_verdict=" marker line. SelfEvaluate runs
+  // under this graph's default_fidelity="summary:high" (idea_to_pr.dot),
+  // and per docs/primer.md's foot-gun card #3, last_response truncates to
+  // 200 chars except under fidelity=full -- SelfEvaluate's prompt asks for
+  // a long rubric write-up with the verdict marker printed LAST, so
+  // truncation could silently drop the very line this gate greps for, and
+  // it would then always fail through to CheckFixRounds regardless of the
+  // real verdict. That failed safe (never falsely claimed pass) but could
+  // burn fix-loop budget on a rubric that genuinely passed. Reading the
+  // file SelfEvaluate already writes sidesteps last_response entirely --
+  // same pattern build_loop.dot's VerdictGate uses for verdict.json.
   CheckRubric [
     shape=parallelogram, label="Check Rubric Verdict",
-    tool_command="bash -c 'if echo \"$last_response\" | grep -q rubric_verdict=pass; then echo pass; else echo fail; fi'"
+    tool_command="#!/bin/sh\nset -e\npython3 -c \"import json,os,sys; p='.resolve/verify/rubric_result.json'; d=json.load(open(p)) if os.path.exists(p) else {}; sys.exit(0 if d.get('overall_score', 0) >= d.get('pass_threshold', 1) else 1)\" && printf 'pass' || printf 'fail'"
   ];
 
   // Safety backstop ONLY -- not the completion mechanism. Default 2

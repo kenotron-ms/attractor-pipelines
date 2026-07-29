@@ -60,6 +60,6 @@ digraph hello_world {
   Start           -> WriteHelloWorld;
   WriteHelloWorld -> DeliverPR;
   DeliverPR       -> Report [condition="context.delivery.result=opened", weight="2"];
-  DeliverPR       -> Report [condition="outcome=fail"];
+  DeliverPR       -> Report [condition="context.delivery.result=failed"];
   Report          -> Exit;
 }
