@@ -1,10 +1,9 @@
 # attractor-pipelines
 
-Public, real-world DOT pipelines for
-[`amplifier-resolver-dot-graph`](https://github.com/microsoft/amplifier-resolver-dot-graph)
-(the attractor engine), shared for reference and reuse — not fixtures,
-not throwaway samples. Fetch one directly via `git+https://` subdirectory
-URLs, or copy and adapt it for your own pipeline.
+Public, real-world DOT pipelines for the attractor bundle, shared for
+reference and reuse — not fixtures, not throwaway samples. Fetch one
+directly via `git+https://` subdirectory URLs, or copy and adapt it for
+your own pipeline.
 
 ## Convention
 
@@ -41,7 +40,7 @@ pipelines/idea_to_shipped/
     deploy_gate.dot           # human decision -> deploy prod/staging/hold
 ```
 
-Point the resolver at it via:
+Point the attractor bundle at it via:
 
 ```
 git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/idea_to_shipped/idea_to_shipped.dot
@@ -67,7 +66,7 @@ full walkthrough, runtime assumptions, and the intentionally-omitted broken
 `pull_request_target`) lives at
 [`.github/workflows/pr-review-exhaustive.yml`](.github/workflows/pr-review-exhaustive.yml).
 
-Point the resolver at it via:
+Point the attractor bundle at it via:
 
 ```
 git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
