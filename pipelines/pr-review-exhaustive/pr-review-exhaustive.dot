@@ -244,7 +244,27 @@ digraph pr_review_exhaustive {
         shape        = box,
         fillcolor    = "#E8F0FE",
         timeout      = "5m",
-        prompt       = "Post the exhaustive PR review as an inline GitHub PR review (Files Changed tab) using bash + curl. Uses GH_TOKEN from env.\n\nPR URL: $pr_url\nPR Number: $pr_number\nPR Owner/Repo: $pr_owner/$pr_repo\nPR Head SHA: $pr_head_sha\nVerdict: $review_verdict\nSummary: $review_summary\nInline comments JSON: $review_comments_json\n\nSTEP 1 — FORMAT THE SUMMARY BODY:\nWrite a concise review summary (3–5 sentences):\n- State the verdict and the most critical finding (or confirm all checks pass)\n- Note how many findings were found across all 5 lanes\n- End with: \"Full details in the inline comments on Files Changed.\"\nEnd with exactly ONE verdict line:\n  VERDICT: PASS\n  or\n  VERDICT: CHANGES_REQUESTED\nEnd with the humility caveat:\n> ⚠️ Automated exhaustive review — 5 independent lanes (correctness, architecture, patterns, tests, pedantic) each with fresh context. Thorough but not definitive. Human maintainer should give final approval before merging.\n\nSTEP 2 — POST THE REVIEW (inline comments on the Files Changed tab):\nUse bash to POST a GitHub PR Review with inline comments. Build the payload through python3 to safely handle JSON escaping:\n\n  python3 -c \"\n  import json\n  summary = '''SUMMARY_TEXT_HERE'''\n  verdict = '$review_verdict'\n  event = 'REQUEST_CHANGES' if verdict == 'CHANGES_REQUESTED' else 'APPROVE'\n  comments = json.loads('''$review_comments_json''' or '[]')\n  payload = {'commit_id': '$pr_head_sha', 'body': summary, 'event': event, 'comments': comments}\n  print(json.dumps(payload))\n\" > /tmp/review_payload.json\n\n  curl -s -X POST \\\n    \"https://api.github.com/repos/$pr_owner/$pr_repo/pulls/$pr_number/reviews\" \\\n    -H \"Authorization: token ${GH_TOKEN}\" \\\n    -H \"Accept: application/vnd.github+json\" \\\n    -H \"Content-Type: application/json\" \\\n    -d @/tmp/review_payload.json \\\n    -o /tmp/review_response.json\n\nCheck /tmp/review_response.json for errors. If the inline-comment review is rejected (e.g. an inline comment points at a line outside the diff, HTTP 422), FALL BACK to posting the full $merged_review as a single top-level PR comment. First write $merged_review to /tmp/merged.txt, then:\n\n  python3 -c \"import json;print(json.dumps({'body': open('/tmp/merged.txt').read()}))\" > /tmp/comment_payload.json\n  curl -s -X POST \\\n    \"https://api.github.com/repos/$pr_owner/$pr_repo/issues/$pr_number/comments\" \\\n    -H \"Authorization: token ${GH_TOKEN}\" \\\n    -H \"Accept: application/vnd.github+json\" \\\n    -d @/tmp/comment_payload.json\n\nSTEP 3 — APPLY LABELS (via curl on the PR's issues endpoint):\n  # 'reviewed' always; add 'changes-requested' if verdict is CHANGES_REQUESTED\n  curl -s -X POST \\\n    \"https://api.github.com/repos/$pr_owner/$pr_repo/issues/$pr_number/labels\" \\\n    -H \"Authorization: token ${GH_TOKEN}\" \\\n    -H \"Accept: application/vnd.github+json\" \\\n    -d '{\"labels\":[\"reviewed\"]}'\n  # then, only if verdict is CHANGES_REQUESTED, POST again with {\"labels\":[\"changes-requested\"]}\n\nSTEP 4 — OUTPUT:\n{\"status\": \"success\", \"context_updates\": {\"posted_verdict\": \"$review_verdict\", \"posted_summary\": \"$review_summary\"}}\n\nCRITICAL: Your ENTIRE response must be ONLY the JSON object. No preamble, no code fences."
+        prompt       = "Post the exhaustive PR review as an inline GitHub PR review (Files Changed tab) using bash + curl. Uses GH_TOKEN from env.\n\nPR URL: $pr_url\nPR Number: $pr_number\nPR Owner/Repo: $pr_owner/$pr_repo\nPR Head SHA: $pr_head_sha\nVerdict: $review_verdict\nSummary: $review_summary\nInline comments JSON: $review_comments_json\n\nSTEP 1 — FORMAT THE SUMMARY BODY:\nWrite a concise review summary (3–5 sentences):\n- State the verdict and the most critical finding (or confirm all checks pass)\n- Note how many findings were found across all 5 lanes\n- End with: \"Full details in the inline comments on Files Changed.\"\nEnd with exactly ONE verdict line:\n  VERDICT: PASS\n  or\n  VERDICT: CHANGES_REQUESTED\nEnd with the humility caveat:\n> ⚠️ Automated exhaustive review — 5 independent lanes (correctness, architecture, patterns, tests, pedantic) each with fresh context. Thorough but not definitive. Human maintainer should give final approval before merging.\n\nSTEP 2 — POST THE REVIEW (inline comments on the Files Changed tab):\nUse bash to POST a GitHub PR Review with inline comments. Build the payload through python3 to safely handle JSON escaping:\n\n  python3 -c \"\n  import json\n  summary = '''SUMMARY_TEXT_HERE'''\n  verdict = '$review_verdict'\n  event = 'REQUEST_CHANGES' if verdict == 'CHANGES_REQUESTED' else 'APPROVE'\n  comments = json.loads('''$review_comments_json''' or '[]')\n  payload = {'commit_id': '$pr_head_sha', 'body': summary, 'event': event, 'comments': comments}\n  print(json.dumps(payload))\n\" > /tmp/review_payload.json\n\n  curl -s -X POST \\\n    \"https://api.github.com/repos/$pr_owner/$pr_repo/pulls/$pr_number/reviews\" \\\n    -H \"Authorization: token ${GH_TOKEN}\" \\\n    -H \"Accept: application/vnd.github+json\" \\\n    -H \"Content-Type: application/json\" \\\n    -d @/tmp/review_payload.json \\\n    -o /tmp/review_response.json\n\nCheck /tmp/review_response.json for errors. If the inline-comment review is rejected (e.g. an inline comment points at a line outside the diff, HTTP 422), FALL BACK to posting the full $merged_review as a single top-level PR comment. First write $merged_review to /tmp/merged.txt, then:\n\n  python3 -c \"import json;print(json.dumps({'body': open('/tmp/merged.txt').read()}))\" > /tmp/comment_payload.json\n  curl -s -X POST \\\n    \"https://api.github.com/repos/$pr_owner/$pr_repo/issues/$pr_number/comments\" \\\n    -H \"Authorization: token ${GH_TOKEN}\" \\\n    -H \"Accept: application/vnd.github+json\" \\\n    -d @/tmp/comment_payload.json\n\nSTEP 3 — APPLY LABELS (via curl on the PR's issues endpoint):\n  # 'reviewed' always; add 'changes-requested' if verdict is CHANGES_REQUESTED\n  curl -s -X POST \\\n    \"https://api.github.com/repos/$pr_owner/$pr_repo/issues/$pr_number/labels\" \\\n    -H \"Authorization: token ${GH_TOKEN}\" \\\n    -H \"Accept: application/vnd.github+json\" \\\n    -d '{\"labels\":[\"reviewed\"]}'\n  # then, only if verdict is CHANGES_REQUESTED, POST again with {\"labels\":[\"changes-requested\"]}\n\nSTEP 4 — VERIFY BEFORE REPORTING (do this by actually invoking curl/python3 via your bash tool -- do not simulate or assume the outcome): read /tmp/review_response.json (or the fallback comment's response if you used it) and confirm the POST actually succeeded -- a real review/comment object has an \"id\" field; a rejected request has an \"errors\" array or a \"message\" field instead. Only AFTER you have run the curl commands above and inspected their actual output should you emit your final message.\n\nSTEP 5 — REPORT: your final message must end with, and contain nothing after, exactly one JSON object on its own line. Do NOT emit this as your first or only action -- it must be the LAST thing you send, after the tool calls in STEPS 1-4 above have actually executed:\n{\"status\": \"success\", \"context_updates\": {\"posted_verdict\": \"$review_verdict\", \"posted_summary\": \"$review_summary\", \"review_posted\": true}}\nor, if every POST attempt actually failed per the real response you inspected in STEP 4:\n{\"status\": \"fail\", \"failure_reason\": \"<what curl/the API actually returned>\"}"
+    ]
+
+    // Independent verification that comment_draft's claimed side effect
+    // (posting a review to GitHub) actually happened -- goal_gate=true so
+    // it can retry comment_draft on failure. This exists because the
+    // attractor engine has NO built-in check that a node's claimed tool
+    // calls actually ran; a box node can emit a compliant-looking success
+    // JSON without ever invoking bash if its prompt is worded as a single
+    // no-prose output (the bug this node was added to catch -- see the
+    // Post Review comment above for the incident this fixes). Modeled on
+    // quality_eval's goal_gate + retry_target pattern, applied here to an
+    // external-side-effect claim instead of a content-quality claim.
+    verify_review_posted [
+        label            = "Verify Review Posted",
+        shape            = diamond,
+        fillcolor        = "#FFF9C4",
+        goal_gate        = true,
+        retry_target     = "comment_draft",
+        timeout          = "2m",
+        prompt           = "YOUR RESPONSE MUST START WITH { -- no preamble, no explanation, no text before the opening brace.\n\nUsing bash, GET https://api.github.com/repos/$pr_owner/$pr_repo/pulls/$pr_number/reviews with `Authorization: token ${GH_TOKEN}`, and independently check whether any review in the response actually exists with a body containing 'Automated exhaustive review' and a commit_id matching $pr_head_sha. Do this by actually running the curl command and reading its real output -- do not assume comment_draft's own claim was correct.\n\nIf a matching review is found:\n{\"status\": \"success\"}\nIf NOT found (comment_draft did not actually post, or posted something that doesn't match):\n{\"status\": \"fail\", \"failure_reason\": \"No matching PR review found via GET /reviews -- comment_draft's claimed post was not independently confirmed.\"}\n\nNo prose. Just the JSON."
     ]
 
     // Pipeline exit
@@ -324,6 +344,27 @@ digraph pr_review_exhaustive {
         fontcolor = "#E57373"
     ]
 
-    comment_draft -> done
+    // comment_draft's own claim of success is not trusted -- route through
+    // an independent verification gate before the pipeline is allowed to
+    // finish. On failure, retry comment_draft itself (goal_gate + retry_target).
+    comment_draft -> verify_review_posted [
+        thread_id = "verify-thread",
+        fidelity  = "compact"
+    ]
+
+    verify_review_posted -> done [
+        label     = "outcome=success",
+        condition = "outcome=success",
+        color     = "#43A047",
+        fontcolor = "#43A047"
+    ]
+
+    verify_review_posted -> comment_draft [
+        label     = "outcome!=success",
+        condition = "outcome!=success",
+        style     = dashed,
+        color     = "#E57373",
+        fontcolor = "#E57373"
+    ]
 
 }

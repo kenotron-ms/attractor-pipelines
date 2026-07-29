@@ -32,7 +32,9 @@ start
        ├─ outcome=success  → comment_draft
        └─ outcome!=success → merge_findings   (retry synthesis; lanes preserved)
   └─ comment_draft            (post ONE inline PR review + labels via curl)
-  └─ done
+  └─ verify_review_posted     (goal_gate: independently confirms the post actually happened)
+       ├─ outcome=success  → done
+       └─ outcome!=success → comment_draft   (retry the post itself)
 ```
 
 - **Merge** (`merge_findings`) collects all five lanes, deduplicates by
@@ -48,6 +50,41 @@ start
   comments (`POST /repos/{o}/{r}/pulls/{n}/reviews`, event `APPROVE` /
   `REQUEST_CHANGES`), falls back to a single top-level PR comment on HTTP 422,
   and applies labels `reviewed` / `changes-requested`.
+- **Verify** (`verify_review_posted`, `goal_gate=true`, `retry_target="comment_draft"`)
+  independently re-checks — via a fresh `GET /repos/{o}/{r}/pulls/{n}/reviews`
+  call, not by trusting `comment_draft`'s own report — that a matching review
+  actually exists before letting the pipeline finish. On FAIL it retries
+  `comment_draft`. See "Known issue, fixed" below for why this exists.
+
+### Known issue, fixed: `comment_draft` could silently no-op
+
+Reproduced twice: the pipeline reported success end-to-end, but
+`comment_draft` completed in ~2.5s and posted **nothing** — no review, no
+fallback comment, no labels. Root cause: the engine has no built-in check
+that a node's claimed tool calls actually ran, and `comment_draft`'s prompt
+ended with "your ENTIRE response must be ONLY the JSON object, no
+preamble" — an instruction copy-pasted from the lane/gate nodes, where it's
+correct because the JSON *is* the deliverable. For `comment_draft`, the
+deliverable requires several tool calls (build payload → POST review →
+possible fallback → POST labels) *before* a final status. A model reading
+"entire response must be ONLY JSON" literally can satisfy it with a single
+text completion and zero tool calls — which is exactly consistent with the
+sub-3-second timing and the total silence.
+
+Fix, in two parts (see the DOT source for both):
+
+1. `comment_draft`'s prompt no longer demands a JSON-only response. It now
+   explicitly separates "run the tool calls" from "report a final status
+   line," and requires reading the actual `curl` response (checking for an
+   `id` field vs. an `errors`/`message` field) before reporting anything.
+2. A new `verify_review_posted` goal_gate node (mirroring `quality_eval`'s
+   goal_gate + retry_target pattern) independently re-confirms the review
+   exists via a fresh GitHub API call before the pipeline is allowed to
+   reach `done`, and retries `comment_draft` if it doesn't find one. This
+   matters because `goal_gate` itself does **not** add any "did the tool
+   calls really happen" check — it only enables `retry_target` routing —
+   so without an explicit independent verification node, nothing catches a
+   repeat of this failure mode even with the improved prompt.
 
 ## Runtime assumptions (self-contained)
 
