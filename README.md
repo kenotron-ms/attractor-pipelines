@@ -98,10 +98,17 @@ three-agent build loop. Differences from `idea_to_shipped`:
   the genuinely hardest-to-verify things — focus management, accessibility,
   visual layout truth — not the default path.
 
+Like `idea_to_shipped`, the build logic lives in its own subgraph rather
+than being inlined into the top-level file -- this is what keeps the fix
+loop's cap legible in one place (see `subgraphs/build_verify.dot`) and
+keeps the top-level graph itself short: accept design, plan, delegate to
+build_verify, delegate to deliver_pr, report.
+
 ```
 pipelines/idea_to_pr/
-  idea_to_pr.dot    # entry pipeline
+  idea_to_pr.dot            # entry pipeline (arc only -- delegates via shape=folder)
   subgraphs/
+    build_verify.dot         # combined implement+verify, fix loop capped at 1 round
     deliver_pr.dot            # commit, push, open PR
 ```
 

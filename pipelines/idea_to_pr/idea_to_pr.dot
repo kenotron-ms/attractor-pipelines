@@ -8,23 +8,29 @@
 //     straight into Implement. If the plan is under-specified, that surfaces
 //     as implementation friction, not an up-front review step nobody uses.
 //   - ONE combined Implement+Verify step instead of the three-agent
-//     implementer -> verifier -> quality-reviewer pipeline in build_loop.dot.
+//     implementer -> verifier -> quality-reviewer pipeline in build_loop.dot
+//     -- see subgraphs/build_verify.dot.
 //   - Fix loop capped at 1 round by default (not 3), via an explicit
-//     fix_rounds_used counter in context -- NOT via max_retries, which only
-//     bounds a single node's own execution retries, not how many times the
-//     graph loops back through an edge. See build_loop.dot's CheckFixRounds
-//     for the fuller version of this same pattern.
+//     fix_rounds_used counter in context -- NOT via max_retries. See
+//     subgraphs/build_verify.dot's CheckFixRounds for the mechanism.
 //   - Stops after DeliverPR. No MergeGate / DeployGate subgraphs here --
 //     the normal GitHub PR review is the human gate, and the
 //     pipelines/ship_ready pipeline (triggered by the PR itself via GitHub
 //     Actions) handles preview + prod deploy automatically. This pipeline's
 //     only job is idea -> plan -> build -> open PR.
 //
+// Like idea_to_shipped, the heavy lifting lives in subgraphs (shape=folder
+// delegation) -- this top-level file is just the arc: accept design, plan,
+// delegate to build_verify, delegate to deliver_pr, report. Keeping build
+// logic in its own file (rather than inlined here) is what keeps the fix
+// loop's cap legible in one place and keeps this top-level graph short.
+//
 // Verification Driven Development, but with a NARROWER, prescriptive
 // hierarchy than idea_to_shipped's five-tier VDD ladder (native static
 // analysis / run directly / curl / browser / Reality-Check). This pipeline
-// picks ONE of exactly three verification tiers per task, in this order of
-// preference:
+// picks ONE of exactly three verification tiers per task (assigned during
+// Plan, applied during build_verify.dot's Implement step), in this order
+// of preference:
 //
 //   1. Unit tests (pytest / vitest / whatever the repo already uses) for
 //      LIBRARY code -- pure functions, data transforms, business logic with
@@ -44,19 +50,19 @@
 //   $design            - a design blurb from a prior /think-like-ken session
 //   $task              - short task/feature name
 //   $repo              - target repo slug (owner/name) for the PR
-//   $max_fix_rounds    - cap on fix loop iterations (default 1)
+//   $max_fix_rounds    - cap on build_verify fix iterations (default 1)
 //
 // Context outputs:
 //   design.design_doc     - path to the design doc written by AcceptDesign
 //   plan.plan_doc         - path to the implementation plan written by Plan
-//   build.verdict         - final "pass" | "exhausted"
+//   build.verdict         - final "pass" | "exhausted" (from build_verify.dot)
 //   build.fix_rounds_used - integer count of fix rounds consumed
 //   delivery.pr_url       - PR URL, set by DeliverPR subgraph
 //   delivery.result       - "opened" | "failed"
 
 digraph idea_to_pr {
   graph [
-    label="Idea to Shipped -- Lite (VDD, no plan-approval gate, single fix round)",
+    label="Idea to PR -- Lite (VDD, no plan-approval gate, single fix round)",
     goal="$task",
     rankdir=LR,
     default_max_retry=2,
@@ -81,33 +87,15 @@ digraph idea_to_pr {
     prompt="Read docs/plans/<date>-<topic>-design.md. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each. For EACH task, classify it and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. Use the repo's existing unit test runner (pytest, vitest, etc). (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state management, anything touching a simulated DOM but not needing a real browser engine (vitest/jest with environment=jsdom or equivalent). This should be the default for anything involving UI logic that isn't tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for the genuinely hardest-to-verify things: focus management, keyboard navigation, accessibility (ARIA roles/labels, screen reader behavior), visual layout truth. This tier is the EXCEPTION -- most tasks should resolve at tier 1 or 2; do not reach for a real browser just because the code touches HTML. For EACH task specify: exact file paths, complete copy-pasteable implementation, the exact static analysis command (always run first, e.g. ruff/ty/tsc/oxlint), which of the three tiers applies and why, and the exact verification command with expected output. Never leave verification unspecified, never say 'test it manually'. Write docs/plans/<date>-<feature>-implementation.md following the standard plan structure (header with Goal/Architecture/Tech Stack/Verification approach, then Task N sections each with Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit). Print the single line: plan_done"
   ];
 
-  // --- Phase 3: Single combined Implement+Verify step (no separate
-  // verifier / quality-reviewer agents) ---
+  // --- Phase 3: Build with a single combined Implement+Verify step and a
+  // fix loop capped at 1 round (see subgraphs/build_verify.dot) ---
   Implement [
-    shape=box, goal_gate=true, fidelity="full",
-    label="Implement + Verify (combined)",
-    prompt="Read docs/plans/<date>-<feature>-implementation.md. For EACH task not yet marked complete, in order: (1) run static analysis FIRST and fix any pre-existing issues; (2) implement exactly what's specified -- no extra features, no 'while I'm here' improvements; (3) run static analysis again; (4) verify using the tier the plan assigned to this task (unit test / jsdom+node integration test / real browser -- do NOT substitute a cheaper tier than specified, and do NOT reach for a browser if the plan assigned tier 1 or 2). Document the ACTUAL output you saw. (5) Commit atomically: 'feat: [what this does]'. Append your result to docs/plans/<feature>-status.md under this task's heading with the exact static-analysis output and the exact verification command + output. After all tasks are attempted, self-assess: did every task's verification command actually pass? Print the single line: build_verdict=pass if every task's specified verification passed, or build_verdict=fail if any task failed verification or you were blocked."
+    shape=folder, label="Implement + Verify (combined, capped fix loop)",
+    dot_file="subgraphs/build_verify.dot",
+    outputs="build.verdict,build.fix_rounds_used"
   ];
 
-  CheckVerdict [
-    shape=parallelogram, label="Check Build Verdict",
-    tool_command="bash -c 'if echo \"$last_response\" | grep -q build_verdict=pass; then echo pass; else echo fail; fi'"
-  ];
-
-  // Explicit iteration counter in context -- NOT max_retries. max_retries
-  // only bounds a single node's own execution attempts (e.g. transient LLM
-  // errors), not how many times the graph loops back through an edge.
-  CheckFixRounds [
-    shape=parallelogram, label="Check Fix Rounds",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-1}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
-  ];
-
-  Fix [
-    shape=box, goal_gate=true, fidelity="full",
-    label="Fix (single combined pass)",
-    prompt="The previous build_verdict was fail. Read docs/plans/<feature>-status.md to find which task(s) failed verification and why. Fix them directly -- no broad rewrite, address the specific failure. Re-run static analysis, then re-run that task's assigned verification tier. Document actual output. Print the single line: build_verdict=pass if the fix resolved every prior failure, or build_verdict=fail otherwise."
-  ];
-
+  // --- Phase 4: Open PR (see subgraphs/deliver_pr.dot) ---
   DeliverPR [
     shape=folder, label="Deliver PR",
     dot_file="subgraphs/deliver_pr.dot",
@@ -122,14 +110,10 @@ digraph idea_to_pr {
 
   Start        -> AcceptDesign;
   AcceptDesign -> Plan;
-  Plan         -> Implement;                                  // no PlanConfidenceCheck / PlanApproval gate
-  Implement    -> CheckVerdict;
-  CheckVerdict -> DeliverPR      [condition="context.tool.last_line=pass", weight="2"];
-  CheckVerdict -> CheckFixRounds [condition="context.tool.last_line=fail"];
-  CheckFixRounds -> Fix          [condition="context.tool.last_line=fix_ok",       label="fix round (capped at $max_fix_rounds)"];
-  CheckFixRounds -> Report       [condition="context.tool.last_line=fix_exhausted", label="exhausted"];
-  Fix          -> CheckVerdict   [loop_restart="true"];
-  DeliverPR    -> Report         [condition="context.delivery.result=opened", weight="2"];
-  DeliverPR    -> Report         [condition="outcome=fail"];
+  Plan         -> Implement;                                    // no PlanConfidenceCheck / PlanApproval gate
+  Implement    -> DeliverPR [condition="context.build.verdict=pass", weight="2"];
+  Implement    -> Report    [condition="context.build.verdict=exhausted"];
+  DeliverPR    -> Report    [condition="context.delivery.result=opened", weight="2"];
+  DeliverPR    -> Report    [condition="outcome=fail"];
   Report       -> Exit;
 }

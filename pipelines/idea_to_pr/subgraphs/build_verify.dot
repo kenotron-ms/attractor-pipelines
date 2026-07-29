@@ -1,0 +1,79 @@
+// build_verify.dot
+//
+// The lite counterpart to idea_to_shipped/subgraphs/build_loop.dot: one
+// combined Implement+Verify step (no separate implementer / verifier /
+// quality-reviewer agents), with a fix loop capped at exactly 1 round by
+// default -- not ad nauseam.
+//
+// The cap is an explicit context counter (CheckFixRounds), NOT max_retries.
+// max_retries only bounds a single node's own execution attempts (e.g.
+// transient LLM errors) -- it does not limit how many times the graph
+// loops back through an edge. Relying on it alone is the #1 foot-gun when
+// porting a "capped fix loop" pattern; see build_loop.dot's CheckFixRounds
+// for the fuller three-agent version of this same counter idiom.
+//
+// Verification Driven Development, three-tier hierarchy (narrower than
+// idea_to_shipped's five-tier ladder), in preference order:
+//   1. Unit tests for LIBRARY code (pure functions, no DOM/network/process
+//      boundary).
+//   2. Lightweight jsdom + node test env for INTEGRATION tests (component
+//      wiring, event handlers, state -- simulated DOM, no real browser).
+//   3. Real browser verification (playwright-cli / browser-tester) ONLY
+//      for the genuinely hardest-to-verify things: focus management,
+//      accessibility, visual layout truth. The exception, not the default.
+//
+// Required context variables (injected by parent via graph attrs / $vars):
+//   $max_fix_rounds  - cap on fix iterations (default 1)
+//
+// Context outputs (declared via `outputs=` on the folder node in the parent):
+//   build.verdict          - final "pass" | "exhausted"
+//   build.fix_rounds_used  - integer count of fix rounds consumed
+
+digraph build_verify {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // Single combined Implement+Verify step. Assumes the parent's Plan phase
+  // already assigned each task one of the three verification tiers above.
+  Implement [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Implement + Verify (combined)",
+    prompt="Read docs/plans/<date>-<feature>-implementation.md. For EACH task not yet marked complete, in order: (1) run static analysis FIRST and fix any pre-existing issues; (2) implement exactly what's specified -- no extra features, no 'while I'm here' improvements; (3) run static analysis again; (4) verify using the tier the plan assigned to this task (unit test / jsdom+node integration test / real browser -- do NOT substitute a cheaper tier than specified, and do NOT reach for a browser if the plan assigned tier 1 or 2). Document the ACTUAL output you saw. (5) Commit atomically: 'feat: [what this does]'. Append your result to docs/plans/<feature>-status.md under this task's heading with the exact static-analysis output and the exact verification command + output. After all tasks are attempted, self-assess: did every task's verification command actually pass? Print the single line: build_verdict=pass if every task's specified verification passed, or build_verdict=fail if any task failed verification or you were blocked."
+  ];
+
+  CheckVerdict [
+    shape=parallelogram, label="Check Build Verdict",
+    tool_command="bash -c 'if echo \"$last_response\" | grep -q build_verdict=pass; then echo pass; else echo fail; fi'"
+  ];
+
+  // Explicit iteration counter in context -- NOT max_retries. Caps the
+  // LOOP (how many times we route back through Fix), not a single node's
+  // own retry attempts.
+  CheckFixRounds [
+    shape=parallelogram, label="Check Fix Rounds",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-1}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
+  ];
+
+  Fix [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Fix (single combined pass)",
+    prompt="The previous build_verdict was fail. Read docs/plans/<feature>-status.md to find which task(s) failed verification and why. Fix them directly -- no broad rewrite, address the specific failure. Re-run static analysis, then re-run that task's assigned verification tier. Document actual output. Print the single line: build_verdict=pass if the fix resolved every prior failure, or build_verdict=fail otherwise."
+  ];
+
+  ExtractVerdict [
+    shape=parallelogram, label="Extract Verdict",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"%s\", \"build.fix_rounds_used\": %s}' \"$1\" \"$count\"",
+    parse_json="true"
+  ];
+
+  Start          -> Implement;
+  Implement      -> CheckVerdict;
+  CheckVerdict   -> ExtractVerdict [condition="context.tool.last_line=pass", weight="2", label="pass"];
+  CheckVerdict   -> CheckFixRounds [condition="context.tool.last_line=fail", label="fail"];
+  CheckFixRounds -> Fix            [condition="context.tool.last_line=fix_ok",       label="fix round (capped at $max_fix_rounds)"];
+  CheckFixRounds -> ExtractVerdict [condition="context.tool.last_line=fix_exhausted", label="exhausted"];
+  Fix            -> CheckVerdict   [loop_restart="true"];
+  ExtractVerdict -> Exit;
+}
