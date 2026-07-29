@@ -1,9 +1,9 @@
 # Sample: Exhaustive Parallel-Lane PR Review
 
-`pipelines/pr-review-exhaustive.dot` — an exhaustive, thread-isolated pull
+`pipelines/pr-review-exhaustive/pr-review-exhaustive.dot` — an exhaustive, thread-isolated pull
 request review pipeline. Ported into this samples repo from
 [`microsoft/amplifier-app-actions`](https://github.com/microsoft/amplifier-app-actions)'s
-`pipelines/pr-review-exhaustive.dot`. The review logic is faithful to the
+`pipelines/pr-review-exhaustive/pr-review-exhaustive.dot`. The review logic is faithful to the
 source; the runtime coupling was reworked so it runs on this repo's engine
 (the loop-pipeline / attractor engine that
 [`amplifier-resolver-dot-graph`](https://github.com/microsoft/amplifier-resolver-dot-graph)
@@ -66,11 +66,11 @@ The graph runs on any resolver runtime that provides:
 **dot-graph resolver (remote source — no local checkout):**
 
 ```
-git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive.dot
+git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
 ```
 
 **GitHub Actions:** see
-[`.github/workflows/pr-review-exhaustive.yml`](../.github/workflows/pr-review-exhaustive.yml)
+[`.github/workflows/pr-review-exhaustive.yml`](../../.github/workflows/pr-review-exhaustive.yml)
 — a `pull_request` workflow (never `pull_request_target`) with
 `permissions: { contents: read, pull-requests: write }` that runs the pipeline
 via `microsoft/amplifier-app-actions@main` as the CI runner for the same
@@ -96,6 +96,6 @@ samples use), e.g.:
 from amplifier_module_loop_pipeline.dot_parser import parse_dot
 from amplifier_module_loop_pipeline.validation import validate
 
-diags = validate(parse_dot(open("pipelines/pr-review-exhaustive.dot").read()))
+diags = validate(parse_dot(open("pipelines/pr-review-exhaustive/pr-review-exhaustive.dot").read()))
 assert not [d for d in diags if d.severity == "ERROR"]
 ```
