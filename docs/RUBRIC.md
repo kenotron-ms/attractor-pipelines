@@ -206,19 +206,8 @@ When reviewing a PR that adds or modifies a `.dot` file in this repo, check:
 ## 7. Where to look for deeper background
 
 - `primer.md` -- the philosophy and doctrine this rubric distills from.
-- `archive/NOTES-attractor-assessment.md` -- broader ecosystem context (the
-  two upstream attractor repos, canonical examples, design principles) from
-  the initial repo assessment. Useful background reading, not required for
-  day-to-day pipeline authoring.
-- `archive/NOTES-bundle-misses.md` -- the original verified gap analysis of
-  the shipped engine (the dead-edge census, engine gotchas verified against
-  source) that this repo's early fixes were generated from.
-- `archive/NOTES-playbook-alignment.md` -- the doctrine additions (failure
-  classes, rim coverage, regimes, budget-as-decision) sourced from the
-  upstream agent-building-playbook pattern.
 
-These archive docs are historical research notes -- point-in-time captures
-that fed into this rubric and primer.md. When they conflict with this
-rubric or with primer.md, **this rubric and primer.md win** -- they're the
-living, maintained documents. Update this rubric (not the archive) when a
-new pipeline bug teaches us something new.
+This rubric and `primer.md` are the living, maintained documents. **Update
+this rubric when a new pipeline bug teaches us something new** -- add a case
+study line to the relevant section (or a new checklist item if it's a new
+class of bug) rather than filing the lesson away in a separate notes file.

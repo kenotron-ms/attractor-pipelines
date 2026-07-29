@@ -29,12 +29,11 @@ when authoring a new pipeline and when reviewing a PR that touches one.
   class this rule exists to prevent.
 - **If you fix a bug in a shared `subgraphs/*.dot` file, check every
   consumer of that subgraph**, not just the pipeline that surfaced the bug.
-- **Update `docs/RUBRIC.md`, not the archive, when a new pipeline bug
-  teaches us something new.** `docs/archive/` holds historical research
-  notes (point-in-time captures from the original repo assessment) -- they
-  are background reading, not living documents. `docs/RUBRIC.md` and
-  `docs/primer.md` are the living, maintained references and win on any
-  conflict.
+- **Update `docs/RUBRIC.md` when a new pipeline bug teaches us something
+  new.** Add a case study line to the relevant section (or a new checklist
+  item if it's a new class of bug). `docs/RUBRIC.md` and `docs/primer.md`
+  are the only docs here -- keep them living and current rather than
+  spinning off separate notes files.
 
 ## Repo layout
 
