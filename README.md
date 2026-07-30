@@ -142,19 +142,18 @@ three-agent build loop. Differences from `idea_to_shipped`:
   the genuinely hardest-to-verify things — focus management, accessibility,
   visual layout truth — not the default path.
 
-Like `idea_to_shipped`, the build logic lives in its own subgraph rather
-than being inlined into the top-level file -- this is what keeps the
-rubric-driven exit condition legible in one place (see
-`subgraphs/build_verify.dot`) and keeps the top-level graph itself short:
-accept design, plan (including the rubric), delegate to build_verify,
-delegate to deliver_pr, report.
+Unlike `idea_to_shipped`, this pipeline is a **single flat file, no
+subgraphs** -- the build/verify loop and the commit/push/PR delivery
+sequence are inlined directly at the root level rather than delegated via
+`shape=folder`. That makes the pipeline's one real cycle (Implement ->
+SelfEvaluate -> Fix -> SelfEvaluate, bounded by the fix-round backstop)
+visible directly in the graph, instead of hidden a level down in a
+subgraph -- see `docs/RUBRIC.md`'s doctrine on why a pipeline's cycles are
+what make it an attractor rather than a flowchart.
 
 ```
 pipelines/idea_to_pr/
-  idea_to_pr.dot            # entry pipeline (arc only -- delegates via shape=folder)
-  subgraphs/
-    build_verify.dot         # implement -> self-evaluate against rubric -> fix (backstop-capped)
-    deliver_pr.dot            # commit, push, open PR
+  idea_to_pr.dot            # entry pipeline -- everything inlined, single file
 ```
 
 Point the attractor bundle at it via:

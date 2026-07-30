@@ -9,29 +9,35 @@
 //     as implementation friction, not an up-front review step nobody uses.
 //   - ONE combined Implement step plus an independent SelfEvaluate (judge)
 //     step instead of the three-agent implementer -> verifier ->
-//     quality-reviewer pipeline in build_loop.dot -- see
-//     subgraphs/build_verify.dot.
+//     quality-reviewer pipeline in build_loop.dot.
 //   - Completion is gated by RUBRIC ACHIEVEMENT, not a round count, and the
 //     rubric itself follows the weighted, evidence-based methodology in
 //     https://github.com/microsoft/amplifier-bundle-evaluation/blob/main/context/methodology/rubric-design.md
-//     -- see the Plan node below and subgraphs/build_verify.dot's header
-//     for how that maps onto this pipeline. A round counter still exists
-//     in build_verify.dot as a safety BACKSTOP against a genuinely
+//     -- see the Plan node below. A round counter still exists
+//     (CheckFixRounds) as a safety BACKSTOP against a genuinely
 //     non-convergent loop (default 2 rounds) -- it is not how "done" is
 //     decided, and if it trips the pipeline reports failure honestly
 //     (build.verdict=escalated) rather than silently declaring success.
-//   - Stops after DeliverPR. No MergeGate / DeployGate subgraphs here --
-//     the normal GitHub PR review is the human gate, and the
-//     pipelines/ship_ready pipeline (triggered by the PR itself via GitHub
-//     Actions) handles preview + prod deploy automatically. This pipeline's
-//     only job is idea -> plan -> build -> open PR.
+//   - Stops after delivering a PR. No MergeGate / DeployGate here -- the
+//     normal GitHub PR review is the human gate, and the pipelines/ship_ready
+//     pipeline (triggered by the PR itself via GitHub Actions) handles
+//     preview + prod deploy automatically. This pipeline's only job is
+//     idea -> plan -> build -> open PR.
 //
-// Like idea_to_shipped, the heavy lifting lives in subgraphs (shape=folder
-// delegation) -- this top-level file is just the arc: accept design, plan
-// (including the rubric), delegate to build_verify, delegate to
-// deliver_pr, report. Keeping build/self-evaluation logic in its own file
-// (rather than inlined here) is what keeps the rubric-driven exit
-// condition legible in one place and keeps this top-level graph short.
+// FLATTENED (single file, no subgraphs): earlier revisions of this pipeline
+// delegated the build/verify loop and the commit/push/PR sequence to
+// subgraphs/build_verify.dot and subgraphs/deliver_pr.dot via `shape=folder`
+// nodes. Per docs/RUBRIC.md's own doctrine, a pipeline's cycles are exactly
+// what make it an attractor rather than a flowchart -- but a `folder`
+// delegation hides those cycles a level down, so looking at just this file
+// used to show a pure DAG (Start -> ... -> Implement -> DeliverPR -> Report
+// -> Exit) with no visible loop at all, even though the real convergence
+// loop (Implement -> SelfEvaluate -> Fix -> SelfEvaluate, bounded by
+// CheckFixRounds) lived one level down in build_verify.dot. Flattening
+// everything into this one file makes that loop -- and the linear
+// commit/push/PR delivery sequence that follows it -- visible directly at
+// the root level. No behavior changed: every node/prompt/edge below is
+// unchanged from the subgraph versions, just inlined and rewired.
 //
 // PLAN LIKE KEN: the Plan node below is written in the spirit of
 // plan-like-ken -- "human attention is the most sacred resource, do not
@@ -66,22 +72,60 @@
 // before judging), but the rubric's criteria themselves ask whether a user
 // would be satisfied, not just whether the command exited 0.
 //
+// RUBRIC METHODOLOGY / CONTRACT: a rubric is a flat set of named criteria,
+// each with a point value (relative weight) and an OBSERVABLE question,
+// scored by a judge (SelfEvaluate) that gathers real evidence first. Plan
+// writes this contract to .resolve/plan/rubric.json, read by both Implement
+// and SelfEvaluate:
+//   {
+//     "steps": "<ordered evidence-gathering plan -- what to run, read, or
+//               actually try as a user before judging any criterion,
+//               referencing the VDD tier commands from the plan doc>",
+//     "pass_threshold": 0.85,
+//     "criteria": {
+//       "<snake_case_name>": {
+//         "points": <int>,
+//         "task": <N, or null for an overall/cross-cutting criterion>,
+//         "description": "<observable, user-facing question -- prefixed
+//                          with 'CRITICAL:' for the 2-3 heavy-weighted
+//                          criteria that actually separate good work from
+//                          competent-looking-but-shallow work>"
+//       },
+//       ...
+//     }
+//   }
+// SelfEvaluate scores each criterion 0..points (partial credit per the
+// description's own rules, not an invented scale), sums points_awarded /
+// total points across all criteria, and compares against pass_threshold.
+//
+// A "loop" here means one full Implement -> SelfEvaluate -> Fix ->
+// SelfEvaluate cycle -- NOT a conversational turn (a single loop can span
+// many turns). Plan is required to write rubric criteria narrow enough that
+// a well-formed task typically clears its full points on loop 1, worst-case
+// converges by loop 2 (one Fix pass). If CheckFixRounds's backstop is
+// regularly tripping, that's a signal the RUBRIC/TASKS were too loose or
+// too broad going in -- fix the plan's task decomposition, don't just raise
+// $max_fix_rounds to paper over it. CheckFixRounds is an explicit context
+// counter, NOT max_retries -- max_retries only bounds a single node's own
+// execution attempts (e.g. transient LLM errors), it does not limit how
+// many times the graph loops back through an edge.
+//
 // Context inputs:
 //   $design            - a design blurb from a prior /think-like-ken session
 //   $task              - short task/feature name
 //   $repo              - target repo slug (owner/name) for the PR
-//   $max_fix_rounds    - safety-backstop cap on build_verify fix iterations
-//                        (default 2) -- NOT the completion mechanism, see
-//                        subgraphs/build_verify.dot.
+//   $max_fix_rounds    - safety-backstop cap on fix iterations (default 2)
+//                        -- NOT the completion mechanism, see CheckFixRounds.
 //
 // Context outputs:
 //   design.design_doc     - path to the design doc written by AcceptDesign
 //   plan.plan_doc         - path to the implementation plan written by Plan
 //   plan.rubric           - path to the rubric written by Plan (.resolve/plan/rubric.json)
-//   build.verdict         - final "rubric_met" | "escalated" (from build_verify.dot)
+//   build.verdict         - final "rubric_met" | "escalated"
 //   build.fix_rounds_used - integer count of fix rounds consumed
+//   build.rubric_result   - path to the final .resolve/verify/rubric_result.json
 //   build.rubric_score    - final weighted score (0.0-1.0) achieved
-//   delivery.pr_url       - PR URL, set by DeliverPR subgraph
+//   delivery.pr_url       - PR URL, set by ExtractPRUrl ("" if delivery failed)
 //   delivery.result       - "opened" | "failed"
 
 digraph idea_to_pr {
@@ -97,15 +141,14 @@ digraph idea_to_pr {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
-  // Idempotency: build_verify.dot's CheckFixRounds increments a persistent
-  // .resolve/fix_state.json counter with no reset of its own. Per
-  // docs/primer.md doctrine #4.8 (idempotency widens the basin), re-running
-  // this pipeline against a working directory that still has a stale
-  // fix_state.json from a prior invocation (e.g. a reused CI checkout)
-  // would start the fix-round backstop already elevated, tripping the
-  // escalation path prematurely on a run that hasn't actually earned it.
-  // Clearing it here makes every fresh pipeline run start from a clean
-  // fix-round budget regardless of what a previous run left behind.
+  // Idempotency: CheckFixRounds increments a persistent .resolve/fix_state.json
+  // counter with no reset of its own. Per docs/RUBRIC.md's idempotency
+  // doctrine, re-running this pipeline against a working directory that
+  // still has a stale fix_state.json from a prior invocation (e.g. a reused
+  // CI checkout) would start the fix-round backstop already elevated,
+  // tripping the escalation path prematurely on a run that hasn't actually
+  // earned it. Clearing it here makes every fresh pipeline run start from a
+  // clean fix-round budget regardless of what a previous run left behind.
   ResetFixState [
     shape=parallelogram, label="Reset Fix State",
     tool_command="rm -f .resolve/fix_state.json && printf 'reset'"
@@ -121,8 +164,8 @@ digraph idea_to_pr {
   // --- Phase 2: Plan Like Ken -- three-tier VDD evidence hierarchy for HOW
   // to gather proof, PLUS a weighted, user-facing rubric (points, CRITICAL
   // markers, observable-from-a-user's-seat criteria) for WHAT counts as
-  // actually done. This rubric -- not a round count -- is what
-  // build_verify.dot's SelfEvaluate judges against. ---
+  // actually done. This rubric -- not a round count -- is what SelfEvaluate
+  // judges against. ---
   Plan [
     shape=box, goal_gate=true, fidelity="full",
     label="Plan Like Ken (VDD evidence + weighted rubric)",
@@ -130,33 +173,149 @@ digraph idea_to_pr {
   ];
 
   // --- Phase 3: Build, gated by weighted rubric achievement (not a round
-  // count), with a safety-backstop fix loop (see subgraphs/build_verify.dot) ---
+  // count), with a safety-backstop fix loop. THE LOOP: Implement ->
+  // SelfEvaluate -> CheckRubric -> [fail] CheckFixRounds -> Fix ->
+  // SelfEvaluate (loop_restart) -- visible right here at the root level. ---
+  // Implements the plan's tasks and gathers the evidence rubric.json's
+  // "steps" call for, but does NOT self-declare pass/fail or award its own
+  // points -- that judgment belongs entirely to the independent
+  // SelfEvaluate step below, which doesn't trust Implement's own account.
   Implement [
-    shape=folder, label="Implement + Self-Evaluate Against Weighted Rubric",
-    dot_file="subgraphs/build_verify.dot",
-    outputs="build.verdict,build.fix_rounds_used,build.rubric_result,build.rubric_score"
+    shape=box, goal_gate=true, fidelity="full",
+    label="Implement",
+    prompt="Read docs/plans/<date>-<feature>-implementation.md and .resolve/plan/rubric.json (including its 'steps' evidence plan). For EACH task not yet marked complete, in order: (1) run static analysis FIRST and fix any pre-existing issues; (2) implement exactly what's specified -- no extra features, no 'while I'm here' improvements; (3) run static analysis again; (4) run the VDD verification command the plan assigned this task's tier (unit test / jsdom+node integration test / real browser -- do NOT substitute a cheaper check, and do NOT reach for a browser if the plan's tier is unit or jsdom). If that command is vitest (or any other watch-mode-by-default runner) and the plan wrote a bare `vitest`/`npm test`, do NOT run it as-is -- run `vitest run` (or add `--run`) instead, since vitest's own default is watch mode and a bare invocation will hang forever waiting for a process that never exits. Never run a test command in watch mode in this pipeline. Also actually exercise the feature the way rubric.json's 'steps' describes for this task's criteria -- if a criterion is about what a user would experience, go look at or try that, don't infer it from the code. Document the ACTUAL output/behavior you saw verbatim -- do not summarize or paraphrase it. (5) Commit atomically: 'feat: [what this does]'. Append your result to docs/plans/<feature>-status.md under this task's heading with the exact static-analysis output, the exact verification command + output, and what you observed when exercising the feature per the rubric's steps. After all tasks are attempted, also work through rubric.json's overall 'steps' (e.g. full test suite, static analysis clean, any cross-cutting user-facing check) and document that output too. Do NOT self-score against the rubric and do NOT declare victory -- just report what you did and what actually happened. Print the single line: implement_done"
   ];
 
-  // --- Phase 4: Open PR (see subgraphs/deliver_pr.dot) ---
-  DeliverPR [
-    shape=folder, label="Deliver PR",
-    dot_file="subgraphs/deliver_pr.dot",
-    outputs="delivery.pr_url,delivery.result"
+  // The judge. Adversarial and independent: gathers/re-gathers evidence
+  // per rubric.json's "steps", then scores EVERY criterion against that
+  // evidence -- never against Implement's status write-up alone. Thinks
+  // like a user experiencing the result, not an engineer confirming a
+  // command exited 0.
+  SelfEvaluate [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Self-Evaluate (judge, weighted rubric)",
+    prompt="Read .resolve/plan/rubric.json in full (its 'steps', 'pass_threshold', and every criterion) and docs/plans/<feature>-status.md. First, work through rubric.json's 'steps' yourself right now -- re-run commands, read the actual files, and where a criterion is about user-facing behavior, actually use the feature the way a real user would rather than reading the code and assuming. If status.md's account looks incomplete, inconsistent, or suspiciously clean anywhere, that is exactly when to re-verify directly rather than trust it. Then, for EACH criterion in rubric.json: think like a user, not an engineer -- award points_awarded from 0 up to that criterion's max points based on what the evidence actually shows, using any partial-credit rule stated in the criterion's own description (do not invent your own scale). A 'CRITICAL:' criterion failing should cost real points, not a token deduction. Do not award points for something merely claimed in status.md without evidence backing it. Do not invent criteria that aren't in rubric.json, and do not skip any that are. Compute overall_score = sum(points_awarded) / sum(points) across all criteria. Write .resolve/verify/rubric_result.json: {\\\"overall_score\\\": <float 0-1>, \\\"pass_threshold\\\": <copied from rubric.json>, \\\"results\\\": [{\\\"id\\\": \\\"<criterion id>\\\", \\\"points\\\": <max>, \\\"points_awarded\\\": <awarded>, \\\"reasoning\\\": \\\"<what evidence you checked and why this many points>\\\"}, ...]}. Print the single line: rubric_verdict=pass if overall_score >= pass_threshold, or rubric_verdict=fail otherwise, followed on the next line by rubric_score=<overall_score>."
+  ];
+
+  // Reads .resolve/verify/rubric_result.json directly rather than grepping
+  // $last_response for the "rubric_verdict=" marker line. SelfEvaluate runs
+  // under this graph's default_fidelity="summary:high" (idea_to_pr.dot),
+  // and per docs/primer.md's foot-gun card #3, last_response truncates to
+  // 200 chars except under fidelity=full -- SelfEvaluate's prompt asks for
+  // a long rubric write-up with the verdict marker printed LAST, so
+  // truncation could silently drop the very line this gate greps for, and
+  // it would then always fail through to CheckFixRounds regardless of the
+  // real verdict. That failed safe (never falsely claimed pass) but could
+  // burn fix-loop budget on a rubric that genuinely passed. Reading the
+  // file SelfEvaluate already writes sidesteps last_response entirely --
+  // same pattern build_loop.dot's VerdictGate uses for verdict.json.
+  CheckRubric [
+    shape=parallelogram, label="Check Rubric Verdict",
+    tool_command="#!/bin/sh\nset -e\npython3 -c \"import json,os,sys; p='.resolve/verify/rubric_result.json'; d=json.load(open(p)) if os.path.exists(p) else {}; sys.exit(0 if d.get('overall_score', 0) >= d.get('pass_threshold', 1) else 1)\" && printf 'pass' || printf 'fail'"
+  ];
+
+  // Safety backstop ONLY -- not the completion mechanism. Default 2
+  // matches the "typically 1-2 loops per task" expectation a tight,
+  // well-weighted rubric should produce: attempt 1 (Implement's own
+  // pass), then at most one Fix pass. If the rubric was scoped correctly,
+  // this rarely trips; if it trips often, the fix is tighter task/rubric
+  // decomposition in Plan, not a larger number here.
+  CheckFixRounds [
+    shape=parallelogram, label="Check Fix Rounds (safety backstop)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-2}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
+  ];
+
+  Fix [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Fix (address lowest-scoring rubric criteria)",
+    prompt="Read .resolve/verify/rubric_result.json. Prioritize any criterion whose description was marked 'CRITICAL:' and scored below full points, then work through the rest by largest points-lost (points - points_awarded). For each, fix the SPECIFIC gap the reasoning field points to -- no broad rewrite, address exactly what's short. Re-run that criterion's evidence per rubric.json's 'steps' and confirm the fresh result actually earns more points before moving to the next one. Update docs/plans/<feature>-status.md with what changed and the fresh evidence. Print the single line: fix_attempted"
+  ];
+
+// Split into two literal-outcome nodes rather than one shared node that
+  // relies on a positional "$1" shell argument -- nothing in this graph
+  // ever passes an argument into a bare tool_command invocation, so that
+  // argument would always be empty, making build.verdict always "" and
+  // guaranteeing "no matching edge" in the parent graph on EVERY run,
+  // regardless of whether the rubric actually passed or the backstop
+  // tripped. Each node below hard-codes its own literal verdict instead
+  // and computes the shared rubric_score itself.
+  ExtractVerdictMet [
+    shape=parallelogram, label="Extract Verdict (rubric met)",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nscore=$(python3 -c \"import json,os;p='.resolve/verify/rubric_result.json';print(json.load(open(p)).get('overall_score', 0) if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"rubric_met\", \"build.fix_rounds_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\", \"build.rubric_score\": %s}' \"$count\" \"$score\"",
+    parse_json="true"
+  ];
+
+  ExtractVerdictEscalated [
+    shape=parallelogram, label="Extract Verdict (escalated)",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nscore=$(python3 -c \"import json,os;p='.resolve/verify/rubric_result.json';print(json.load(open(p)).get('overall_score', 0) if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"escalated\", \"build.fix_rounds_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\", \"build.rubric_score\": %s}' \"$count\" \"$score\"",
+    parse_json="true"
+  ];
+
+  // --- Phase 4: Deliver the PR (commit, push, verify the push landed, open
+  // PR). Linear once the rubric is met -- no loop needed here, CheckPush is
+  // a one-shot evidence gate, not a convergence loop. ---
+  CommitPush [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Commit + Push",
+    prompt="Stage all changes, write a conventional commit message summarizing the work (reference .resolve/design/design.md and .ai/plan.md for context), commit, and push the current branch to origin. After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: pushed"
+  ];
+
+  CheckPush [
+    shape=parallelogram, label="Check Push",
+    tool_command="#!/bin/sh\nset -e\nif [ -f .resolve/delivery/push_status.txt ] && tail -1 .resolve/delivery/push_status.txt | grep -q pushed; then\n  printf 'pushed'\nelse\n  printf 'push_failed'\nfi"
+  ];
+
+  OpenPR [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Open PR",
+    prompt="Open a pull request for the pushed branch against $repo's default branch. Write a PR description summarizing the design, the task list completed, and verification evidence. Write the resulting PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
+  ];
+
+  ExtractPRUrl [
+    shape=parallelogram, label="Extract PR URL",
+    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\", \"delivery.result\": \"opened\"}' \"$url\"",
+    parse_json="true"
+  ];
+
+  Failed [
+    shape=parallelogram, label="Mark Failed",
+    tool_command="printf '{\"delivery.result\": \"failed\"}'",
+    parse_json="true"
   ];
 
   Report [
     shape=box, goal_gate=true, fidelity="summary:high",
     label="Report",
-    prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), final weighted rubric score (${build.rubric_score}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'escalated' (the fix-round safety backstop tripped before the rubric's pass_threshold was met), say so plainly and list which specific criteria are still short of full points and why -- do not claim success. Print the single line: reported"
+    prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), final weighted rubric score (${build.rubric_score}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'escalated' (the fix-round safety backstop tripped before the rubric's pass_threshold was met), say so plainly and list which specific criteria are still short of full points and why -- do not claim success. If delivery.result is 'failed' (push did not land), say so plainly and do not claim a PR was opened. Print the single line: reported"
   ];
+
+  // ═══════════════════════════════════════════════ EDGES ═══════════════════════════════════════════════
 
   Start        -> ResetFixState;
   ResetFixState -> AcceptDesign;
   AcceptDesign -> Plan;
   Plan         -> Implement;                                    // no PlanConfidenceCheck / PlanApproval gate
-  Implement    -> DeliverPR [condition="context.build.verdict=rubric_met", weight="2"];
-  Implement    -> Report    [condition="context.build.verdict=escalated"];
-  DeliverPR    -> Report    [condition="context.delivery.result=opened", weight="2"];
-  DeliverPR    -> Report    [condition="context.delivery.result=failed"];
-  Report       -> Exit;
+
+  // --- Build/verify loop (visible at root level) ---
+  Implement      -> SelfEvaluate;
+  SelfEvaluate   -> CheckRubric;
+  CheckRubric    -> ExtractVerdictMet       [condition="context.tool.last_line=pass", weight="2", label="rubric met"];
+  CheckRubric    -> CheckFixRounds          [condition="context.tool.last_line=fail", label="rubric unmet"];
+  CheckFixRounds -> Fix                     [condition="context.tool.last_line=fix_ok",       label="fix round (backstop max $max_fix_rounds)"];
+  CheckFixRounds -> ExtractVerdictEscalated [condition="context.tool.last_line=fix_exhausted", label="backstop tripped -- escalate"];
+  Fix            -> SelfEvaluate            [loop_restart="true"];    // <-- THE LOOP
+
+  // --- Rubric met -> deliver PR; escalated -> skip straight to Report ---
+  ExtractVerdictMet       -> CommitPush [weight="2"];
+  ExtractVerdictEscalated -> Report;
+
+  // --- Delivery sequence (linear, evidence-gated, no loop needed) ---
+  CommitPush   -> CheckPush;
+  CheckPush    -> OpenPR       [condition="context.tool.last_line=pushed", weight="2"];
+  CheckPush    -> Failed       [condition="context.tool.last_line=push_failed"];
+  OpenPR       -> ExtractPRUrl;
+  ExtractPRUrl -> Report;
+  Failed       -> Report;
+
+  Report -> Exit;
 }
