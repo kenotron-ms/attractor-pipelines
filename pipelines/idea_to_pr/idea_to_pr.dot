@@ -268,7 +268,7 @@ digraph idea_to_pr {
   OpenPR [
     shape=box, goal_gate=true, fidelity="full",
     label="Open PR",
-    prompt="Open a pull request for the pushed branch against $repo's default branch. Write a PR description summarizing the design, the task list completed, and verification evidence. Write the resulting PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
+    prompt="Open a REAL pull request on GitHub (https://github.com/$repo) for the pushed branch against $repo's default branch -- use the gh CLI (`gh pr create --repo $repo ...`) or the GitHub REST API directly (POST https://api.github.com/repos/$repo/pulls with GH_TOKEN), NOT any other git host or a simulated/local PR. Write a PR description summarizing the design, the task list completed, and verification evidence. Write the resulting real github.com PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
   ];
 
   // Extracts the URL OpenPR claims to have opened -- NOT yet trusted as
@@ -296,7 +296,7 @@ digraph idea_to_pr {
   // API call before Report is allowed to claim success.
   CheckPROpened [
     shape=parallelogram, label="Verify PR Actually Opened",
-    tool_command="#!/bin/sh\nset -e\nnum=$(echo \"$delivery_pr_url\" | grep -oE '[0-9]+$')\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
   ];
 
   // Only set delivery.result="opened" once CheckPROpened has independently
@@ -348,6 +348,7 @@ digraph idea_to_pr {
   ExtractPRUrl  -> CheckPROpened;
   CheckPROpened -> MarkOpened   [condition="context.tool.last_line=verified", weight="2"];
   CheckPROpened -> Failed       [condition="context.tool.last_line=not_verified"];
+  CheckPROpened -> Failed       [condition="outcome=fail"];  // safety net: tool_command crashed entirely (RUBRIC.md 3.2)
   MarkOpened    -> Report;
   Failed        -> Report;
 
