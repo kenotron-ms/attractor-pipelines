@@ -60,7 +60,7 @@ digraph deliver_pr {
   // API call before this subgraph reports success.
   CheckPROpened [
     shape=parallelogram, label="Verify PR Actually Opened",
-    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+    tool_command="#!/bin/sh\nurl=$(cat .resolve/delivery/pr_url.txt 2>/dev/null || true)\nnum=$(printf '%s' \"$url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
   ];
 
   Start     -> CommitPush;
