@@ -33,20 +33,56 @@ digraph deliver_pr {
 
   OpenPR -> ExtractPRUrl;
 
+  // Extracts the URL OpenPR claims to have opened -- NOT yet trusted as
+  // delivery.result="opened". See CheckPROpened below: an LLM node can
+  // print a plausible-looking PR URL, or gh/curl can fail after emitting
+  // output the agent misreads, without a PR actually existing on GitHub.
   ExtractPRUrl [
-    shape=parallelogram, label="Extract PR URL",
-    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\", \"delivery.result\": \"opened\"}' \"$url\"",
+    shape=parallelogram, label="Extract PR URL (claimed)",
+    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
     parse_json="true"
+  ];
+
+  ExtractPRUrl -> CheckPROpened;
+
+  // Independent verification that OpenPR's claimed side effect (a real PR
+  // on GitHub) actually happened -- deliberately uses only gh CLI / curl
+  // against the GitHub REST API, NOT any Resolve-platform-specific tool
+  // (e.g. the worker-container `create-pr` helper). These pipelines are
+  // fetched and run via git+https:// URLs by any dot-graph-compatible
+  // engine, not exclusively Resolve's own worker containers -- baking in a
+  // Resolve-only binary would silently break portability to other
+  // runtimes. gh/curl + GH_TOKEN is the same portable toolset every other
+  // pipeline in this repo already assumes (see pr_review.dot,
+  // pr-review-exhaustive.dot). This mirrors CheckPush's evidence-based
+  // pattern one hop further: don't let delivery.result say "opened" on a
+  // self-report alone -- confirm the PR is real via a second, independent
+  // API call before this subgraph reports success.
+  CheckPROpened [
+    shape=parallelogram, label="Verify PR Actually Opened",
+    tool_command="#!/bin/sh\nset -e\nnum=$(echo \"$delivery_pr_url\" | grep -oE '[0-9]+$')\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
   ];
 
   Start     -> CommitPush;
   CheckPush -> OpenPR  [condition="context.tool.last_line=pushed", weight="2"];
   CheckPush -> Failed  [condition="context.tool.last_line=push_failed"];
-  ExtractPRUrl -> Exit;
+
+  CheckPROpened -> MarkOpened     [condition="context.tool.last_line=verified", weight="2"];
+  CheckPROpened -> Failed         [condition="context.tool.last_line=not_verified"];
+
+  // Only set delivery.result="opened" once CheckPROpened has independently
+  // confirmed the PR is real -- this is the only place in the subgraph
+  // that's allowed to claim success.
+  MarkOpened [
+    shape=parallelogram, label="Mark Opened (verified)",
+    tool_command="printf '{\"delivery.result\": \"opened\"}'",
+    parse_json="true"
+  ];
+  MarkOpened -> Exit;
 
   Failed [
     shape=parallelogram, label="Mark Failed",
-    tool_command="printf '{\"delivery.result\": \"failed\"}\'",
+    tool_command="printf '{\"delivery.result\": \"failed\"}'",
     parse_json="true"
   ];
   Failed -> Exit;
