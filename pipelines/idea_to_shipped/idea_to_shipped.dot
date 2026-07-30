@@ -141,13 +141,20 @@ digraph idea_to_shipped {
   Plan                 -> PlanConfidenceCheck;
   PlanConfidenceCheck  -> Implement     [condition="context.tool.last_line=confident", weight="2"];
   PlanConfidenceCheck  -> PlanApproval  [condition="context.tool.last_line=needs_review"];
-  PlanApproval         -> CheckPlanApproval;
+  // fidelity="full" here (overriding the graph's default_fidelity=
+  // "summary:high"): CheckPlanApproval greps $last_response for approval
+  // keywords, and per docs/primer.md's foot-gun card #3, last_response
+  // truncates to 200 chars except under fidelity=full. A human's approval
+  // reply is short but not guaranteed to be under 200 chars ("approve, but
+  // also consider X..."), so this human-authorized gate should not risk
+  // misreading a truncated response.
+  PlanApproval         -> CheckPlanApproval [fidelity="full"];
   CheckPlanApproval    -> Implement     [condition="context.tool.last_line=approved", weight="2"];
   CheckPlanApproval    -> RevisePlan    [condition="context.tool.last_line=revise"];
   RevisePlan           -> PlanConfidenceCheck [loop_restart="true"];
   Implement            -> DeliverPR;
   DeliverPR            -> MergeGate  [condition="context.delivery.result=opened", weight="2"];
-  DeliverPR            -> Report     [condition="outcome=fail"];
+  DeliverPR            -> Report     [condition="context.delivery.result=failed"];
   MergeGate            -> DeployGate [condition="context.delivery.merge_result=merged", weight="2"];
   MergeGate            -> Report     [condition="context.delivery.merge_result=rejected"];
   DeployGate           -> Report;

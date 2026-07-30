@@ -46,7 +46,7 @@ digraph deliver_pr {
 
   Failed [
     shape=parallelogram, label="Mark Failed",
-    tool_command="printf '{\"delivery.result\": \"failed\"}'",
+    tool_command="printf '{\"delivery.result\": \"failed\"}\'",
     parse_json="true"
   ];
   Failed -> Exit;

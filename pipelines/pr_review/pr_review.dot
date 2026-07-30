@@ -178,11 +178,20 @@ digraph pr_review_fast {
         fillcolor = "#FFE0B2"
     ]
 
+    // NOTE on error_policy="continue" (fan_out): a crashed/timed-out lane
+    // must not look identical to a lane that genuinely found nothing --
+    // doctrine #4.6 (differentiated failure edges: a lane crash and a clean
+    // lane should not look the same downstream). read_or_default already
+    // used a distinct sentinel ('(lane did not report)' vs a clean lane's
+    // own '(none found)'), but nothing downstream ACTED on that distinction
+    // -- merge_findings/comment_draft treated both as ordinary findings
+    // text. This node now also emits an explicit lane_failures list so the
+    // gap is a first-class signal, not just an easy-to-miss string.
     collect_lane_results [
         label     = "Collect Lane Results",
         shape     = parallelogram,
         fillcolor = "#ECEFF1",
-        tool_command = "#!/bin/sh\nset -e\nread_or_default() { [ -f \"$1\" ] && cat \"$1\" || printf '%s' \"$2\"; }\ncf=$(read_or_default .resolve/review/correctness_findings.txt '(lane did not report)')\ncc=$(read_or_default .resolve/review/correctness_comments.json '[]')\naf=$(read_or_default .resolve/review/arch_findings.txt '(lane did not report)')\nac=$(read_or_default .resolve/review/arch_comments.json '[]')\npf=$(read_or_default .resolve/review/patterns_findings.txt '(lane did not report)')\npc=$(read_or_default .resolve/review/patterns_comments.json '[]')\ntf=$(read_or_default .resolve/review/tests_findings.txt '(lane did not report)')\ntc=$(read_or_default .resolve/review/tests_comments.json '[]')\ndf=$(read_or_default .resolve/review/pedantic_findings.txt '(lane did not report)')\ndc=$(read_or_default .resolve/review/pedantic_comments.json '[]')\npython3 -c \"import json,sys; print(json.dumps({'correctness_findings': sys.argv[1], 'correctness_comments': sys.argv[2], 'arch_findings': sys.argv[3], 'arch_comments': sys.argv[4], 'patterns_findings': sys.argv[5], 'patterns_comments': sys.argv[6], 'tests_findings': sys.argv[7], 'tests_comments': sys.argv[8], 'pedantic_findings': sys.argv[9], 'pedantic_comments': sys.argv[10]}))\" \"$cf\" \"$cc\" \"$af\" \"$ac\" \"$pf\" \"$pc\" \"$tf\" \"$tc\" \"$df\" \"$dc\"",
+        tool_command = "#!/bin/sh\nset -e\nread_or_default() { [ -f \"$1\" ] && cat \"$1\" || printf '%s' \"$2\"; }\nfailures=\"\"\nfor pair in 'correctness:Correctness' 'arch:Architecture' 'patterns:Patterns' 'tests:Tests' 'pedantic:Pedantic'; do\n  key=${pair%%:*}; name=${pair##*:}\n  if [ ! -f \".resolve/review/${key}_findings.txt\" ]; then\n    failures=\"${failures}${failures:+, }${name}\"\n  fi\ndone\ncf=$(read_or_default .resolve/review/correctness_findings.txt '(lane did not report)')\ncc=$(read_or_default .resolve/review/correctness_comments.json '[]')\naf=$(read_or_default .resolve/review/arch_findings.txt '(lane did not report)')\nac=$(read_or_default .resolve/review/arch_comments.json '[]')\npf=$(read_or_default .resolve/review/patterns_findings.txt '(lane did not report)')\npc=$(read_or_default .resolve/review/patterns_comments.json '[]')\ntf=$(read_or_default .resolve/review/tests_findings.txt '(lane did not report)')\ntc=$(read_or_default .resolve/review/tests_comments.json '[]')\ndf=$(read_or_default .resolve/review/pedantic_findings.txt '(lane did not report)')\ndc=$(read_or_default .resolve/review/pedantic_comments.json '[]')\npython3 -c \"import json,sys; print(json.dumps({'correctness_findings': sys.argv[1], 'correctness_comments': sys.argv[2], 'arch_findings': sys.argv[3], 'arch_comments': sys.argv[4], 'patterns_findings': sys.argv[5], 'patterns_comments': sys.argv[6], 'tests_findings': sys.argv[7], 'tests_comments': sys.argv[8], 'pedantic_findings': sys.argv[9], 'pedantic_comments': sys.argv[10], 'lane_failures': sys.argv[11]}))\" \"$cf\" \"$cc\" \"$af\" \"$ac\" \"$pf\" \"$pc\" \"$tf\" \"$tc\" \"$df\" \"$dc\" \"$failures\"",
         parse_json = "true"
     ]
 
@@ -196,7 +205,7 @@ digraph pr_review_fast {
         shape     = box,
         fillcolor = "#E8F0FE",
         timeout   = "5m",
-        prompt    = "You are the synthesis node in a fast parallel PR review pipeline. You receive structured findings from 5 concurrently-run reviewer lanes and must produce ONE comprehensive, deduplicated, prioritized review.\n\nPR: $pr_url -- $pr_title\nRepository: $pr_owner/$pr_repo\n\nRAW LANE FINDINGS:\n--- CORRECTNESS ---\n$correctness_findings\n--- ARCHITECTURE ---\n$arch_findings\n--- PATTERNS ---\n$patterns_findings\n--- TESTS ---\n$tests_findings\n--- PEDANTIC ---\n$pedantic_findings\n\nRAW LANE INLINE COMMENTS (JSON arrays, may be empty []):\n--- CORRECTNESS --- $correctness_comments\n--- ARCHITECTURE --- $arch_comments\n--- PATTERNS --- $patterns_comments\n--- TESTS --- $tests_comments\n--- PEDANTIC --- $pedantic_comments\n\nSYNTHESIS RULES: (1) INCLUDE ALL -- every finding from every lane must appear; (2) DEDUPLICATE -- merge overlapping file:line findings into one entry noting all contributing dimensions; (3) PRIORITIZE CRITICAL -> HIGH -> MEDIUM -> LOW, grouped by file within each tier; (4) ELEVATE by one severity tier when 2+ lanes independently flag the same file; (5) VERDICT: CHANGES_REQUESTED if any CRITICAL/HIGH finding exists, else PASS; (6) NO INVENTION -- do not add findings not present in lane output; (7) PRESERVE CITATIONS -- every finding keeps its file:line.\n\nOutput ONLY this JSON (use \\n for newlines inside string values): {\"status\": \"success\", \"context_updates\": {\"merged_review\": \"<full organized review text>\", \"review_verdict\": \"PASS\"|\"CHANGES_REQUESTED\", \"review_summary\": \"<3-5 sentence summary>\", \"review_comments_json\": \"<merged JSON array of inline comment objects as a string>\"}}"
+        prompt    = "You are the synthesis node in a fast parallel PR review pipeline. You receive structured findings from 5 concurrently-run reviewer lanes and must produce ONE comprehensive, deduplicated, prioritized review.\n\nPR: $pr_url -- $pr_title\nRepository: $pr_owner/$pr_repo\n\nLANES THAT CRASHED / DID NOT REPORT (mechanically detected, non-empty means reduced coverage): $lane_failures\n\nRAW LANE FINDINGS:\n--- CORRECTNESS ---\n$correctness_findings\n--- ARCHITECTURE ---\n$arch_findings\n--- PATTERNS ---\n$patterns_findings\n--- TESTS ---\n$tests_findings\n--- PEDANTIC ---\n$pedantic_findings\n\nRAW LANE INLINE COMMENTS (JSON arrays, may be empty []):\n--- CORRECTNESS --- $correctness_comments\n--- ARCHITECTURE --- $arch_comments\n--- PATTERNS --- $patterns_comments\n--- TESTS --- $tests_comments\n--- PEDANTIC --- $pedantic_comments\n\nSYNTHESIS RULES: (1) INCLUDE ALL -- every finding from every lane must appear; (2) DEDUPLICATE -- merge overlapping file:line findings into one entry noting all contributing dimensions; (3) PRIORITIZE CRITICAL -> HIGH -> MEDIUM -> LOW, grouped by file within each tier; (4) ELEVATE by one severity tier when 2+ lanes independently flag the same file; (5) VERDICT: CHANGES_REQUESTED if any CRITICAL/HIGH finding exists, else PASS; (6) NO INVENTION -- do not add findings not present in lane output; (7) PRESERVE CITATIONS -- every finding keeps its file:line; (8) COVERAGE HONESTY -- if $lane_failures is non-empty, do NOT treat those lanes' '(lane did not report)' text as a clean pass. Add a visible 'Coverage gap' note near the top of the review naming exactly which dimensions were NOT reviewed (the crashed lanes) so a human knows this review is incomplete in those areas, not clean.\n\nOutput ONLY this JSON (use \\n for newlines inside string values): {\"status\": \"success\", \"context_updates\": {\"merged_review\": \"<full organized review text>\", \"review_verdict\": \"PASS\"|\"CHANGES_REQUESTED\", \"review_summary\": \"<3-5 sentence summary>\", \"review_comments_json\": \"<merged JSON array of inline comment objects as a string>\"}}"
     ]
 
     // ── Phase 5: Post Review ───────────────────────────────────
@@ -206,6 +215,26 @@ digraph pr_review_fast {
         fillcolor = "#E8F0FE",
         timeout   = "5m",
         prompt    = "Post the merged PR review as an inline GitHub PR review (Files Changed tab) using bash + curl. Uses GH_TOKEN from env.\n\nPR URL: $pr_url\nPR Number: $pr_number\nPR Owner/Repo: $pr_owner/$pr_repo\nPR Head SHA: $pr_head_sha\nVerdict: $review_verdict\nSummary: $review_summary\nInline comments JSON: $review_comments_json\n\nSTEP 1 -- write the summary body: concise verdict + most critical finding (or confirm all checks pass), note count of findings across 5 lanes, end with 'Full details in the inline comments on Files Changed.' plus a verdict line (VERDICT: PASS or VERDICT: CHANGES_REQUESTED) and this humility caveat: '> \u26a0\ufe0f Automated fast parallel review -- 5 concurrent lanes (correctness, architecture, patterns, tests, pedantic), each with fresh context, no synthesis retry loop. Optimized for turnaround, not exhaustiveness. Human maintainer should give final approval before merging.'\n\nSTEP 2 -- POST via bash+curl+python3 (build payload safely to handle JSON escaping): POST https://api.github.com/repos/$pr_owner/$pr_repo/pulls/$pr_number/reviews with {commit_id: $pr_head_sha, body: <summary>, event: REQUEST_CHANGES if CHANGES_REQUESTED else APPROVE, comments: <parsed comments array>}. On HTTP 422 (inline comments rejected, e.g. stale diff position), fall back to a single top-level issue comment with the full merged review instead. Apply labels 'reviewed' or 'changes-requested' via the issues/$pr_number/labels endpoint matching the verdict. Print the single line: posted"
+    ]
+
+    // Independent verification that comment_draft's claimed side effect
+    // (posting a review to GitHub) actually happened -- ported from the
+    // same fix applied to pr-review-exhaustive.dot's verify_review_posted
+    // node (that pipeline's comment_draft prompt is nearly identical to
+    // this one's and shares the same silent-no-op risk: a box node can
+    // emit a compliant success JSON without ever invoking curl if its
+    // prompt is worded as a single no-prose output). shape=box (not
+    // diamond) per docs/primer.md's foot-gun card -- box is proven
+    // elsewhere in this file (merge_findings, comment_draft) to actually
+    // execute its prompt.
+    verify_review_posted [
+        label            = "Verify Review Posted",
+        shape            = box,
+        fillcolor        = "#FFF9C4",
+        goal_gate        = true,
+        retry_target     = "comment_draft",
+        timeout          = "2m",
+        prompt           = "YOUR RESPONSE MUST START WITH { -- no preamble, no explanation, no text before the opening brace.\n\nUsing bash, GET https://api.github.com/repos/$pr_owner/$pr_repo/pulls/$pr_number/reviews with `Authorization: token ${GH_TOKEN}`, and independently check whether any review in the response actually exists with a body containing 'Automated fast parallel review' and a commit_id matching $pr_head_sha. Do this by actually running the curl command and reading its real output -- do not assume comment_draft's own claim was correct. Also accept a fallback top-level issue comment (GET /issues/$pr_number/comments) containing the same marker text, since comment_draft may have fallen back to that on a 422.\n\nIf a matching review or fallback comment is found:\n{\"status\": \"success\"}\nIf NOT found (comment_draft did not actually post, or posted something that doesn't match):\n{\"status\": \"fail\", \"failure_reason\": \"No matching PR review or fallback comment found -- comment_draft's claimed post was not independently confirmed.\"}\n\nNo prose. Just the JSON."
     ]
 
     // Pipeline exit
@@ -241,6 +270,13 @@ digraph pr_review_fast {
     fan_in -> collect_lane_results
     collect_lane_results -> merge_findings
     merge_findings -> comment_draft
-    comment_draft -> done
+
+    // comment_draft's own claim of success is not trusted -- route through
+    // an independent verification gate before the pipeline is allowed to
+    // finish. On failure, retry comment_draft itself (goal_gate + retry_target).
+    comment_draft -> verify_review_posted
+
+    verify_review_posted -> done          [condition="outcome=success"]
+    verify_review_posted -> comment_draft [condition="outcome!=success"]
 
 }
