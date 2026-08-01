@@ -258,9 +258,33 @@ digraph idea_to_pr {
   // filename layer instead of the verdict layer). Every downstream prompt
   // below now interpolates ${paths.design_doc} / ${plan.plan_doc} /
   // ${build.status_doc} instead of re-deriving them.
+  //
+  // CONFIRMED LIVE BUG, now fixed: the local shell variables here were
+  // originally named design_doc/plan_doc/status_doc, referenced below as
+  // "$design_doc" etc. The engine's own $var context-substitution into
+  // tool_command does a literal, non-word-bounded text replace of "$design"
+  // (a real top-level input) wherever that substring appears -- including
+  // as a bare PREFIX of an unrelated local shell variable name. That
+  // clobbered "$design_doc" with the entire multi-KB $design blurb before
+  // the shell ever ran, corrupting the computed value written into
+  // context.paths.design_doc into garbage -- which is why EstablishDesign/
+  // Report were seen writing to/citing a totally different, sane-looking
+  // fallback path instead (the model correctly recognized the corrupted
+  // value wasn't a usable path and improvised). This is the SAME bug class
+  // already fixed once for the flattened context key design.design_doc ->
+  // renamed to paths.design_doc -- but that fix only covered CONTEXT KEYS;
+  // it missed this second, independent occurrence in a LOCAL shell
+  // variable. Renamed design_doc/plan_doc/status_doc -> ddoc/pdoc/sdoc so
+  // no local variable name starts with any top-level input name ($task,
+  // $repo, $design, $max_*, $github_token) as a literal prefix. Confirmed
+  // via instance e908ccf92984's raw pipeline:node_complete event: the
+  // notes field showed the printf argument literally corrupted mid-string,
+  // e.g. "...satisfied._doc\" \"$plan_doc\" \"$status_doc\"" -- everything
+  // up through "$design" had been replaced by the design blurb, leaving
+  // only the "_doc" suffix fragment intact.
   ComputeRunPaths [
     shape=parallelogram, label="Compute Run Paths (deterministic, once)",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p docs/plans .resolve/plan .resolve/verify .resolve/delivery .resolve/design\nslug=$(printf '%s' \"$task\" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-\\+/-/g; s/^-//; s/-$//')\ndate=$(date +%Y-%m-%d)\ndesign_doc=\"docs/plans/${date}-${slug}-design.md\"\nplan_doc=\"docs/plans/${date}-${slug}-implementation.md\"\nstatus_doc=\"docs/plans/${slug}-status.md\"\nprintf '{\"paths.design_doc\": \"%s\", \"plan.plan_doc\": \"%s\", \"plan.rubric\": \".resolve/plan/rubric.json\", \"build.status_doc\": \"%s\"}' \"$design_doc\" \"$plan_doc\" \"$status_doc\"",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p docs/plans .resolve/plan .resolve/verify .resolve/delivery .resolve/design\nslug=$(printf '%s' \"$task\" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-\\+/-/g; s/^-//; s/-$//')\ndate=$(date +%Y-%m-%d)\nddoc=\"docs/plans/${date}-${slug}-design.md\"\npdoc=\"docs/plans/${date}-${slug}-implementation.md\"\nsdoc=\"docs/plans/${slug}-status.md\"\nprintf '{\"paths.design_doc\": \"%s\", \"plan.plan_doc\": \"%s\", \"plan.rubric\": \".resolve/plan/rubric.json\", \"build.status_doc\": \"%s\"}' \"$ddoc\" \"$pdoc\" \"$sdoc\"",
     parse_json="true"
   ];
 
