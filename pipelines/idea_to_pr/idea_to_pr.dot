@@ -128,11 +128,6 @@
 //                           passes (default 2) -- NOT the completion mechanism.
 //   $max_design_retries   - safety-backstop cap on EstablishDesign retries after a
 //                           failed deterministic verification (default 2).
-//   $max_design_approval_retries - safety-backstop cap on design-approval
-//                           correction round-trips with a human, only ever
-//                           entered when AssessHumanInputNeed judged a
-//                           genuine product-taste/direction question exists
-//                           (default 3) -- most runs never touch this at all.
 //   $max_plan_retries     - safety-backstop cap on Plan retries after a failed
 //                           deterministic rubric-schema verification (default 2).
 //   $max_plan_revisions   - safety-backstop cap on plan/rubric REVISIONS
@@ -181,22 +176,23 @@ digraph idea_to_pr {
     rankdir=LR,
     default_max_retry=2,
     default_fidelity="summary:high",
-    // EstablishDesign, JudgeDesignDoc, AssessHumanInputNeed, Plan, and
-    // SelfEvaluate are the judgment-quality-determines-basin-depth nodes in
-    // this graph (primer.md doctrine #12: "expensive model in the gate, not
-    // just the generator" -- EstablishDesign and Plan define what "done"
-    // means, JudgeDesignDoc and SelfEvaluate are the judges that enforce
-    // it, and AssessHumanInputNeed decides whether a human even needs to be
-    // interrupted at all -- getting THAT call wrong is its own basin-depth
-    // risk: too eager wastes the single scarcest resource this pipeline
-    // has, too reluctant lets a real product-direction gamble through
-    // unnoticed). All five get reasoning_effort bumped above the flat
-    // default, mirroring this repo's own pr-review-exhaustive.dot
-    // precedent (its lane reviewers + quality_eval gate get the same
-    // treatment). Generators (Implement, Fix, RevisePlan, ReviseDesignFromHuman,
-    // retry nodes) stay at default effort -- generator quality only affects
-    // iteration count, not basin depth.
-    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #EstablishDesign { reasoning_effort: high; } #JudgeDesignDoc { reasoning_effort: high; } #AssessHumanInputNeed { reasoning_effort: high; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
+    // EstablishDesign, JudgeDesignDoc, Plan, and SelfEvaluate are the
+    // judgment-quality-determines-basin-depth nodes in this graph
+    // (primer.md doctrine #12: "expensive model in the gate, not just the
+    // generator" -- EstablishDesign and Plan define what "done" means,
+    // JudgeDesignDoc and SelfEvaluate are the judges that enforce it).
+    // JudgeDesignDoc does double duty -- it also decides whether a human
+    // even needs to be interrupted at all (see its own prompt below) --
+    // getting THAT call wrong is its own basin-depth risk: too eager
+    // wastes the single scarcest resource this pipeline has, too reluctant
+    // lets a real product-direction gamble through unnoticed. All four get
+    // reasoning_effort bumped above the flat default, mirroring this
+    // repo's own pr-review-exhaustive.dot precedent (its lane reviewers +
+    // quality_eval gate get the same treatment). Generators (Implement,
+    // Fix, RevisePlan, ReviseDesignFromHuman, retry nodes) stay at default
+    // effort -- generator quality only affects iteration count, not basin
+    // depth.
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #EstablishDesign { reasoning_effort: high; } #JudgeDesignDoc { reasoning_effort: high; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
   ];
 
   // NO goal_gate=true anywhere in this file (v1 had it on every box node;
@@ -253,11 +249,11 @@ digraph idea_to_pr {
   // file a downstream gate (or a retry prompt) trusts as fresh evidence
   // must actually BE fresh for this run. Counters now live in
   // one consolidated .resolve/run_state.json (fix_rounds, plan_retries,
-  // design_retries, design_approval_retries, plan_revisions, push_retries,
-  // pr_retries -- see the gate nodes below), so one rm covers all of them.
+  // design_retries, plan_revisions, push_retries, pr_retries -- see the
+  // gate nodes below), so one rm covers all of them.
   ResetRunState [
     shape=parallelogram, label="Reset Run State (idempotency, widened)",
-    tool_command="rm -f .resolve/run_state.json .resolve/verify/rubric_result.json .resolve/delivery/push_status.txt .resolve/delivery/pr_url.txt .resolve/design/validation_feedback.txt .resolve/design/confidence.json .resolve/design/revision_classification.json .resolve/plan/validation_feedback.txt; printf 'reset'"
+    tool_command="rm -f .resolve/run_state.json .resolve/verify/rubric_result.json .resolve/delivery/push_status.txt .resolve/delivery/pr_url.txt .resolve/design/validation_feedback.txt .resolve/plan/validation_feedback.txt; printf 'reset'"
   ];
 
   // Deterministic, computed exactly ONCE -- closes finding #1 (v1 asked
@@ -361,20 +357,36 @@ digraph idea_to_pr {
   // verbatim: when genuinely uncertain whether something is grounded, the
   // burden of proof is on the design doc, not on this judge's willingness
   // to assume good faith -- default to FAIL on doubt, never to a pass.
+  // Also earns its own keep on a second job -- see the header comment
+  // above CheckDesignJudgment below for why "assess if a human needs to
+  // weigh in" got folded into THIS node's own turn instead of becoming a
+  // dedicated extra node.
   JudgeDesignDoc [
     shape=box, fidelity="full",
     label="Judge Design Doc (restless-old-brian lens, independent of EstablishDesign's claim)",
-    prompt="Independently judge ${paths.design_doc} -- do not trust EstablishDesign's own 'design_established' claim; read the file yourself and decide whether it is a genuinely substantive, actionable design, not generic boilerplate padded with the right section headers. Score against: (1) GOAL -- does it name the actual, specific problem being solved (not a vague restatement)? (2) CHOSEN APPROACH -- does it commit to a concrete mechanism, not just an intention? (3) ARCHITECTURE/COMPONENTS -- does it reference REAL, SPECIFIC elements of $repo's actual codebase (real file paths, function/class names, call sites) rather than generic or invented-sounding structure? If $repo is checked out in the workspace, spot-check at least one or two of its specific claims against the real files before deciding -- treat unverifiable or fabricated-sounding specifics as a failure, not a pass. (4) Is it free of hollow filler -- sections present in name only, or 'not specified' used as a shortcut where the design blurb or the actual codebase could clearly have supplied something concrete? A design that is well-formatted but generic, or that invents file/function names you cannot confirm exist, must fail even though it has the right section headers. A design that uses different section names or wording than 'Goal'/'Architecture' literally, but is genuinely concrete and grounded, must pass -- judge substance, not literal keywords. Channel restless-old-brian's lens throughout: demand proof over claims, do not extend a borderline design the benefit of the doubt, and treat 'I couldn't quite tell if this checks out' as a FAIL, not a pass -- the burden of proof sits on the design doc, never on your willingness to assume good faith. Write .resolve/design/judgment.json: {\"verdict\": \"pass\"|\"fail\", \"reason\": \"<specific -- cite exactly what's missing, generic, or unverifiable if fail>\"}. Print the single line: judgment_verdict=pass or judgment_verdict=fail, matching the file exactly."
+    prompt="Independently judge ${paths.design_doc} -- do not trust EstablishDesign's own 'design_established' claim; read the file yourself and decide whether it is a genuinely substantive, actionable design, not generic boilerplate padded with the right section headers. Score against: (1) GOAL -- does it name the actual, specific problem being solved (not a vague restatement)? (2) CHOSEN APPROACH -- does it commit to a concrete mechanism, not just an intention? (3) ARCHITECTURE/COMPONENTS -- does it reference REAL, SPECIFIC elements of $repo's actual codebase (real file paths, function/class names, call sites) rather than generic or invented-sounding structure? If $repo is checked out in the workspace, spot-check at least one or two of its specific claims against the real files before deciding -- treat unverifiable or fabricated-sounding specifics as a failure, not a pass. (4) Is it free of hollow filler -- sections present in name only, or 'not specified' used as a shortcut where the design blurb or the actual codebase could clearly have supplied something concrete? A design that is well-formatted but generic, or that invents file/function names you cannot confirm exist, must fail even though it has the right section headers. A design that uses different section names or wording than 'Goal'/'Architecture' literally, but is genuinely concrete and grounded, must pass -- judge substance, not literal keywords. Channel restless-old-brian's lens throughout: demand proof over claims, do not extend a borderline design the benefit of the doubt, and treat 'I couldn't quite tell if this checks out' as a FAIL, not a pass -- the burden of proof sits on the design doc, never on your willingness to assume good faith.\n\nONLY if verdict is pass, also decide -- as the SAME independent judge, not the optimistic generator that wrote the doc -- whether there's a genuine, high-value question inside this design that a human, not the codebase, has to answer. Human attention is the single scarcest resource this pipeline has access to, shared with every other project competing for that same person's time right now -- asking a bad, vague, or unnecessary question spends real trust, and a pipeline that cries wolf earns itself ignored on every future run, not just this one. Set needs_human_input=true ONLY if there is a genuine fork in the road that is a matter of product taste or direction -- where the 'right' answer depends on what the human actually wants rather than on anything resolvable by reading $repo further, and where guessing wrong would waste real downstream effort. Default to false; most well-grounded designs should NOT trigger this. If true, ask exactly ONE specific, well-posed question stating the actual tradeoff (never 'does this look ok?'), plus your own recommended_default so a one-word 'agreed' is enough to unblock. Write .resolve/design/judgment.json: {\"verdict\": \"pass\"|\"fail\", \"reason\": \"<specific -- cite exactly what's missing, generic, or unverifiable if fail>\", \"needs_human_input\": true|false, \"human_question\": \"<specific, or empty>\", \"recommended_default\": \"<your call if unblocked without an answer, or empty>\"}. Print the single line: judgment_verdict=pass or judgment_verdict=fail, matching the file exactly."
   ];
 
   // Reads .resolve/design/judgment.json directly, never $last_response
-  // (foot-gun #3) -- and on fail, copies the judge's own reason into the
-  // SAME validation_feedback.txt EstablishDesign already knows to read on
-  // retry, so a rejected-by-the-judge design gets a written critique to
-  // act on (doctrine #4), not a blind re-roll.
+  // (foot-gun #3). On fail, copies the judge's own reason into the SAME
+  // validation_feedback.txt EstablishDesign already knows to read on
+  // retry (doctrine #4), not a blind re-roll.
+  //
+  // Also the single router for the earned human gate -- deliberately NOT
+  // a separate assess+check+classify+retry+blocked cluster. An earlier
+  // draft built exactly that (8 nodes) before being corrected: "trust each
+  // step in the workflow" -- the same lesson this repo's own PlanConfidenceCheck/
+  // PlanApproval/CheckPlanApproval/RevisePlan already models in idea_to_shipped.dot
+  // (4 nodes, no extra backstop -- it trusts a human to converge, not an
+  // LLM guessing blind). Mirrored here: JudgeDesignDoc already decides
+  // needs_human_input as part of its own single turn (see above), so this
+  // gate just reads that one file and routes three ways instead of
+  // spinning up a dedicated node to re-decide it. ok -> Plan (unattended,
+  // most runs). needs_human -> DesignApproval (earned, rare). fail ->
+  // DesignRetryCheck (unchanged from before).
   CheckDesignJudgment [
-    shape=parallelogram, label="Check Design Judgment (reads judge's file)",
-    tool_command="#!/bin/sh\nset -e\npython3 -c \"import json,os,sys; p='.resolve/design/judgment.json'; d=json.load(open(p)) if os.path.exists(p) else {}; sys.exit(0 if d.get('verdict')=='pass' else 1)\" && { rm -f .resolve/design/validation_feedback.txt; printf 'ok'; } || { python3 -c \"import json,os;p='.resolve/design/judgment.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('reason') or 'design judge did not produce a valid verdict/reason')\" > .resolve/design/validation_feedback.txt; printf 'fail'; }"
+    shape=parallelogram, label="Check Design Judgment (reads judge's file, routes the earned gate)",
+    tool_command="#!/bin/sh\nset -e\nroute=$(python3 -c \"import json,os\nd=json.load(open('.resolve/design/judgment.json')) if os.path.exists('.resolve/design/judgment.json') else {}\nprint('fail' if d.get('verdict')!='pass' else ('needs_human' if d.get('needs_human_input') else 'ok'))\n\")\nif [ \"$route\" = \"fail\" ]; then\n  python3 -c \"import json,os;p='.resolve/design/judgment.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('reason') or 'design judge did not produce a valid verdict/reason')\" > .resolve/design/validation_feedback.txt\n  printf 'fail'\nelse\n  rm -f .resolve/design/validation_feedback.txt\n  printf '%s' \"$route\"\nfi"
   ];
 
   // Safety backstop for the design-verification retry loop -- same counter
@@ -396,60 +408,33 @@ digraph idea_to_pr {
   // --- Earned human gate (think-like-ken's own Phase 7, made self-driven).
   // think-like-ken's original process is a live back-and-forth: one
   // question at a time, 2-3 approaches discussed, design presented in
-  // sections with a checkpoint after each, then an explicit, ALWAYS-fired
-  // human review gate before planning starts. In an unattended pipeline
-  // there is no human mid-loop to run that dialogue with -- so the phases
-  // above (EstablishDesign's own repo-grounded derivation, JudgeDesignDoc's
-  // restless-old-brian verification) are how this graph gravitates toward
-  // a genuinely good design on its own, without a human answering each
-  // question turn by turn. What must NOT be dropped is Phase 7 itself: a
-  // real human should still get the final word on high-stakes,
-  // taste-shaped decisions -- but NOT unconditionally.
+  // sections, then an explicit, ALWAYS-fired human review gate before
+  // planning starts. In an unattended pipeline there is no human mid-loop
+  // to run that dialogue with -- so EstablishDesign's own repo-grounded
+  // derivation plus JudgeDesignDoc's restless-old-brian verification are
+  // how this graph gravitates toward a genuinely good design on its own.
+  // What must NOT be dropped is Phase 7 itself: a real human should still
+  // get the final word on high-stakes, taste-shaped decisions -- but NOT
+  // unconditionally.
   //
   // This was a real correction mid-build, worth recording verbatim: an
-  // earlier draft of this graph gated on a human UNCONDITIONALLY, every
-  // run, once restless-old-brian's judge passed -- treating "the judge is
-  // satisfied" as sufficient justification to interrupt a human. It is
-  // not. This pipeline's own Plan node prompt already says it: "Human
-  // attention is the most sacred resource -- do not waste it." That
-  // resource is shared across every other project a human is running, not
-  // reserved for this one -- an unconditional gate spends it on every
-  // well-grounded, unremarkable run exactly as much as on the rare run that
-  // actually needed it, which is how a human stops trusting (and stops
-  // reading) a pipeline's questions altogether. So: restless-old-brian's
-  // pass is necessary, never sufficient, to reach Plan unattended -- but
-  // it does NOT by itself earn a human's attention. A SEPARATE, later
-  // judgment call (AssessHumanInputNeed below) has to earn that
-  // specifically, by finding an actual product-taste/direction fork the
-  // codebase cannot resolve, and by asking one sharp, well-posed question
-  // instead of a vague "does this look ok?" -- most well-grounded designs
-  // should clear this node with needs_human_input=false and never
-  // interrupt anyone.
-  AssessHumanInputNeed [
-    shape=box, fidelity="full",
-    label="Assess Human Input Need (earn the gate, don't assume it)",
-    prompt="${paths.design_doc} has already been judged substantive and grounded by restless-old-brian's independent check -- this is a DIFFERENT, narrower question: is there a genuine, high-value question inside this design that a human, not the codebase, has to answer? Human attention is the single scarcest resource this pipeline has access to, and it is shared with every other project competing for that same person's time right now -- asking a bad, vague, or unnecessary question spends real trust, and a pipeline that cries wolf earns itself ignored (or shut off) on every future run, not just this one. Set needs_human_input=true ONLY if there is a genuine fork in the road that is a matter of product taste or direction -- where the 'right' answer depends on what the human actually wants rather than on anything you could resolve by reading $repo further, and where guessing wrong would waste real downstream implementation effort. Do NOT set it true for anything you could resolve yourself with ordinary engineering judgment, anything already settled by $design or by what you found in the real codebase, or a routine 'looks good?' with no real stakes -- if you are not confident this clears that bar, default to false; most well-grounded designs should NOT trigger this at all. If you DO set it true, ask exactly ONE specific, well-posed question that states the actual tradeoff plainly (never 'does this look ok?'), and also give your own recommended_default -- what you would do if the human is too busy to look closely, so a one-word 'agreed' is enough to unblock you without them having to think hard about it. Write .resolve/design/confidence.json: {\"needs_human_input\": true|false, \"human_question\": \"<specific, or empty>\", \"recommended_default\": \"<your own call if unblocked without an answer, or empty>\"}. Print the single line: human_input_assessed"
-  ];
-
-  // Mirrors idea_to_shipped.dot's PlanConfidenceCheck exactly -- cheap,
-  // mechanical, reads the judgment call AssessHumanInputNeed already made
-  // rather than re-deciding anything itself.
-  DesignConfidenceCheck [
-    shape=parallelogram, label="Check Design Confidence (needs a human?)",
-    tool_command="#!/bin/sh\nset -e\nneeds=$(python3 -c \"import json;print(json.load(open('.resolve/design/confidence.json'))['needs_human_input'])\" 2>/dev/null || echo False)\nif [ \"$needs\" = \"True\" ]; then printf 'needs_input'; else printf 'no_input_needed'; fi"
-  ];
-
-  // The earned gate itself -- only ever reached when DesignConfidenceCheck
-  // says needs_input. Freeform (not multiple-choice): the human's actual
-  // reply text is what ReviseDesignFromHuman/CheckDesignApproval both
-  // read, mirroring PlanApproval/HumanApproval's own established pattern
-  // in this repo (point at the confidence.json file for the specific
-  // question rather than trying to inline dynamic prose into a static DOT
-  // attribute -- same convention PlanApproval already uses).
+  // earlier draft gated on a human UNCONDITIONALLY, every run, once
+  // restless-old-brian's judge passed. It is not enough for the judge to
+  // be satisfied. This pipeline's own Plan node prompt already says it:
+  // "Human attention is the most sacred resource -- do not waste it."
+  // That resource is shared across every other project a human is running
+  // right now -- an unconditional gate spends it on every unremarkable run
+  // exactly as much as the rare run that actually needed it, which is how
+  // a pipeline's questions stop getting read at all. So restless-old-brian's
+  // pass is necessary, never sufficient -- JudgeDesignDoc's own
+  // needs_human_input verdict (see above) is the thing that has to
+  // actually earn a human's attention, by finding a real product-taste/
+  // direction fork the codebase can't resolve, with one sharp question.
+  // DesignApproval below is only ever reached on that earned path.
   DesignApproval [
     shape=hexagon, mode="freeform",
     label="Design Approval (only when genuinely earned)",
-    prompt="AssessHumanInputNeed flagged a genuine product-taste/direction question before implementation begins -- see .resolve/design/confidence.json for the specific question and my recommended default. Review ${paths.design_doc}. Reply 'approve'/'agreed'/'yes'/'ok' to accept the recommended default and proceed, or reply with your actual direction/correction."
+    prompt="restless-old-brian's own judgment flagged a genuine product-taste/direction question before implementation begins -- see .resolve/design/judgment.json for the specific question and its recommended default. Review ${paths.design_doc}. Reply 'approve'/'agreed'/'yes'/'ok' to accept the recommended default and proceed, or reply with your actual direction/correction."
   ];
 
   // Same "diamond trap" avoidance as every other gate in this file --
@@ -462,54 +447,24 @@ digraph idea_to_pr {
     tool_command="bash -c 'if echo \"$last_response\" | grep -iEq \"approve|agreed|\\byes\\b|\\bok\\b|lgtm\"; then echo approved; else echo corrected; fi'"
   ];
 
-  // Own budget, own key (design_approval_retries) -- same pattern as every
-  // other backstop counter in this file. Deliberately small: this loop is
-  // human-steered, not an LLM guessing blind, so it should converge fast:
-  // a real person correcting a real design rarely needs more than a round
-  // or two before either approving or giving up and just telling you what
-  // they want outright.
-  DesignApprovalRetryCheck [
-    shape=parallelogram, label="Check Design Approval Retry Budget (backstop)",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};d['design_approval_retries']=d.get('design_approval_retries',0)+1;json.dump(d,open(p,'w'));print(d['design_approval_retries'])\")\nmax=${max_design_approval_retries:-3}\nif [ \"$count\" -le \"$max\" ]; then printf 'retry_ok'; else printf 'retry_exhausted'; fi"
-  ];
-
-  // The core judgment-deference split this whole cluster exists for: a
-  // human's correction gets incorporated either way, but whether it goes
-  // back through restless-old-brian's judge depends on WHAT KIND of
-  // correction it was, not a blanket policy. Re-verifying a factual claim
-  // the human just corrected is appropriate (that's an objective,
-  // checkable-against-the-repo fact, exactly what the judge is for).
-  // Re-running an independent LLM judge against a human's explicit
-  // product-taste/direction call is not verification, it's second-guessing
-  // someone with real authority over what the product should be -- treat
-  // that decision as settled the moment they make it, the same way
-  // EstablishDesign's own Mode A already refuses to override a human's
-  // concrete prior decisions.
+  // Deliberately no dedicated retry-budget/blocked node here, mirroring
+  // idea_to_shipped.dot's RevisePlan -> PlanConfidenceCheck precedent
+  // exactly: this loop is human-steered, not an LLM guessing blind, so it
+  // trusts the human to converge rather than capping them. Trusted to do
+  // the whole job itself in one turn, no separate classify/re-verify
+  // node: incorporate the correction, AND -- only if it's a genuine
+  // factual/grounding claim the human corrected -- go re-check that
+  // specific claim against the real repo right now, in the same breath.
+  // A product-taste/direction call is different: that's simply the answer
+  // now, not something to re-litigate by re-running restless-old-brian's
+  // judge against a human's own explicit call (the same deference
+  // EstablishDesign's Mode A already gives a human's prior concrete
+  // decisions). Writes a fresh judgment.json itself and loops back through
+  // the SAME CheckDesignJudgment router above -- no new gate needed.
   ReviseDesignFromHuman [
     shape=box, fidelity="full",
-    label="Revise Design From Human (incorporate correction, classify it)",
-    prompt="Read the human's reply (${last_response}) and incorporate it into ${paths.design_doc}. First, judge what KIND of correction this actually is: (a) a FACTUAL/GROUNDING correction -- they corrected something about what the real code actually does, a wrong file/function/call-site reference, or a claim your design got wrong about $repo -- this kind should be re-verified before this design is presented again; or (b) a PRODUCT-TASTE/DIRECTION decision -- they told you what they actually want on a fork where the answer depends on their intent, not on the codebase -- that is now simply the answer, not a claim to re-litigate. Update the design doc to reflect their input either way. Write .resolve/design/revision_classification.json: {\"needs_regrounding_check\": true|false} -- true ONLY for case (a). Do not set it true for a case (b) correction just to be cautious -- that would mean running restless-old-brian's judge against a human's own explicit direction, which is exactly the wrong instinct here: once someone with real authority over the product has spoken on a matter of taste, that is settled, not something to verify. Print the single line: design_revised"
-  ];
-
-  // Cheap, mechanical -- reads what ReviseDesignFromHuman just decided
-  // about its own correction, same "evidence over self-report" discipline
-  // applied to the revision step's own classification.
-  ClassifyDesignRevision [
-    shape=parallelogram, label="Classify Design Revision (factual vs taste)",
-    tool_command="#!/bin/sh\nset -e\npython3 -c \"import json,os,sys; p='.resolve/design/revision_classification.json'; d=json.load(open(p)) if os.path.exists(p) else {}; sys.exit(0 if d.get('needs_regrounding_check') else 1)\" && printf 'reverify' || printf 'trust_human'"
-  ];
-
-  // Distinct from DesignBlocked -- an accurate blocked_reason matters here
-  // (RUBRIC.md's own "verified behavior, not assumed" doctrine applies to
-  // error messages too): this backstop is about a human-approval
-  // round-trip not converging, not about EstablishDesign's own retry
-  // budget, and conflating the two in the reported reason would mislead
-  // whoever reads it. build.verdict stays "blocked" (not "escalated") --
-  // the pipeline still never reached Plan/Implement.
-  DesignApprovalBlocked [
-    shape=parallelogram, label="Mark Blocked (design approval backstop tripped)",
-    tool_command="printf '{\"build.verdict\": \"blocked\", \"build.blocked_reason\": \"Design approval round-trip with a human exceeded $max_design_approval_retries rounds without an explicit approval -- needs direct human resolution, not another automated pass. See .resolve/design/confidence.json for the original question and ${paths.design_doc} for the current draft.\", \"build.fix_rounds_used\": 0, \"build.plan_revisions_used\": 0, \"build.rubric_result\": \"\", \"build.rubric_score\": 0}'",
-    parse_json="true"
+    label="Revise Design From Human (incorporate, re-verify facts, trust taste)",
+    prompt="Read the human's reply (${last_response}) and incorporate it into ${paths.design_doc}. If they corrected a FACTUAL/GROUNDING claim -- something about what the real code actually does, a wrong file/function/call-site reference -- go verify that specific claim against $repo yourself right now before writing it down; don't just take their word for a factual claim about the codebase either, confirm it. If instead they told you what they actually want on a fork where the answer depends on their intent, not the codebase (a product-taste/direction call), that is now simply the answer -- do not second-guess it or treat it as something to re-verify. Write a fresh .resolve/design/judgment.json reflecting the design's status after your revision: {\"verdict\": \"pass\"|\"fail\", \"reason\": \"<only if fail>\", \"needs_human_input\": true|false, \"human_question\": \"<only if true>\", \"recommended_default\": \"<only if true>\"} -- typically verdict=pass and needs_human_input=false once the human has actually weighed in, unless your own re-verification just now turned up a genuine new problem. Print the single line: design_revised"
   ];
 
   // --- Phase 2: Plan Like Ken -- three-tier VDD evidence hierarchy for HOW
@@ -834,47 +789,38 @@ digraph idea_to_pr {
   VerifyDesignDocExists -> DesignRetryCheck   [condition="context.tool.last_line=fail", label="design doc missing/too short"];
   JudgeDesignDoc        -> CheckDesignJudgment;
   JudgeDesignDoc        -> CheckDesignJudgment [condition="outcome=fail"];
-  CheckDesignJudgment   -> AssessHumanInputNeed [condition="context.tool.last_line=ok", weight="2", label="design judged substantive"];
-  CheckDesignJudgment   -> DesignRetryCheck [condition="context.tool.last_line=fail", label="design judged inadequate"];
+  CheckDesignJudgment   -> Plan             [condition="context.tool.last_line=ok",          weight="2", label="design judged substantive, no human input needed"];
+  CheckDesignJudgment   -> DesignApproval   [condition="context.tool.last_line=needs_human",              label="genuine product-taste question -- earned gate"];
+  CheckDesignJudgment   -> DesignRetryCheck [condition="context.tool.last_line=fail",                     label="design judged inadequate"];
   DesignRetryCheck -> EstablishDesign     [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_design_retries)"];
   DesignRetryCheck -> DesignBlocked    [condition="context.tool.last_line=retry_exhausted", label="backstop tripped"];
   DesignBlocked    -> Report;
   DesignBlocked    -> Report [condition="outcome=fail"];
 
-  // --- Earned human gate: necessary only when AssessHumanInputNeed finds
-  // a genuine product-taste/direction fork -- most runs skip straight from
-  // AssessHumanInputNeed to Plan via DesignConfidenceCheck's
-  // no_input_needed edge, exactly mirroring PlanConfidenceCheck's
-  // confident/needs_review split elsewhere in this repo. ---
-  AssessHumanInputNeed  -> DesignConfidenceCheck;
-  AssessHumanInputNeed  -> DesignConfidenceCheck [condition="outcome=fail"];
-  DesignConfidenceCheck -> Plan           [condition="context.tool.last_line=no_input_needed", weight="2", label="no human input needed"];
-  DesignConfidenceCheck -> DesignApproval [condition="context.tool.last_line=needs_input", label="genuine product-taste question"];
-
-  // Human's SKIPPED answer returns outcome=fail per the wait.human handler
-  // -- fail-net edge here per this file's own established doctrine (RUBRIC.md
-  // foot-gun #2), same as every other node above. fidelity="full" on both:
-  // a human's freeform reply must not be truncated before CheckDesignApproval
-  // reads it (foot-gun #4).
+  // --- Earned human gate: only ever reached via the "needs_human" edge
+  // above. No dedicated retry-budget/blocked node here -- mirrors
+  // idea_to_shipped.dot's RevisePlan -> PlanConfidenceCheck precedent:
+  // this loop is human-steered, trusted to converge, not capped. Human's
+  // SKIPPED answer returns outcome=fail per the wait.human handler --
+  // fail-net edge per this file's own doctrine (RUBRIC.md foot-gun #2).
+  // fidelity="full": a human's freeform reply must not be truncated
+  // before CheckDesignApproval reads it (foot-gun #4). ---
   DesignApproval      -> CheckDesignApproval [fidelity="full"];
   DesignApproval      -> CheckDesignApproval [condition="outcome=fail", fidelity="full"];
-  CheckDesignApproval -> Plan                    [condition="context.tool.last_line=approved", weight="2", label="human approved"];
-  CheckDesignApproval -> DesignApprovalRetryCheck [condition="context.tool.last_line=corrected", label="human sent a correction"];
-  CheckDesignApproval -> DesignApprovalRetryCheck [condition="outcome=fail", label="check crashed -- treat as another correction round"];
+  CheckDesignApproval -> Plan                  [condition="context.tool.last_line=approved", weight="2", label="human approved"];
+  CheckDesignApproval -> ReviseDesignFromHuman  [condition="context.tool.last_line=corrected", label="human sent a correction"];
+  CheckDesignApproval -> ReviseDesignFromHuman  [condition="outcome=fail", label="check crashed -- treat as a correction round"];
 
-  DesignApprovalRetryCheck -> ReviseDesignFromHuman [condition="context.tool.last_line=retry_ok", label="incorporate correction (backstop max $max_design_approval_retries)"];
-  DesignApprovalRetryCheck -> DesignApprovalBlocked [condition="context.tool.last_line=retry_exhausted", label="approval backstop tripped"];
-  DesignApprovalBlocked    -> Report;
-  DesignApprovalBlocked    -> Report [condition="outcome=fail"];
-
-  ReviseDesignFromHuman -> ClassifyDesignRevision;
-  ReviseDesignFromHuman -> ClassifyDesignRevision [condition="outcome=fail"];
-  // The deference split: a factual/grounding correction goes back through
-  // restless-old-brian for real re-verification; a taste/direction call is
-  // trusted outright and goes straight back to the human for a quick
-  // reconfirm of the now-updated doc, never back through the judge.
-  ClassifyDesignRevision -> JudgeDesignDoc  [condition="context.tool.last_line=reverify",    loop_restart="true", thread_id="design-judge-thread", label="factual correction -- re-verify grounding"];
-  ClassifyDesignRevision -> DesignApproval  [condition="context.tool.last_line=trust_human", loop_restart="true", label="taste/direction call -- trust it, reconfirm"];
+  // Loops back through the SAME CheckDesignJudgment router used on the
+  // first pass -- ReviseDesignFromHuman writes its own fresh judgment.json
+  // (see its prompt above), so no separate re-verify/trust-human split
+  // node is needed here; that judgment call is made inline, in the same
+  // turn, by ReviseDesignFromHuman itself. No thread_id needed on this
+  // edge -- CheckDesignJudgment is deterministic, not a second LLM judge
+  // call; the "independent judge" isolation only matters for JudgeDesignDoc
+  // itself, which this path deliberately does not re-enter.
+  ReviseDesignFromHuman -> CheckDesignJudgment [loop_restart="true"];
+  ReviseDesignFromHuman -> CheckDesignJudgment [condition="outcome=fail", loop_restart="true"];
 
   // --- Phase 2 loop: same pattern for Plan -- its output is the
   // DEFINITION OF DONE the entire build loop below converges against, so a
