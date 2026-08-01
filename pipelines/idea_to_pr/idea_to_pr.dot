@@ -188,6 +188,39 @@ digraph idea_to_pr {
     model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #EstablishDesign { reasoning_effort: high; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
   ];
 
+  // NO goal_gate=true anywhere in this file (v1 had it on every box node;
+  // removed here after two live runs on resolve.amplifier.ms both burned
+  // ~20+ minutes and reported the WHOLE PIPELINE as "failed" despite every
+  // node executing cleanly and the graph itself reaching Exit with an
+  // honest build.verdict=blocked. Root cause, confirmed via the engine's
+  // own pipeline:goal_gate_check event: goal_gate=true makes the engine
+  // independently judge whether THAT NODE's own output satisfies the
+  // graph-level goal="$task" -- and an intermediate artifact (a design doc,
+  // a status report) structurally can never satisfy a high-level task goal
+  // by itself, only the actual delivery nodes could. Two compounding costs
+  // observed: (1) the engine retried EstablishDesign's full box execution
+  // (each attempt several real minutes of cloning+reading a codebase) THREE
+  // times per graph-level visit before conceding "Max retries exceeded" --
+  // this pipeline's own header comment already documented max_retries as
+  // covering "transient LLM errors", not a content-adequacy judgment, so
+  // this was a surprising, expensive, and undocumented-here interaction;
+  // (2) at Exit, ANY goal_gate node left "unsatisfied" (which for an
+  // intermediate/scaffolding node is nearly guaranteed) flips the platform-
+  // level resolver outcome to "failed" -- even when this graph's OWN
+  // evidence-based gates (VerifyDesignDoc, ValidateRubric, CheckRubric,
+  // CheckPush, CheckPROpened) and honest-escalation doctrine (primer.md:
+  // "judged by one question -- did the system converge to the desired
+  // state?") already did their job correctly and reported a truthful
+  // build.verdict. Doctrine's own evidence-over-self-report gates are the
+  // correct, cheaper, already-proven mechanism here; goal_gate=true is a
+  // second, cruder, more expensive judgment layer that actively fights this
+  // graph's own carefully-built backstop routing rather than complementing
+  // it. The validator's goal_gate_has_retry warning (suggested fix:
+  // retry_target) may be the intended way to make goal_gate coexist with a
+  // phased graph like this one, but its semantics aren't documented
+  // anywhere in this repo -- removing goal_gate entirely was the safer,
+  // evidence-driven fix given two live confirmations of the cost.
+
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
@@ -237,7 +270,7 @@ digraph idea_to_pr {
   // complete design, just transcribe it" assumption, which cannot take on a
   // bare issue report with no prior design session. ---
   EstablishDesign [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Establish Design (reference+verify, or self-derive)",
     prompt="First, assess whether $design is already a substantive, actionable design -- a concrete chosen approach plus real architecture/components -- or just a thin problem statement (a bug report, an issue reference, a one-liner) with no actual design decided yet.\n\nMODE A -- $design is already substantive: treat it as authoritative, do NOT override the human's decisions. But do not transcribe it blind either -- clone $repo into the workspace if it isn't already checked out, and actually read the real files/functions it references to VERIFY it before writing anything down. Where it is vague or leaves a gap the actual codebase can resolve concretely (e.g. it says 'add a field to the event' but doesn't name the exact call site), fill that gap with what you actually find by reading the code -- decorate it with grounded specifics, don't invent unrelated architecture and don't second-guess decisions that are already concrete.\n\nMODE B -- $design is thin or just a raw problem statement: perform your own think-like-ken derivation right now. Clone $repo into the workspace if it isn't already checked out, then actually read the relevant code before proposing anything -- do not guess at file paths, function names, call sites, or existing behavior you have not verified by reading the real files. Form a genuine chosen approach and architecture grounded in what you found, exactly as a human running /think-like-ken would -- this is real design work, not paraphrasing.\n\nEITHER WAY: if .resolve/design/validation_feedback.txt exists (from a prior failed verification of this exact doc), read it first and fix exactly what it names before anything else. Write the design doc to ${paths.design_doc} using the standard header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions) -- every section grounded in either the human's given decisions (Mode A) or what you verified by reading the real repo (Mode B); leave a section 'not specified' only if it is genuinely inapplicable, never as a shortcut to skip real thinking. Do NOT fabricate specifics you have not verified against the real repo. If you cannot form an adequate, concrete design even after actually exploring the codebase (repo inaccessible, problem fundamentally too ambiguous to resolve into a real approach), say so plainly instead of forcing a low-quality doc padded with generic section headers just to pass the next check -- this phase's own verification gate is honest and exists precisely to let a genuine failure here escalate rather than let a hollow design propagate into the expensive build loop. Print the single line: design_established"
   ];
@@ -277,7 +310,7 @@ digraph idea_to_pr {
   // actually done. This rubric -- not a round count -- is what SelfEvaluate
   // judges against. ---
   Plan [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Plan Like Ken (VDD evidence + weighted rubric)",
     prompt="Read ${paths.design_doc}. If .resolve/plan/validation_feedback.txt exists (from a prior failed rubric-schema verification of this exact plan), read it first and fix exactly what it names before anything else. Human attention is the most sacred resource -- do not waste it, and do not waste the pipeline's effort on a rubric that only checks the obvious. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work, the way a user experiencing this feature would judge it?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each.\n\nSTEP A -- EVIDENCE METHOD per task: classify each task and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state, anything touching a simulated DOM but not needing a real browser. This is the default for UI logic not tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for focus management, keyboard navigation, accessibility, visual layout truth -- the exception, never the default. CRITICAL COMMAND-CORRECTNESS RULE FOR TIERS 1 AND 2: if the verification command is vitest (or any watch-mode-by-default test runner), it MUST be invoked in single-run/CI mode -- vitest's own CLI default is watch mode, which never exits and would hang the pipeline waiting for a process that never terminates. Always write the command as `vitest run` (or `vitest --run`), NEVER a bare `vitest` or `npm test`/`pnpm test`/`yarn test` unless that script itself already passes --run or sets CI=true internally -- check the repo's package.json test script and if it doesn't already force non-watch mode, write the exact non-watch invocation instead of relying on it. The same applies to any other watch-mode-by-default runner (e.g. jest --watch is opt-in so jest is fine bare, but always double check against the actual tool's documented default before writing the command). For EACH task write: exact file paths, complete copy-pasteable implementation, the static analysis command (always first), which tier applies and why, and the exact command to run for that tier (confirmed non-watch/non-blocking). Write ${plan.plan_doc} with the standard structure (Goal/Architecture/Tech Stack/Verification approach, then Task N: Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit).\n\nSTEP B -- WEIGHTED RUBRIC (the real definition of done, following https://github.com/microsoft/amplifier-bundle-evaluation rubric-design methodology): before writing a single criterion, name the 2-3 things that would separate a genuinely good result on THIS feature from a competent-looking but shallow one -- a subtle requirement buried in the design that a skimming implementer would miss, a behavior only visible if you actually use the feature the way a user would, or a failure mode you can already picture (e.g. 'the error message technically appears but doesn't tell the user what to actually do'). These become your heavy-weighted, CRITICAL: criteria. Then for EVERY criterion: (1) phrase it as an OBSERVABLE QUESTION a judge can answer by looking at or using the artifact -- 'Does the README include (a) install steps (b) the exact run command (c) expected output?' not 'is the README good?'; 'Does submitting the form with an empty required field show an inline error naming which field is missing, not just a generic failure banner?' not 'does validation work?'. If you cannot phrase a criterion as something concrete and pointable, find the observable property underneath it or cut it. (2) THINK LIKE A USER, NOT AN ENGINEER, for both writing and later judging -- the question is never 'did the function get called' but 'would someone using this feature actually get what they came for, notice if it broke, or be confused by the result'. (3) Cut any criterion every implementation will trivially pass (file exists, script exits 0) -- those are gates that belong in the VDD evidence steps, not point-bearing rubric entries. (4) Allocate points by discriminating power: the 2-3 criteria from above should hold roughly HALF the total points combined; trivial-but-required checks get small slices. Mark heavy criteria with a 'CRITICAL:' prefix in their description. (5) Where partial credit is possible, spell out exactly how it's earned in the description (e.g. 'full credit for handling all 3 listed edge cases, 33% credit per case if some but not all are handled') so the judge isn't inventing a scale. (6) Write a short 'steps' evidence-gathering plan alongside the criteria -- what to run, read, or actually try as a user before scoring, mapped to the VDD tiers from Step A -- so every criterion has something concrete backing its judgment; gate on failure explicitly ('if the script errors or times out, score 0 for every criterion in this task's evidence'). Write .resolve/plan/rubric.json: {\\\"steps\\\": \\\"<ordered evidence-gathering plan: what to run/read/try, referencing the VDD tier commands from the plan doc>\\\", \\\"pass_threshold\\\": 0.85, \\\"criteria\\\": {\\\"<snake_case_name>\\\": {\\\"points\\\": <int>, \\\"task\\\": <N or null for an overall/cross-cutting criterion>, \\\"description\\\": \\\"<observable, user-facing question; prefix with 'CRITICAL:' if this is one of the 2-3 heavy-weighted ones>\\\"}, ...}}. Do not let this become mechanical busywork disconnected from what the feature is actually for -- if a criterion wouldn't matter to someone using the result, it doesn't belong.\n\nSTEP C -- REFERENCE THE RUBRIC FROM THE PLAN DOC: since the rubric lives in its own file (rubric.json), don't leave ${plan.plan_doc} silent about it. Under each Task N section, add a short 'Acceptance' subsection listing that task's criterion name(s), points, and one-line description verbatim from rubric.json, plus the line 'Full rubric: .resolve/plan/rubric.json'. Do the same under an 'Overall Acceptance' section near the top for the cross-cutting criteria. A human skimming the plan doc alone should understand what 'done' means without having to open the JSON separately.\n\nSTEP D -- TIGHTNESS CHECK: a rubric criterion this pipeline can't realistically earn full points on in 1-2 full implement+verify loops (a 'loop' is one complete Implement -> SelfEvaluate -> Fix -> SelfEvaluate cycle, NOT a conversational turn) means the underlying TASK is too big or too ambiguous -- split it further rather than writing a loose criterion and hoping the fix loop absorbs the gap. Every criterion must be answerable using only what's already pinned down in the design doc.\n\nPrint the single line: plan_done"
   ];
@@ -325,7 +358,7 @@ digraph idea_to_pr {
   // points -- that judgment belongs entirely to the independent
   // SelfEvaluate step below, which doesn't trust Implement's own account.
   Implement [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Implement",
     prompt="Read ${plan.plan_doc} and .resolve/plan/rubric.json (including its 'steps' evidence plan). For EACH task not yet marked complete, in order: (1) run static analysis FIRST and fix any pre-existing issues; (2) implement exactly what's specified -- no extra features, no 'while I'm here' improvements; (3) run static analysis again; (4) run the VDD verification command the plan assigned this task's tier (unit test / jsdom+node integration test / real browser -- do NOT substitute a cheaper check, and do NOT reach for a browser if the plan's tier is unit or jsdom). If that command is vitest (or any other watch-mode-by-default runner) and the plan wrote a bare `vitest`/`npm test`, do NOT run it as-is -- run `vitest run` (or add `--run`) instead, since vitest's own default is watch mode and a bare invocation will hang forever waiting for a process that never exits. Never run a test command in watch mode in this pipeline. Also actually exercise the feature the way rubric.json's 'steps' describes for this task's criteria -- if a criterion is about what a user would experience, go look at or try that, don't infer it from the code. Document the ACTUAL output/behavior you saw verbatim -- do not summarize or paraphrase it. (5) Commit atomically: 'feat: [what this does]'. Append your result to ${build.status_doc} under this task's heading with the exact static-analysis output, the exact verification command + output, and what you observed when exercising the feature per the rubric's steps. After all tasks are attempted, also work through rubric.json's overall 'steps' (e.g. full test suite, static analysis clean, any cross-cutting user-facing check) and document that output too. Do NOT self-score against the rubric and do NOT declare victory -- just report what you did and what actually happened. Print the single line: implement_done"
   ];
@@ -336,7 +369,7 @@ digraph idea_to_pr {
   // like a user experiencing the result, not an engineer confirming a
   // command exited 0.
   SelfEvaluate [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Self-Evaluate (judge, weighted rubric)",
     prompt="Read .resolve/plan/rubric.json in full (its 'steps', 'pass_threshold', and every criterion) and ${build.status_doc}. First, work through rubric.json's 'steps' yourself right now -- re-run commands, read the actual files, and where a criterion is about user-facing behavior, actually use the feature the way a real user would rather than reading the code and assuming. If status.md's account looks incomplete, inconsistent, or suspiciously clean anywhere, that is exactly when to re-verify directly rather than trust it. Then, for EACH criterion in rubric.json: think like a user, not an engineer -- award points_awarded from 0 up to that criterion's max points based on what the evidence actually shows, using any partial-credit rule stated in the criterion's own description (do not invent your own scale). A 'CRITICAL:' criterion failing should cost real points, not a token deduction. Do not award points for something merely claimed in status.md without evidence backing it. Do not invent criteria that aren't in rubric.json, and do not skip any that are. Compute overall_score = sum(points_awarded) / sum(points) across all criteria. Additionally, decide plan_defect_detected: set it true ONLY if at least one failing criterion is failing not because of an implementation shortfall but because the design or plan itself is contradictory, underspecified in a way that makes the criterion unanswerable as written, or asks for something impossible given $design -- if so, name exactly which criterion and why in plan_defect_reason. Default false. Do NOT use this as an escape hatch to avoid awarding low scores for merely incomplete or low-quality work -- reserve it strictly for genuine plan/design contradictions a Fix pass on the CODE could not possibly resolve. Write .resolve/verify/rubric_result.json: {\\\"overall_score\\\": <float 0-1>, \\\"pass_threshold\\\": <copied from rubric.json>, \\\"plan_defect_detected\\\": <true|false>, \\\"plan_defect_reason\\\": \\\"<empty string if false>\\\", \\\"results\\\": [{\\\"id\\\": \\\"<criterion id>\\\", \\\"points\\\": <max>, \\\"points_awarded\\\": <awarded>, \\\"reasoning\\\": \\\"<what evidence you checked and why this many points>\\\"}, ...]}. Print the single line: rubric_verdict=pass if overall_score >= pass_threshold, or rubric_verdict=fail otherwise, followed on the next line by rubric_score=<overall_score>."
   ];
@@ -393,7 +426,7 @@ digraph idea_to_pr {
   // one iteration later -- a deliberate, documented scope trade-off to
   // keep this "lite" pipeline's new machinery proportionate.
   RevisePlan [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Revise Plan (targeted, plan/design contradiction only)",
     prompt="Read .resolve/verify/rubric_result.json's plan_defect_reason. SelfEvaluate has determined that at least one failing rubric criterion is not an implementation gap but a contradiction or gap in ${plan.plan_doc}, .resolve/plan/rubric.json, or the underlying ${paths.design_doc} itself. Revise ONLY the specific criterion/criteria and/or plan section(s) plan_defect_reason names -- do not rewrite the whole plan or rubric, and do not touch criteria/sections it doesn't mention. If the contradiction actually traces back to $design being wrong (not just underspecified), say so explicitly in your revision notes rather than quietly overriding the human's design intent. Update ${plan.plan_doc}'s Acceptance section(s) and .resolve/plan/rubric.json to match your revision. Print the single line: plan_revised"
   ];
@@ -422,7 +455,7 @@ digraph idea_to_pr {
   ];
 
   Fix [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Fix (address lowest-scoring rubric criteria)",
     prompt="Read .resolve/verify/rubric_result.json. Prioritize any criterion whose description was marked 'CRITICAL:' and scored below full points, then work through the rest by largest points-lost (points - points_awarded). For each, fix the SPECIFIC gap the reasoning field points to -- no broad rewrite, address exactly what's short. Re-run that criterion's evidence per rubric.json's 'steps' and confirm the fresh result actually earns more points before moving to the next one. Update ${build.status_doc} with what changed and the fresh evidence. Print the single line: fix_attempted"
   ];
@@ -457,7 +490,7 @@ digraph idea_to_pr {
   // pipeline in this repo. Fixed here to reference the real, now-tracked
   // context vars.
   CommitPush [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Commit + Push",
     prompt="Stage all changes, write a conventional commit message summarizing the work (reference ${paths.design_doc} and ${plan.plan_doc} for context), commit, and push the current branch to origin. After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: pushed"
   ];
@@ -481,13 +514,13 @@ digraph idea_to_pr {
   ];
 
   RetryPush [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Retry Push (diagnose + rebase if needed)",
     prompt="The previous push attempt could not be verified (see .resolve/delivery/push_status.txt). Run git status and git fetch origin to diagnose why: if there are uncommitted changes, stage and commit them; if the remote branch has moved ahead, rebase onto it (or merge if rebase conflicts are non-trivial) and resolve conflicts favoring the intended change; if there is genuinely nothing to push, say so plainly rather than force-pushing a no-op. If the failure looks like an auth/permissions problem a retry cannot fix, say so plainly and do NOT fabricate a push. Otherwise retry: push the current branch to origin, then run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: retry_attempted"
   ];
 
   OpenPR [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Open PR",
     prompt="Open a REAL pull request on GitHub (https://github.com/$repo) for the pushed branch against $repo's default branch -- use the gh CLI (`gh pr create --repo $repo ...`) or the GitHub REST API directly (POST https://api.github.com/repos/$repo/pulls with GH_TOKEN), NOT any other git host or a simulated/local PR. Write a PR description summarizing the design, the task list completed, and verification evidence. Write the resulting real github.com PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
   ];
@@ -528,7 +561,7 @@ digraph idea_to_pr {
   ];
 
   RetryOpenPR [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Retry Open PR",
     prompt="The previous attempt to open a pull request could not be independently verified via gh pr view / the GitHub API. First check whether a PR already exists for this branch (`gh pr list --repo $repo --head <branch> --json url,number`) -- if one already exists, write ITS real URL to .resolve/delivery/pr_url.txt rather than creating a duplicate. Otherwise diagnose why the previous attempt failed (auth/token scope, wrong repo, API rate limit, wrong branch) and retry opening a REAL pull request on GitHub (https://github.com/$repo) against $repo's default branch via `gh pr create --repo $repo ...` or the GitHub REST API (POST https://api.github.com/repos/$repo/pulls with GH_TOKEN). Write the resulting real github.com PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
   ];
@@ -549,7 +582,7 @@ digraph idea_to_pr {
   ];
 
   Report [
-    shape=box, goal_gate=true, fidelity="summary:high",
+    shape=box, fidelity="summary:high",
     label="Report",
     prompt="Summarize the run: design (${paths.design_doc}), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), plan revisions used (${build.plan_revisions_used}), final build verdict (${build.verdict}), final weighted rubric score (${build.rubric_score}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'blocked', the pipeline never reached the implementation phase at all -- report ${build.blocked_reason} plainly and do not reference a rubric score since none was computed. If build.verdict is 'escalated', at least one real implementation attempt happened but a safety backstop tripped before the rubric's pass_threshold was met (or a plan/design contradiction was found that needs a human) -- report ${build.blocked_reason} plainly, list which specific criteria are still short of full points and why, and do not claim success. If delivery.result is 'failed' (push did not land or the PR could not be independently verified after retry), say so plainly and do not claim a PR was opened. Print the single line: reported"
   ];
