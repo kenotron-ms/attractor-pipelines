@@ -111,12 +111,22 @@
 // many times the graph loops back through an edge.
 //
 // Context inputs:
-//   $design               - a design blurb from a prior /think-like-ken session
+//   $design               - EITHER (a) a rich, already-validated design blurb
+//                           from a prior /think-like-ken session -- reference
+//                           it, verify it against the real $repo codebase,
+//                           and decorate/fill gaps, don't override it -- OR
+//                           (b) a thin/raw problem statement (a bug report,
+//                           an issue reference, a one-liner) if no prior
+//                           design session happened -- EstablishDesign then
+//                           does its own think-like-ken derivation against
+//                           the real $repo codebase before writing the
+//                           design doc. Must not be empty -- some statement
+//                           of the problem is always required.
 //   $task                 - short task/feature name
 //   $repo                 - target repo slug (owner/name) for the PR
 //   $max_fix_rounds       - safety-backstop cap on Implement<->SelfEvaluate fix
 //                           passes (default 2) -- NOT the completion mechanism.
-//   $max_design_retries   - safety-backstop cap on AcceptDesign retries after a
+//   $max_design_retries   - safety-backstop cap on EstablishDesign retries after a
 //                           failed deterministic verification (default 2).
 //   $max_plan_retries     - safety-backstop cap on Plan retries after a failed
 //                           deterministic rubric-schema verification (default 2).
@@ -141,7 +151,7 @@
 //                           log, same.
 //   build.verdict         - final "rubric_met" | "escalated" | "blocked".
 //                           "blocked" means the pipeline never reached
-//                           Implement at all (AcceptDesign or Plan repeatedly
+//                           Implement at all (EstablishDesign or Plan repeatedly
 //                           failed its own cheap deterministic verification).
 //                           "escalated" means at least one real Implement
 //                           attempt happened but the fix-round or
@@ -166,16 +176,16 @@ digraph idea_to_pr {
     rankdir=LR,
     default_max_retry=2,
     default_fidelity="summary:high",
-    // Plan and SelfEvaluate are the two judgment-quality-determines-basin-depth
-    // nodes in this graph (primer.md doctrine #12: "expensive model in the
-    // gate, not just the generator" -- Plan defines what "done" means,
-    // SelfEvaluate is the judge that enforces it). Both get reasoning_effort
-    // bumped above the flat default, mirroring this repo's own
-    // pr-review-exhaustive.dot precedent (its lane reviewers + quality_eval
-    // gate get the same treatment). Generators (Implement, Fix, retry nodes)
-    // stay at default effort -- generator quality only affects iteration
-    // count, not basin depth.
-    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
+    // EstablishDesign, Plan, and SelfEvaluate are the judgment-quality-
+    // determines-basin-depth nodes in this graph (primer.md doctrine #12:
+    // "expensive model in the gate, not just the generator" -- EstablishDesign
+    // and Plan define what "done" means, SelfEvaluate is the judge that
+    // enforces it). All three get reasoning_effort bumped above the flat
+    // default, mirroring this repo's own pr-review-exhaustive.dot precedent
+    // (its lane reviewers + quality_eval gate get the same treatment).
+    // Generators (Implement, Fix, retry nodes) stay at default effort --
+    // generator quality only affects iteration count, not basin depth.
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #EstablishDesign { reasoning_effort: high; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
   ];
 
   Start [shape=Mdiamond, label="Start"];
@@ -192,7 +202,7 @@ digraph idea_to_pr {
   // line this run never wrote, let SelfEvaluate's judgment be shadowed by
   // a leftover score from an unrelated prior task, or -- caught during this
   // pipeline's own self-review pass against its rubric below -- let
-  // AcceptDesign/Plan follow validation feedback left behind by a
+  // EstablishDesign/Plan follow validation feedback left behind by a
   // completely different prior run's failure rather than starting clean.
   // Per primer.md doctrine #8 (idempotency widens the basin) and
   // RUBRIC.md's "self-reported claims are not evidence" doctrine, every
@@ -220,15 +230,20 @@ digraph idea_to_pr {
     parse_json="true"
   ];
 
-  // --- Phase 1: Accept an already-brainstormed design (same as idea_to_shipped) ---
-  AcceptDesign [
-    shape=box, goal_gate=true, fidelity="summary:high",
-    label="Accept Design (from prior /think-like-ken)",
-    prompt="You are given an already-validated design blurb in $design -- the output of a human's /think-like-ken session, done BEFORE this pipeline was invoked. Do NOT re-derive, re-explore, or second-guess the design. If .resolve/design/validation_feedback.txt exists (from a prior failed verification of this exact doc), read it first and fix exactly what it names before anything else. Simply write it as-is (light formatting only) to ${paths.design_doc} using the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions -- leave any section blank/'not specified' if $design doesn't cover it, do not fabricate). Print the single line: design_accepted"
+  // --- Phase 1: Establish the design -- reference+verify+decorate a prior
+  // /think-like-ken design if one was given, or perform that derivation
+  // itself against the real $repo codebase if not. Dual-mode replaces v1's
+  // (and this file's own earlier revision's) rigid "you are ALWAYS handed a
+  // complete design, just transcribe it" assumption, which cannot take on a
+  // bare issue report with no prior design session. ---
+  EstablishDesign [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Establish Design (reference+verify, or self-derive)",
+    prompt="First, assess whether $design is already a substantive, actionable design -- a concrete chosen approach plus real architecture/components -- or just a thin problem statement (a bug report, an issue reference, a one-liner) with no actual design decided yet.\n\nMODE A -- $design is already substantive: treat it as authoritative, do NOT override the human's decisions. But do not transcribe it blind either -- clone $repo into the workspace if it isn't already checked out, and actually read the real files/functions it references to VERIFY it before writing anything down. Where it is vague or leaves a gap the actual codebase can resolve concretely (e.g. it says 'add a field to the event' but doesn't name the exact call site), fill that gap with what you actually find by reading the code -- decorate it with grounded specifics, don't invent unrelated architecture and don't second-guess decisions that are already concrete.\n\nMODE B -- $design is thin or just a raw problem statement: perform your own think-like-ken derivation right now. Clone $repo into the workspace if it isn't already checked out, then actually read the relevant code before proposing anything -- do not guess at file paths, function names, call sites, or existing behavior you have not verified by reading the real files. Form a genuine chosen approach and architecture grounded in what you found, exactly as a human running /think-like-ken would -- this is real design work, not paraphrasing.\n\nEITHER WAY: if .resolve/design/validation_feedback.txt exists (from a prior failed verification of this exact doc), read it first and fix exactly what it names before anything else. Write the design doc to ${paths.design_doc} using the standard header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions) -- every section grounded in either the human's given decisions (Mode A) or what you verified by reading the real repo (Mode B); leave a section 'not specified' only if it is genuinely inapplicable, never as a shortcut to skip real thinking. Do NOT fabricate specifics you have not verified against the real repo. If you cannot form an adequate, concrete design even after actually exploring the codebase (repo inaccessible, problem fundamentally too ambiguous to resolve into a real approach), say so plainly instead of forcing a low-quality doc padded with generic section headers just to pass the next check -- this phase's own verification gate is honest and exists precisely to let a genuine failure here escalate rather than let a hollow design propagate into the expensive build loop. Print the single line: design_established"
   ];
 
   // Cheap deterministic gate (doctrine #2: "cheap gate first, expensive gate
-  // second") -- confirms AcceptDesign's claimed file write actually happened
+  // second") -- confirms EstablishDesign's claimed file write actually happened
   // and has the expected shape, BEFORE Plan (and the entire expensive build
   // loop downstream) is allowed to depend on it. Not a quality judge -- just
   // "did the one, low-judgment job actually get done" (RUBRIC.md §2:
@@ -252,7 +267,7 @@ digraph idea_to_pr {
   // never even reached Implement, so there is no rubric score to report.
   DesignBlocked [
     shape=parallelogram, label="Mark Blocked (design doc backstop tripped)",
-    tool_command="printf '{\"build.verdict\": \"blocked\", \"build.blocked_reason\": \"AcceptDesign backstop tripped after $max_design_retries retries -- see .resolve/design/validation_feedback.txt\", \"build.fix_rounds_used\": 0, \"build.plan_revisions_used\": 0, \"build.rubric_result\": \"\", \"build.rubric_score\": 0}'",
+    tool_command="printf '{\"build.verdict\": \"blocked\", \"build.blocked_reason\": \"EstablishDesign backstop tripped after $max_design_retries retries -- see .resolve/design/validation_feedback.txt\", \"build.fix_rounds_used\": 0, \"build.plan_revisions_used\": 0, \"build.rubric_result\": \"\", \"build.rubric_score\": 0}'",
     parse_json="true"
   ];
 
@@ -549,10 +564,10 @@ digraph idea_to_pr {
   // its retries -- "Max retries exceeded", not "succeeded but wrote bad
   // content"), there was no edge for the engine to route on, and the whole
   // pipeline hard-fails with error_type=no_matching_edge. This was caught
-  // live: instance 9da59c1af6fb failed exactly this way at AcceptDesign
-  // after 3 attempts. AcceptDesign is not special -- EVERY node below with a
+  // live: instance 9da59c1af6fb failed exactly this way at EstablishDesign
+  // after 3 attempts. EstablishDesign is not special -- EVERY node below with a
   // single plain edge had the identical latent bug (v1 had it too, e.g. its
-  // own `AcceptDesign -> Plan;`). Fixed by adding a `condition="outcome=fail"`
+  // own `EstablishDesign -> Plan;`). Fixed by adding a `condition="outcome=fail"`
   // edge alongside every plain edge, reusing the SAME downstream target --
   // in every case that target is already a deterministic gate (or Report)
   // that gracefully handles "missing/absent evidence" via file-existence
@@ -565,18 +580,18 @@ digraph idea_to_pr {
   Start          -> ResetRunState;
   ResetRunState  -> ComputeRunPaths;
   ResetRunState  -> ComputeRunPaths [condition="outcome=fail"];
-  ComputeRunPaths -> AcceptDesign;
-  ComputeRunPaths -> AcceptDesign [condition="outcome=fail"];
+  ComputeRunPaths -> EstablishDesign;
+  ComputeRunPaths -> EstablishDesign [condition="outcome=fail"];
 
-  // --- Phase 1 loop: AcceptDesign is a genuine (if low-judgment) LLM node.
+  // --- Phase 1 loop: EstablishDesign is a genuine (if low-judgment) LLM node.
   // v1 left it acyclic with zero gate -- a three-question-test failure at
   // phase granularity even though the WHOLE graph had a cycle elsewhere.
   // Now: cheap deterministic gate + small bounded retry. ---
-  AcceptDesign     -> VerifyDesignDoc;
-  AcceptDesign     -> VerifyDesignDoc [condition="outcome=fail"];
+  EstablishDesign     -> VerifyDesignDoc;
+  EstablishDesign     -> VerifyDesignDoc [condition="outcome=fail"];
   VerifyDesignDoc  -> Plan             [condition="context.tool.last_line=ok", weight="2", label="design doc verified"];
   VerifyDesignDoc  -> DesignRetryCheck [condition="context.tool.last_line=fail", label="design doc missing/malformed"];
-  DesignRetryCheck -> AcceptDesign     [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_design_retries)"];
+  DesignRetryCheck -> EstablishDesign     [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_design_retries)"];
   DesignRetryCheck -> DesignBlocked    [condition="context.tool.last_line=retry_exhausted", label="backstop tripped"];
   DesignBlocked    -> Report;
   DesignBlocked    -> Report [condition="outcome=fail"];
