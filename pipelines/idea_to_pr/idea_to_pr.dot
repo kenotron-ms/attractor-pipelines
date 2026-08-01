@@ -334,9 +334,29 @@ digraph idea_to_pr {
   //       written verdict file (never last_response, per foot-gun #3) --
   //       same "evidence over self-report" discipline applied one layer
   //       further in, to the JUDGE's claim this time, not the generator's.
+  //
+  // CONFIRMED LIVE BUG, now fixed (the actual root cause behind every prior
+  // "design doc not found" failure this whole file has ever produced,
+  // including after the ComputeRunPaths $design-prefix-collision fixes):
+  // this tool_command referenced "$paths_design_doc" (underscore) -- but
+  // the engine's substitute_context() (modules/loop-pipeline's
+  // substitution.py) does PURE TEXT substitution keyed on the LITERAL
+  // context key string, dots included, with NO dot-to-underscore
+  // flattening anywhere in the codebase. The real key ComputeRunPaths sets
+  // is "paths.design_doc" (with a dot) -- "$paths_design_doc" therefore
+  // never matched anything, survived as literal dead text into the
+  // script, and bash silently expanded the undefined variable to an empty
+  // string (no `set -u`), making f="" on every single run, so `[ -s "$f" ]`
+  // ALWAYS failed regardless of whether EstablishDesign wrote a perfectly
+  // good file. Fixed by referencing the literal dotted key the engine
+  // actually recognizes: $paths.design_doc (bare form; ${paths.design_doc}
+  // works identically). Same bug, same fix, also applied to ValidateRubric
+  // ($plan.plan_doc) and CheckPROpened ($delivery.pr_url) below -- audited
+  // the rest of the file and these were the only three tool_command
+  // attributes using the underscore-flattened (non-existent) form.
   VerifyDesignDocExists [
     shape=parallelogram, label="Verify Design Doc Exists (cheap, mechanical)",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/design\nf=\"$paths_design_doc\"\nif [ -s \"$f\" ] && [ \"$(wc -l < \"$f\")\" -ge 8 ]; then\n  rm -f .resolve/design/validation_feedback.txt\n  printf 'ok'\nelse\n  { [ -f \"$f\" ] || echo \"design doc not found at $f\"; [ -s \"$f\" ] || echo \"design doc is empty\"; [ ! -s \"$f\" ] || [ \"$(wc -l < \"$f\")\" -ge 8 ] || echo \"design doc has fewer than 8 lines -- too short to be a real design\"; } > .resolve/design/validation_feedback.txt\n  printf 'fail'\nfi"
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/design\nf=\"$paths.design_doc\"\nif [ -s \"$f\" ] && [ \"$(wc -l < \"$f\")\" -ge 8 ]; then\n  rm -f .resolve/design/validation_feedback.txt\n  printf 'ok'\nelse\n  { [ -f \"$f\" ] || echo \"design doc not found at $f\"; [ -s \"$f\" ] || echo \"design doc is empty\"; [ ! -s \"$f\" ] || [ \"$(wc -l < \"$f\")\" -ge 8 ] || echo \"design doc has fewer than 8 lines -- too short to be a real design\"; } > .resolve/design/validation_feedback.txt\n  printf 'fail'\nfi"
   ];
 
   // The judge. Independent of EstablishDesign's own 'design_established'
@@ -493,7 +513,7 @@ digraph idea_to_pr {
   // plan doc actually contains an Acceptance section (STEP C requirement).
   ValidateRubric [
     shape=parallelogram, label="Validate Rubric Schema",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/plan\npython3 -c \"import json,os,sys\ntry:\n    d=json.load(open('.resolve/plan/rubric.json'))\nexcept Exception:\n    print('missing/unparseable .resolve/plan/rubric.json'); sys.exit(1)\ncrit=d.get('criteria') or {}\nmissing=[]\nif not d.get('steps'): missing.append('rubric.json is missing a non-empty steps field')\npt=d.get('pass_threshold')\nif not isinstance(pt,(int,float)) or not (0 < pt <= 1): missing.append('rubric.json pass_threshold must be a number in (0,1]')\nif not crit: missing.append('rubric.json has no criteria')\nif crit and not any('CRITICAL:' in (c.get('description') or '') for c in crit.values()): missing.append('rubric.json has no CRITICAL: criterion (STEP B requires 2-3 heavy-weighted ones)')\nif missing:\n    print(chr(10).join(missing)); sys.exit(1)\nsys.exit(0)\n\" > .resolve/plan/validation_feedback.txt 2>&1 && grep -qi 'acceptance' \\\"$plan_plan_doc\\\" && { rm -f .resolve/plan/validation_feedback.txt; printf 'ok'; } || { [ -s .resolve/plan/validation_feedback.txt ] || echo 'plan doc missing an Acceptance section (STEP C)' > .resolve/plan/validation_feedback.txt; printf 'fail'; }"
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/plan\npython3 -c \"import json,os,sys\ntry:\n    d=json.load(open('.resolve/plan/rubric.json'))\nexcept Exception:\n    print('missing/unparseable .resolve/plan/rubric.json'); sys.exit(1)\ncrit=d.get('criteria') or {}\nmissing=[]\nif not d.get('steps'): missing.append('rubric.json is missing a non-empty steps field')\npt=d.get('pass_threshold')\nif not isinstance(pt,(int,float)) or not (0 < pt <= 1): missing.append('rubric.json pass_threshold must be a number in (0,1]')\nif not crit: missing.append('rubric.json has no criteria')\nif crit and not any('CRITICAL:' in (c.get('description') or '') for c in crit.values()): missing.append('rubric.json has no CRITICAL: criterion (STEP B requires 2-3 heavy-weighted ones)')\nif missing:\n    print(chr(10).join(missing)); sys.exit(1)\nsys.exit(0)\n\" > .resolve/plan/validation_feedback.txt 2>&1 && grep -qi 'acceptance' \\\"$plan.plan_doc\\\" && { rm -f .resolve/plan/validation_feedback.txt; printf 'ok'; } || { [ -s .resolve/plan/validation_feedback.txt ] || echo 'plan doc missing an Acceptance section (STEP C)' > .resolve/plan/validation_feedback.txt; printf 'fail'; }"
   ];
 
   // Same counter pattern as DesignRetryCheck -- independent budget, own key.
@@ -713,7 +733,7 @@ digraph idea_to_pr {
   // API call before Report is allowed to claim success.
   CheckPROpened [
     shape=parallelogram, label="Verify PR Actually Opened",
-    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery.pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
   ];
 
   // Same corrective-loop pattern as PushRetryCheck/RetryPush above, applied
