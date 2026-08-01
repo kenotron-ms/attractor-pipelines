@@ -176,16 +176,17 @@ digraph idea_to_pr {
     rankdir=LR,
     default_max_retry=2,
     default_fidelity="summary:high",
-    // EstablishDesign, Plan, and SelfEvaluate are the judgment-quality-
-    // determines-basin-depth nodes in this graph (primer.md doctrine #12:
-    // "expensive model in the gate, not just the generator" -- EstablishDesign
-    // and Plan define what "done" means, SelfEvaluate is the judge that
-    // enforces it). All three get reasoning_effort bumped above the flat
-    // default, mirroring this repo's own pr-review-exhaustive.dot precedent
-    // (its lane reviewers + quality_eval gate get the same treatment).
-    // Generators (Implement, Fix, retry nodes) stay at default effort --
+    // EstablishDesign, JudgeDesignDoc, Plan, and SelfEvaluate are the
+    // judgment-quality-determines-basin-depth nodes in this graph
+    // (primer.md doctrine #12: "expensive model in the gate, not just the
+    // generator" -- EstablishDesign and Plan define what "done" means,
+    // JudgeDesignDoc and SelfEvaluate are the judges that enforce it). All
+    // four get reasoning_effort bumped above the flat default, mirroring
+    // this repo's own pr-review-exhaustive.dot precedent (its lane
+    // reviewers + quality_eval gate get the same treatment). Generators
+    // (Implement, Fix, RevisePlan, retry nodes) stay at default effort --
     // generator quality only affects iteration count, not basin depth.
-    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #EstablishDesign { reasoning_effort: high; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #EstablishDesign { reasoning_effort: high; } #JudgeDesignDoc { reasoning_effort: high; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
   ];
 
   // NO goal_gate=true anywhere in this file (v1 had it on every box node;
@@ -275,17 +276,59 @@ digraph idea_to_pr {
     prompt="First, assess whether $design is already a substantive, actionable design -- a concrete chosen approach plus real architecture/components -- or just a thin problem statement (a bug report, an issue reference, a one-liner) with no actual design decided yet.\n\nMODE A -- $design is already substantive: treat it as authoritative, do NOT override the human's decisions. But do not transcribe it blind either -- clone $repo into the workspace if it isn't already checked out, and actually read the real files/functions it references to VERIFY it before writing anything down. Where it is vague or leaves a gap the actual codebase can resolve concretely (e.g. it says 'add a field to the event' but doesn't name the exact call site), fill that gap with what you actually find by reading the code -- decorate it with grounded specifics, don't invent unrelated architecture and don't second-guess decisions that are already concrete.\n\nMODE B -- $design is thin or just a raw problem statement: perform your own think-like-ken derivation right now. Clone $repo into the workspace if it isn't already checked out, then actually read the relevant code before proposing anything -- do not guess at file paths, function names, call sites, or existing behavior you have not verified by reading the real files. Form a genuine chosen approach and architecture grounded in what you found, exactly as a human running /think-like-ken would -- this is real design work, not paraphrasing.\n\nEITHER WAY: if .resolve/design/validation_feedback.txt exists (from a prior failed verification of this exact doc), read it first and fix exactly what it names before anything else. Write the design doc to ${paths.design_doc} using the standard header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions) -- every section grounded in either the human's given decisions (Mode A) or what you verified by reading the real repo (Mode B); leave a section 'not specified' only if it is genuinely inapplicable, never as a shortcut to skip real thinking. Do NOT fabricate specifics you have not verified against the real repo. If you cannot form an adequate, concrete design even after actually exploring the codebase (repo inaccessible, problem fundamentally too ambiguous to resolve into a real approach), say so plainly instead of forcing a low-quality doc padded with generic section headers just to pass the next check -- this phase's own verification gate is honest and exists precisely to let a genuine failure here escalate rather than let a hollow design propagate into the expensive build loop. Print the single line: design_established"
   ];
 
-  // Cheap deterministic gate (doctrine #2: "cheap gate first, expensive gate
-  // second") -- confirms EstablishDesign's claimed file write actually happened
-  // and has the expected shape, BEFORE Plan (and the entire expensive build
-  // loop downstream) is allowed to depend on it. Not a quality judge -- just
-  // "did the one, low-judgment job actually get done" (RUBRIC.md §2:
-  // self-reported side effects are not evidence until something independent
-  // checks the real state). Writes a feedback file naming exactly what's
-  // missing so a retry isn't a blind coin re-flip (doctrine #4).
-  VerifyDesignDoc [
-    shape=parallelogram, label="Verify Design Doc Written",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/design\nf=\"$paths_design_doc\"\nif [ -s \"$f\" ] && [ \"$(wc -l < \"$f\")\" -ge 8 ] && grep -qi 'goal' \"$f\" && grep -qi 'architecture' \"$f\"; then\n  rm -f .resolve/design/validation_feedback.txt\n  printf 'ok'\nelse\n  { [ -f \"$f\" ] || echo \"design doc not found at $f\"; [ -s \"$f\" ] || echo \"design doc is empty\"; grep -qi 'goal' \"$f\" 2>/dev/null || echo \"design doc missing a Goal section\"; grep -qi 'architecture' \"$f\" 2>/dev/null || echo \"design doc missing an Architecture section\"; } > .resolve/design/validation_feedback.txt\n  printf 'fail'\nfi"
+  // TWO gates, not one -- split after a live run kept tripping the design
+  // backstop for reasons that turned out to be the GATE's fault, not
+  // EstablishDesign's. v1 of this gate used grep -qi 'goal'/'architecture'
+  // as a proxy for "is this a substantive design" -- but that's checking
+  // JUDGMENT (is the content actually good, grounded, non-generic) with a
+  // MECHANICAL keyword/line-count script. Doctrine #1's own test --
+  // "is the model here for judgment, or just to type?" -- applies to gates
+  // exactly as much as generators: a grep can confirm a word appears
+  // somewhere, it cannot tell a genuinely grounded design from boilerplate
+  // that happens to use the right section headers (false accept), NOR can
+  // it fairly reject a real design that phrases things differently than
+  // the literal strings "goal"/"architecture" (false reject -- the
+  // suspected culprit behind repeated live backstop trips). Fixed by
+  // mirroring this graph's OWN proven shape for exactly this problem:
+  // Implement -> SelfEvaluate (LLM judge) -> CheckRubric (deterministic,
+  // reads the judge's file). Same split here:
+  //   (1) VerifyDesignDocExists -- cheap, mechanical, doctrine #2's "cheap
+  //       gate first": does the file exist, is it non-trivially sized?
+  //       This is a fact, not a judgment call -- stays a parallelogram.
+  //   (2) JudgeDesignDoc -- an LLM judge, independent of EstablishDesign's
+  //       own claim, deciding whether the content is actually substantive
+  //       (grounded in the real $repo codebase, not generic filler) --
+  //       exactly the kind of call primer.md doctrine #1 says needs a
+  //       model, not a script.
+  //   (3) CheckDesignJudgment -- deterministic, reads the judge's own
+  //       written verdict file (never last_response, per foot-gun #3) --
+  //       same "evidence over self-report" discipline applied one layer
+  //       further in, to the JUDGE's claim this time, not the generator's.
+  VerifyDesignDocExists [
+    shape=parallelogram, label="Verify Design Doc Exists (cheap, mechanical)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/design\nf=\"$paths_design_doc\"\nif [ -s \"$f\" ] && [ \"$(wc -l < \"$f\")\" -ge 8 ]; then\n  rm -f .resolve/design/validation_feedback.txt\n  printf 'ok'\nelse\n  { [ -f \"$f\" ] || echo \"design doc not found at $f\"; [ -s \"$f\" ] || echo \"design doc is empty\"; [ ! -s \"$f\" ] || [ \"$(wc -l < \"$f\")\" -ge 8 ] || echo \"design doc has fewer than 8 lines -- too short to be a real design\"; } > .resolve/design/validation_feedback.txt\n  printf 'fail'\nfi"
+  ];
+
+  // The judge. Independent of EstablishDesign's own 'design_established'
+  // claim -- reads the file itself and decides whether it is grounded and
+  // substantive, not just present and long enough. Gets reasoning_effort
+  // and thread isolation same as SelfEvaluate below (doctrine #12 +
+  // #10 -- this is a basin-depth-determining judgment call, and it
+  // shouldn't inherit EstablishDesign's own framing/optimism).
+  JudgeDesignDoc [
+    shape=box, fidelity="full",
+    label="Judge Design Doc (LLM judge, independent of EstablishDesign's claim)",
+    prompt="Independently judge ${paths.design_doc} -- do not trust EstablishDesign's own 'design_established' claim; read the file yourself and decide whether it is a genuinely substantive, actionable design, not generic boilerplate padded with the right section headers. Score against: (1) GOAL -- does it name the actual, specific problem being solved (not a vague restatement)? (2) CHOSEN APPROACH -- does it commit to a concrete mechanism, not just an intention? (3) ARCHITECTURE/COMPONENTS -- does it reference REAL, SPECIFIC elements of $repo's actual codebase (real file paths, function/class names, call sites) rather than generic or invented-sounding structure? If $repo is checked out in the workspace, spot-check at least one or two of its specific claims against the real files before deciding -- treat unverifiable or fabricated-sounding specifics as a failure, not a pass. (4) Is it free of hollow filler -- sections present in name only, or 'not specified' used as a shortcut where the design blurb or the actual codebase could clearly have supplied something concrete? A design that is well-formatted but generic, or that invents file/function names you cannot confirm exist, must fail even though it has the right section headers. A design that uses different section names or wording than 'Goal'/'Architecture' literally, but is genuinely concrete and grounded, must pass -- judge substance, not literal keywords. Write .resolve/design/judgment.json: {\"verdict\": \"pass\"|\"fail\", \"reason\": \"<specific -- cite exactly what's missing, generic, or unverifiable if fail>\"}. Print the single line: judgment_verdict=pass or judgment_verdict=fail, matching the file exactly."
+  ];
+
+  // Reads .resolve/design/judgment.json directly, never $last_response
+  // (foot-gun #3) -- and on fail, copies the judge's own reason into the
+  // SAME validation_feedback.txt EstablishDesign already knows to read on
+  // retry, so a rejected-by-the-judge design gets a written critique to
+  // act on (doctrine #4), not a blind re-roll.
+  CheckDesignJudgment [
+    shape=parallelogram, label="Check Design Judgment (reads judge's file)",
+    tool_command="#!/bin/sh\nset -e\npython3 -c \"import json,os,sys; p='.resolve/design/judgment.json'; d=json.load(open(p)) if os.path.exists(p) else {}; sys.exit(0 if d.get('verdict')=='pass' else 1)\" && { rm -f .resolve/design/validation_feedback.txt; printf 'ok'; } || { python3 -c \"import json,os;p='.resolve/design/judgment.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('reason') or 'design judge did not produce a valid verdict/reason')\" > .resolve/design/validation_feedback.txt; printf 'fail'; }"
   ];
 
   // Safety backstop for the design-verification retry loop -- same counter
@@ -620,10 +663,14 @@ digraph idea_to_pr {
   // v1 left it acyclic with zero gate -- a three-question-test failure at
   // phase granularity even though the WHOLE graph had a cycle elsewhere.
   // Now: cheap deterministic gate + small bounded retry. ---
-  EstablishDesign     -> VerifyDesignDoc;
-  EstablishDesign     -> VerifyDesignDoc [condition="outcome=fail"];
-  VerifyDesignDoc  -> Plan             [condition="context.tool.last_line=ok", weight="2", label="design doc verified"];
-  VerifyDesignDoc  -> DesignRetryCheck [condition="context.tool.last_line=fail", label="design doc missing/malformed"];
+  EstablishDesign       -> VerifyDesignDocExists;
+  EstablishDesign       -> VerifyDesignDocExists [condition="outcome=fail"];
+  VerifyDesignDocExists -> JudgeDesignDoc     [condition="context.tool.last_line=ok", weight="2", label="design doc exists", thread_id="design-judge-thread"];
+  VerifyDesignDocExists -> DesignRetryCheck   [condition="context.tool.last_line=fail", label="design doc missing/too short"];
+  JudgeDesignDoc        -> CheckDesignJudgment;
+  JudgeDesignDoc        -> CheckDesignJudgment [condition="outcome=fail"];
+  CheckDesignJudgment   -> Plan             [condition="context.tool.last_line=ok", weight="2", label="design judged substantive"];
+  CheckDesignJudgment   -> DesignRetryCheck [condition="context.tool.last_line=fail", label="design judged inadequate"];
   DesignRetryCheck -> EstablishDesign     [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_design_retries)"];
   DesignRetryCheck -> DesignBlocked    [condition="context.tool.last_line=retry_exhausted", label="backstop tripped"];
   DesignBlocked    -> Report;
