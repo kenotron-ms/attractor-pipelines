@@ -111,20 +111,61 @@
 // many times the graph loops back through an edge.
 //
 // Context inputs:
-//   $design            - a design blurb from a prior /think-like-ken session
-//   $task              - short task/feature name
-//   $repo              - target repo slug (owner/name) for the PR
-//   $max_fix_rounds    - safety-backstop cap on fix iterations (default 2)
-//                        -- NOT the completion mechanism, see CheckFixRounds.
+//   $design               - EITHER (a) a rich, already-validated design blurb
+//                           from a prior /think-like-ken session -- reference
+//                           it, verify it against the real $repo codebase,
+//                           and decorate/fill gaps, don't override it -- OR
+//                           (b) a thin/raw problem statement (a bug report,
+//                           an issue reference, a one-liner) if no prior
+//                           design session happened -- EstablishDesign then
+//                           does its own think-like-ken derivation against
+//                           the real $repo codebase before writing the
+//                           design doc. Must not be empty -- some statement
+//                           of the problem is always required.
+//   $task                 - short task/feature name
+//   $repo                 - target repo slug (owner/name) for the PR
+//   $max_fix_rounds       - safety-backstop cap on Implement<->SelfEvaluate fix
+//                           passes (default 2) -- NOT the completion mechanism.
+//   $max_design_retries   - safety-backstop cap on EstablishDesign retries after a
+//                           failed deterministic verification (default 2).
+//   $max_plan_retries     - safety-backstop cap on Plan retries after a failed
+//                           deterministic rubric-schema verification (default 2).
+//   $max_plan_revisions   - safety-backstop cap on plan/rubric REVISIONS
+//                           triggered mid-build when SelfEvaluate flags a
+//                           plan/design contradiction rather than an
+//                           implementation gap (default 1 -- deliberately
+//                           smaller than max_fix_rounds: a plan revision is a
+//                           heavier corrective action than one more Fix pass).
+//   $max_push_retries     - safety-backstop cap on push-retry attempts if the
+//                           initial commit+push cannot be verified (default 1).
+//   $max_pr_retries       - safety-backstop cap on open-PR retry attempts if
+//                           the initial PR cannot be independently verified
+//                           (default 1).
 //
 // Context outputs:
-//   design.design_doc     - path to the design doc written by AcceptDesign
-//   plan.plan_doc         - path to the implementation plan written by Plan
-//   plan.rubric           - path to the rubric written by Plan (.resolve/plan/rubric.json)
-//   build.verdict         - final "rubric_met" | "escalated"
-//   build.fix_rounds_used - integer count of fix rounds consumed
+//   paths.design_doc     - REAL path to the design doc, computed once by
+//                           ComputeRunPaths (not a guessed/re-derived string).
+//   plan.plan_doc         - REAL path to the implementation plan doc, same.
+//   plan.rubric           - path to the rubric (.resolve/plan/rubric.json).
+//   build.status_doc      - REAL path to the running implementation status
+//                           log, same.
+//   build.verdict         - final "rubric_met" | "escalated" | "blocked".
+//                           "blocked" means the pipeline never reached
+//                           Implement at all (EstablishDesign or Plan repeatedly
+//                           failed its own cheap deterministic verification).
+//                           "escalated" means at least one real Implement
+//                           attempt happened but the fix-round or
+//                           plan-revision safety backstop tripped before the
+//                           rubric's pass_threshold was met.
+//   build.blocked_reason  - set whenever build.verdict != "rubric_met";
+//                           human-readable, names which gate tripped and why.
+//   build.fix_rounds_used - integer count of Implement<->SelfEvaluate fix
+//                           passes consumed (0 if never reached).
+//   build.plan_revisions_used - integer count of plan/rubric revisions
+//                           consumed (0 if never triggered).
 //   build.rubric_result   - path to the final .resolve/verify/rubric_result.json
-//   build.rubric_score    - final weighted score (0.0-1.0) achieved
+//                           ("" if never produced, i.e. build.verdict="blocked").
+//   build.rubric_score    - final weighted score (0.0-1.0) achieved, if any.
 //   delivery.pr_url       - PR URL, set by ExtractPRUrl ("" if delivery failed)
 //   delivery.result       - "opened" | "failed"
 
@@ -135,30 +176,315 @@ digraph idea_to_pr {
     rankdir=LR,
     default_max_retry=2,
     default_fidelity="summary:high",
-    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; }"
+    // EstablishDesign, JudgeDesignDoc, Plan, and SelfEvaluate are the
+    // judgment-quality-determines-basin-depth nodes in this graph
+    // (primer.md doctrine #12: "expensive model in the gate, not just the
+    // generator" -- EstablishDesign and Plan define what "done" means,
+    // JudgeDesignDoc and SelfEvaluate are the judges that enforce it).
+    // JudgeDesignDoc does double duty -- it also decides whether a human
+    // even needs to be interrupted at all (see its own prompt below) --
+    // getting THAT call wrong is its own basin-depth risk: too eager
+    // wastes the single scarcest resource this pipeline has, too reluctant
+    // lets a real product-direction gamble through unnoticed. All four get
+    // reasoning_effort bumped above the flat default, mirroring this
+    // repo's own pr-review-exhaustive.dot precedent (its lane reviewers +
+    // quality_eval gate get the same treatment). Generators (Implement,
+    // Fix, RevisePlan, ReviseDesignFromHuman, retry nodes) stay at default
+    // effort -- generator quality only affects iteration count, not basin
+    // depth.
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; } #EstablishDesign { reasoning_effort: high; } #JudgeDesignDoc { reasoning_effort: high; } #Plan { reasoning_effort: high; } #SelfEvaluate { reasoning_effort: high; }"
   ];
+
+  // NO goal_gate=true anywhere in this file (v1 had it on every box node;
+  // removed here after two live runs on resolve.amplifier.ms both burned
+  // ~20+ minutes and reported the WHOLE PIPELINE as "failed" despite every
+  // node executing cleanly and the graph itself reaching Exit with an
+  // honest build.verdict=blocked. Root cause, confirmed via the engine's
+  // own pipeline:goal_gate_check event: goal_gate=true makes the engine
+  // independently judge whether THAT NODE's own output satisfies the
+  // graph-level goal="$task" -- and an intermediate artifact (a design doc,
+  // a status report) structurally can never satisfy a high-level task goal
+  // by itself, only the actual delivery nodes could. Two compounding costs
+  // observed: (1) the engine retried EstablishDesign's full box execution
+  // (each attempt several real minutes of cloning+reading a codebase) THREE
+  // times per graph-level visit before conceding "Max retries exceeded" --
+  // this pipeline's own header comment already documented max_retries as
+  // covering "transient LLM errors", not a content-adequacy judgment, so
+  // this was a surprising, expensive, and undocumented-here interaction;
+  // (2) at Exit, ANY goal_gate node left "unsatisfied" (which for an
+  // intermediate/scaffolding node is nearly guaranteed) flips the platform-
+  // level resolver outcome to "failed" -- even when this graph's OWN
+  // evidence-based gates (VerifyDesignDoc, ValidateRubric, CheckRubric,
+  // CheckPush, CheckPROpened) and honest-escalation doctrine (primer.md:
+  // "judged by one question -- did the system converge to the desired
+  // state?") already did their job correctly and reported a truthful
+  // build.verdict. Doctrine's own evidence-over-self-report gates are the
+  // correct, cheaper, already-proven mechanism here; goal_gate=true is a
+  // second, cruder, more expensive judgment layer that actively fights this
+  // graph's own carefully-built backstop routing rather than complementing
+  // it. The validator's goal_gate_has_retry warning (suggested fix:
+  // retry_target) may be the intended way to make goal_gate coexist with a
+  // phased graph like this one, but its semantics aren't documented
+  // anywhere in this repo -- removing goal_gate entirely was the safer,
+  // evidence-driven fix given two live confirmations of the cost.
 
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
-  // Idempotency: CheckFixRounds increments a persistent .resolve/fix_state.json
-  // counter with no reset of its own. Per docs/RUBRIC.md's idempotency
-  // doctrine, re-running this pipeline against a working directory that
-  // still has a stale fix_state.json from a prior invocation (e.g. a reused
-  // CI checkout) would start the fix-round backstop already elevated,
-  // tripping the escalation path prematurely on a run that hasn't actually
-  // earned it. Clearing it here makes every fresh pipeline run start from a
-  // clean fix-round budget regardless of what a previous run left behind.
-  ResetFixState [
-    shape=parallelogram, label="Reset Fix State",
-    tool_command="rm -f .resolve/fix_state.json && printf 'reset'"
+  // Idempotency, widened. v1 only reset .resolve/fix_state.json (added
+  // specifically because a stale counter from a reused CI checkout would
+  // trip the fix-round backstop prematurely -- see docs/RUBRIC.md's own
+  // idempotency case study). But .resolve/delivery/push_status.txt,
+  // .resolve/delivery/pr_url.txt, .resolve/verify/rubric_result.json, and
+  // the two *_validation_feedback.txt files (VerifyDesignDoc /
+  // ValidateRubric) all carry the IDENTICAL staleness risk and were never
+  // reset: a reused working directory could let CheckPush read a "pushed"
+  // line this run never wrote, let SelfEvaluate's judgment be shadowed by
+  // a leftover score from an unrelated prior task, or -- caught during this
+  // pipeline's own self-review pass against its rubric below -- let
+  // EstablishDesign/Plan follow validation feedback left behind by a
+  // completely different prior run's failure rather than starting clean.
+  // Per primer.md doctrine #8 (idempotency widens the basin) and
+  // RUBRIC.md's "self-reported claims are not evidence" doctrine, every
+  // file a downstream gate (or a retry prompt) trusts as fresh evidence
+  // must actually BE fresh for this run. Counters now live in
+  // one consolidated .resolve/run_state.json (fix_rounds, plan_retries,
+  // design_retries, plan_revisions, push_retries, pr_retries -- see the
+  // gate nodes below), so one rm covers all of them.
+  ResetRunState [
+    shape=parallelogram, label="Reset Run State (idempotency, widened)",
+    tool_command="rm -f .resolve/run_state.json .resolve/verify/rubric_result.json .resolve/delivery/push_status.txt .resolve/delivery/pr_url.txt .resolve/design/validation_feedback.txt .resolve/plan/validation_feedback.txt; printf 'reset'"
   ];
 
-  // --- Phase 1: Accept an already-brainstormed design (same as idea_to_shipped) ---
-  AcceptDesign [
-    shape=box, goal_gate=true, fidelity="summary:high",
-    label="Accept Design (from prior /think-like-ken)",
-    prompt="You are given an already-validated design blurb in $design -- the output of a human's /think-like-ken session, done BEFORE this pipeline was invoked. Do NOT re-derive, re-explore, or second-guess the design. Simply write it as-is (light formatting only) to docs/plans/<date>-<topic>-design.md using the real design doc header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions -- leave any section blank/'not specified' if $design doesn't cover it, do not fabricate). Print the single line: design_accepted"
+  // Deterministic, computed exactly ONCE -- closes finding #1 (v1 asked
+  // several independently-invoked LLM calls to each reconstruct the SAME
+  // <date>/<topic>/<feature> literal string from memory with no shared
+  // ground truth, which is exactly the "pass real data via files, not
+  // node-to-node prose" foot-gun RUBRIC.md warns about, just at the
+  // filename layer instead of the verdict layer). Every downstream prompt
+  // below now interpolates ${paths.design_doc} / ${plan.plan_doc} /
+  // ${build.status_doc} instead of re-deriving them.
+  //
+  // CONFIRMED LIVE BUG, now fixed: the local shell variables here were
+  // originally named design_doc/plan_doc/status_doc, referenced below as
+  // "$design_doc" etc. The engine's own $var context-substitution into
+  // tool_command does a literal, non-word-bounded text replace of "$design"
+  // (a real top-level input) wherever that substring appears -- including
+  // as a bare PREFIX of an unrelated local shell variable name. That
+  // clobbered "$design_doc" with the entire multi-KB $design blurb before
+  // the shell ever ran, corrupting the computed value written into
+  // context.paths.design_doc into garbage -- which is why EstablishDesign/
+  // Report were seen writing to/citing a totally different, sane-looking
+  // fallback path instead (the model correctly recognized the corrupted
+  // value wasn't a usable path and improvised). This is the SAME bug class
+  // already fixed once for the flattened context key design.design_doc ->
+  // renamed to paths.design_doc -- but that fix only covered CONTEXT KEYS;
+  // it missed this second, independent occurrence in a LOCAL shell
+  // variable. Renamed design_doc/plan_doc/status_doc -> ddoc/pdoc/sdoc so
+  // no local variable name starts with any top-level input name ($task,
+  // $repo, $design, $max_*, $github_token) as a literal prefix. Confirmed
+  // via instance e908ccf92984's raw pipeline:node_complete event: the
+  // notes field showed the printf argument literally corrupted mid-string,
+  // e.g. "...satisfied._doc\" \"$plan_doc\" \"$status_doc\"" -- everything
+  // up through "$design" had been replaced by the design blurb, leaving
+  // only the "_doc" suffix fragment intact.
+  ComputeRunPaths [
+    shape=parallelogram, label="Compute Run Paths (deterministic, once)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p docs/plans .resolve/plan .resolve/verify .resolve/delivery .resolve/design\nslug=$(printf '%s' \"$task\" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-\\+/-/g; s/^-//; s/-$//')\ndate=$(date +%Y-%m-%d)\nddoc=\"docs/plans/${date}-${slug}-design.md\"\npdoc=\"docs/plans/${date}-${slug}-implementation.md\"\nsdoc=\"docs/plans/${slug}-status.md\"\nprintf '{\"paths.design_doc\": \"%s\", \"plan.plan_doc\": \"%s\", \"plan.rubric\": \".resolve/plan/rubric.json\", \"build.status_doc\": \"%s\"}' \"$ddoc\" \"$pdoc\" \"$sdoc\"",
+    parse_json="true"
+  ];
+
+  // --- Phase 1: Establish the design -- reference+verify+decorate a prior
+  // /think-like-ken design if one was given, or perform that derivation
+  // itself against the real $repo codebase if not. Dual-mode replaces v1's
+  // (and this file's own earlier revision's) rigid "you are ALWAYS handed a
+  // complete design, just transcribe it" assumption, which cannot take on a
+  // bare issue report with no prior design session. ---
+  EstablishDesign [
+    shape=box, fidelity="full",
+    label="Establish Design (reference+verify, or self-derive)",
+    prompt="First, assess whether $design is already a substantive, actionable design -- a concrete chosen approach plus real architecture/components -- or just a thin problem statement (a bug report, an issue reference, a one-liner) with no actual design decided yet.\n\nMODE A -- $design is already substantive: treat it as authoritative, do NOT override the human's decisions. But do not transcribe it blind either -- clone $repo into the workspace if it isn't already checked out, and actually read the real files/functions it references to VERIFY it before writing anything down. Where it is vague or leaves a gap the actual codebase can resolve concretely (e.g. it says 'add a field to the event' but doesn't name the exact call site), fill that gap with what you actually find by reading the code -- decorate it with grounded specifics, don't invent unrelated architecture and don't second-guess decisions that are already concrete.\n\nMODE B -- $design is thin or just a raw problem statement: perform your own think-like-ken derivation right now. Clone $repo into the workspace if it isn't already checked out, then actually read the relevant code before proposing anything -- do not guess at file paths, function names, call sites, or existing behavior you have not verified by reading the real files. Before settling on one approach, genuinely consider 2-3 real alternatives grounded in what you found in the actual codebase (not strawmen) and pick the one you'd actually recommend, the same deliberation think-like-ken's own Phase 3 would walk a human through -- state which you chose and why in the design doc's Chosen Approach section, not just the winner in isolation. Form a genuine chosen approach and architecture grounded in what you found, exactly as a human running /think-like-ken would -- this is real design work, not paraphrasing.\n\nEITHER WAY: if .resolve/design/validation_feedback.txt exists (from a prior failed verification of this exact doc), read it first and fix exactly what it names before anything else. Write the design doc to ${paths.design_doc} using the standard header (goal, chosen approach, architecture, components, data flow, error handling, testing strategy, open questions) -- every section grounded in either the human's given decisions (Mode A) or what you verified by reading the real repo (Mode B); leave a section 'not specified' only if it is genuinely inapplicable, never as a shortcut to skip real thinking. Do NOT fabricate specifics you have not verified against the real repo. If you cannot form an adequate, concrete design even after actually exploring the codebase (repo inaccessible, problem fundamentally too ambiguous to resolve into a real approach), say so plainly instead of forcing a low-quality doc padded with generic section headers just to pass the next check -- this phase's own verification gate is honest and exists precisely to let a genuine failure here escalate rather than let a hollow design propagate into the expensive build loop. Print the single line: design_established"
+  ];
+
+  // TWO gates, not one -- split after a live run kept tripping the design
+  // backstop for reasons that turned out to be the GATE's fault, not
+  // EstablishDesign's. v1 of this gate used grep -qi 'goal'/'architecture'
+  // as a proxy for "is this a substantive design" -- but that's checking
+  // JUDGMENT (is the content actually good, grounded, non-generic) with a
+  // MECHANICAL keyword/line-count script. Doctrine #1's own test --
+  // "is the model here for judgment, or just to type?" -- applies to gates
+  // exactly as much as generators: a grep can confirm a word appears
+  // somewhere, it cannot tell a genuinely grounded design from boilerplate
+  // that happens to use the right section headers (false accept), NOR can
+  // it fairly reject a real design that phrases things differently than
+  // the literal strings "goal"/"architecture" (false reject -- the
+  // suspected culprit behind repeated live backstop trips). Fixed by
+  // mirroring this graph's OWN proven shape for exactly this problem:
+  // Implement -> SelfEvaluate (LLM judge) -> CheckRubric (deterministic,
+  // reads the judge's file). Same split here:
+  //   (1) VerifyDesignDocExists -- cheap, mechanical, doctrine #2's "cheap
+  //       gate first": does the file exist, is it non-trivially sized?
+  //       This is a fact, not a judgment call -- stays a parallelogram.
+  //   (2) JudgeDesignDoc -- an LLM judge, independent of EstablishDesign's
+  //       own claim, deciding whether the content is actually substantive
+  //       (grounded in the real $repo codebase, not generic filler) --
+  //       exactly the kind of call primer.md doctrine #1 says needs a
+  //       model, not a script.
+  //   (3) CheckDesignJudgment -- deterministic, reads the judge's own
+  //       written verdict file (never last_response, per foot-gun #3) --
+  //       same "evidence over self-report" discipline applied one layer
+  //       further in, to the JUDGE's claim this time, not the generator's.
+  //
+  // CONFIRMED LIVE BUG, now fixed (the actual root cause behind every prior
+  // "design doc not found" failure this whole file has ever produced,
+  // including after the ComputeRunPaths $design-prefix-collision fixes):
+  // this tool_command referenced "$paths_design_doc" (underscore) -- but
+  // the engine's substitute_context() (modules/loop-pipeline's
+  // substitution.py) does PURE TEXT substitution keyed on the LITERAL
+  // context key string, dots included, with NO dot-to-underscore
+  // flattening anywhere in the codebase. The real key ComputeRunPaths sets
+  // is "paths.design_doc" (with a dot) -- "$paths_design_doc" therefore
+  // never matched anything, survived as literal dead text into the
+  // script, and bash silently expanded the undefined variable to an empty
+  // string (no `set -u`), making f="" on every single run, so `[ -s "$f" ]`
+  // ALWAYS failed regardless of whether EstablishDesign wrote a perfectly
+  // good file. Fixed by referencing the literal dotted key the engine
+  // actually recognizes: $paths.design_doc (bare form; ${paths.design_doc}
+  // works identically). Same bug, same fix, also applied to ValidateRubric
+  // ($plan.plan_doc) and CheckPROpened ($delivery.pr_url) below -- audited
+  // the rest of the file and these were the only three tool_command
+  // attributes using the underscore-flattened (non-existent) form.
+  VerifyDesignDocExists [
+    shape=parallelogram, label="Verify Design Doc Exists (cheap, mechanical)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/design\nf=\"$paths.design_doc\"\nif [ -s \"$f\" ] && [ \"$(wc -l < \"$f\")\" -ge 8 ]; then\n  rm -f .resolve/design/validation_feedback.txt\n  printf 'ok'\nelse\n  { [ -f \"$f\" ] || echo \"design doc not found at $f\"; [ -s \"$f\" ] || echo \"design doc is empty\"; [ ! -s \"$f\" ] || [ \"$(wc -l < \"$f\")\" -ge 8 ] || echo \"design doc has fewer than 8 lines -- too short to be a real design\"; } > .resolve/design/validation_feedback.txt\n  printf 'fail'\nfi"
+  ];
+
+  // The judge. Independent of EstablishDesign's own 'design_established'
+  // claim -- reads the file itself and decides whether it is grounded and
+  // substantive, not just present and long enough. Gets reasoning_effort
+  // and thread isolation same as SelfEvaluate below (doctrine #12 +
+  // #10 -- this is a basin-depth-determining judgment call, and it
+  // shouldn't inherit EstablishDesign's own framing/optimism).
+  //
+  // Explicitly channels restless-old-brian's lens -- the same skeptical-
+  // verifier persona build_loop.dot's VerifySpec names outright ("Spec
+  // compliance without real execution is a half-pass at best... demand
+  // proof over claims, re-run the verification yourself, fail loud on any
+  // silent fallback"). Applied here one phase earlier: a design doc is the
+  // cheapest place in the whole pipeline to catch an ungrounded claim --
+  // every dollar of Implement/SelfEvaluate/Fix cost downstream compounds
+  // whatever this judge lets through. Its defining trait carried over
+  // verbatim: when genuinely uncertain whether something is grounded, the
+  // burden of proof is on the design doc, not on this judge's willingness
+  // to assume good faith -- default to FAIL on doubt, never to a pass.
+  // Also earns its own keep on a second job -- see the header comment
+  // above CheckDesignJudgment below for why "assess if a human needs to
+  // weigh in" got folded into THIS node's own turn instead of becoming a
+  // dedicated extra node.
+  JudgeDesignDoc [
+    shape=box, fidelity="full",
+    label="Judge Design Doc (restless-old-brian lens, independent of EstablishDesign's claim)",
+    prompt="Independently judge ${paths.design_doc} -- do not trust EstablishDesign's own 'design_established' claim; read the file yourself and decide whether it is a genuinely substantive, actionable design, not generic boilerplate padded with the right section headers. Score against: (1) GOAL -- does it name the actual, specific problem being solved (not a vague restatement)? (2) CHOSEN APPROACH -- does it commit to a concrete mechanism, not just an intention? (3) ARCHITECTURE/COMPONENTS -- does it reference REAL, SPECIFIC elements of $repo's actual codebase (real file paths, function/class names, call sites) rather than generic or invented-sounding structure? If $repo is checked out in the workspace, spot-check at least one or two of its specific claims against the real files before deciding -- treat unverifiable or fabricated-sounding specifics as a failure, not a pass. (4) Is it free of hollow filler -- sections present in name only, or 'not specified' used as a shortcut where the design blurb or the actual codebase could clearly have supplied something concrete? A design that is well-formatted but generic, or that invents file/function names you cannot confirm exist, must fail even though it has the right section headers. A design that uses different section names or wording than 'Goal'/'Architecture' literally, but is genuinely concrete and grounded, must pass -- judge substance, not literal keywords. Channel restless-old-brian's lens throughout: demand proof over claims, do not extend a borderline design the benefit of the doubt, and treat 'I couldn't quite tell if this checks out' as a FAIL, not a pass -- the burden of proof sits on the design doc, never on your willingness to assume good faith.\n\nONLY if verdict is pass, also decide -- as the SAME independent judge, not the optimistic generator that wrote the doc -- whether there's a genuine, high-value question inside this design that a human, not the codebase, has to answer. Human attention is the single scarcest resource this pipeline has access to, shared with every other project competing for that same person's time right now -- asking a bad, vague, or unnecessary question spends real trust, and a pipeline that cries wolf earns itself ignored on every future run, not just this one. Set needs_human_input=true ONLY if there is a genuine fork in the road that is a matter of product taste or direction -- where the 'right' answer depends on what the human actually wants rather than on anything resolvable by reading $repo further, and where guessing wrong would waste real downstream effort. Default to false; most well-grounded designs should NOT trigger this. If true, ask exactly ONE specific, well-posed question stating the actual tradeoff (never 'does this look ok?'), plus your own recommended_default so a one-word 'agreed' is enough to unblock. Write .resolve/design/judgment.json: {\"verdict\": \"pass\"|\"fail\", \"reason\": \"<specific -- cite exactly what's missing, generic, or unverifiable if fail>\", \"needs_human_input\": true|false, \"human_question\": \"<specific, or empty>\", \"recommended_default\": \"<your call if unblocked without an answer, or empty>\"}. Print the single line: judgment_verdict=pass or judgment_verdict=fail, matching the file exactly."
+  ];
+
+  // Reads .resolve/design/judgment.json directly, never $last_response
+  // (foot-gun #3). On fail, copies the judge's own reason into the SAME
+  // validation_feedback.txt EstablishDesign already knows to read on
+  // retry (doctrine #4), not a blind re-roll.
+  //
+  // Also the single router for the earned human gate -- deliberately NOT
+  // a separate assess+check+classify+retry+blocked cluster. An earlier
+  // draft built exactly that (8 nodes) before being corrected: "trust each
+  // step in the workflow" -- the same lesson this repo's own PlanConfidenceCheck/
+  // PlanApproval/CheckPlanApproval/RevisePlan already models in idea_to_shipped.dot
+  // (4 nodes, no extra backstop -- it trusts a human to converge, not an
+  // LLM guessing blind). Mirrored here: JudgeDesignDoc already decides
+  // needs_human_input as part of its own single turn (see above), so this
+  // gate just reads that one file and routes three ways instead of
+  // spinning up a dedicated node to re-decide it. ok -> Plan (unattended,
+  // most runs). needs_human -> DesignApproval (earned, rare). fail ->
+  // DesignRetryCheck (unchanged from before).
+  CheckDesignJudgment [
+    shape=parallelogram, label="Check Design Judgment (reads judge's file, routes the earned gate)",
+    tool_command="#!/bin/sh\nset -e\nroute=$(python3 -c \"import json,os\nd=json.load(open('.resolve/design/judgment.json')) if os.path.exists('.resolve/design/judgment.json') else {}\nprint('fail' if d.get('verdict')!='pass' else ('needs_human' if d.get('needs_human_input') else 'ok'))\n\")\nif [ \"$route\" = \"fail\" ]; then\n  python3 -c \"import json,os;p='.resolve/design/judgment.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('reason') or 'design judge did not produce a valid verdict/reason')\" > .resolve/design/validation_feedback.txt\n  printf 'fail'\nelse\n  rm -f .resolve/design/validation_feedback.txt\n  printf '%s' \"$route\"\nfi"
+  ];
+
+  // Safety backstop for the design-verification retry loop -- same counter
+  // pattern as CheckFixRounds below, just its own key in run_state.json so
+  // the budgets are independent and legible.
+  DesignRetryCheck [
+    shape=parallelogram, label="Check Design Retry Budget (backstop)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};d['design_retries']=d.get('design_retries',0)+1;json.dump(d,open(p,'w'));print(d['design_retries'])\")\nmax=${max_design_retries:-2}\nif [ \"$count\" -le \"$max\" ]; then printf 'retry_ok'; else printf 'retry_exhausted'; fi"
+  ];
+
+  // build.verdict="blocked" (distinct from "escalated") -- the pipeline
+  // never even reached Implement, so there is no rubric score to report.
+  DesignBlocked [
+    shape=parallelogram, label="Mark Blocked (design doc backstop tripped)",
+    tool_command="printf '{\"build.verdict\": \"blocked\", \"build.blocked_reason\": \"EstablishDesign backstop tripped after $max_design_retries retries -- see .resolve/design/validation_feedback.txt\", \"build.fix_rounds_used\": 0, \"build.plan_revisions_used\": 0, \"build.rubric_result\": \"\", \"build.rubric_score\": 0}'",
+    parse_json="true"
+  ];
+
+  // --- Earned human gate (think-like-ken's own Phase 7, made self-driven).
+  // think-like-ken's original process is a live back-and-forth: one
+  // question at a time, 2-3 approaches discussed, design presented in
+  // sections, then an explicit, ALWAYS-fired human review gate before
+  // planning starts. In an unattended pipeline there is no human mid-loop
+  // to run that dialogue with -- so EstablishDesign's own repo-grounded
+  // derivation plus JudgeDesignDoc's restless-old-brian verification are
+  // how this graph gravitates toward a genuinely good design on its own.
+  // What must NOT be dropped is Phase 7 itself: a real human should still
+  // get the final word on high-stakes, taste-shaped decisions -- but NOT
+  // unconditionally.
+  //
+  // This was a real correction mid-build, worth recording verbatim: an
+  // earlier draft gated on a human UNCONDITIONALLY, every run, once
+  // restless-old-brian's judge passed. It is not enough for the judge to
+  // be satisfied. This pipeline's own Plan node prompt already says it:
+  // "Human attention is the most sacred resource -- do not waste it."
+  // That resource is shared across every other project a human is running
+  // right now -- an unconditional gate spends it on every unremarkable run
+  // exactly as much as the rare run that actually needed it, which is how
+  // a pipeline's questions stop getting read at all. So restless-old-brian's
+  // pass is necessary, never sufficient -- JudgeDesignDoc's own
+  // needs_human_input verdict (see above) is the thing that has to
+  // actually earn a human's attention, by finding a real product-taste/
+  // direction fork the codebase can't resolve, with one sharp question.
+  // DesignApproval below is only ever reached on that earned path.
+  DesignApproval [
+    shape=hexagon, mode="freeform",
+    label="Design Approval (only when genuinely earned)",
+    prompt="restless-old-brian's own judgment flagged a genuine product-taste/direction question before implementation begins -- see .resolve/design/judgment.json for the specific question and its recommended default. Review ${paths.design_doc}. Reply 'approve'/'agreed'/'yes'/'ok' to accept the recommended default and proceed, or reply with your actual direction/correction."
+  ];
+
+  // Same "diamond trap" avoidance as every other gate in this file --
+  // never trust last_response to a bare shape; a parallelogram + explicit
+  // grep does the actual classification. fidelity="full" on the incoming
+  // edge per RUBRIC.md foot-gun #4: a human's freeform reply is short but
+  // not guaranteed under the 200-char last_response truncation.
+  CheckDesignApproval [
+    shape=parallelogram, label="Check Design Approval",
+    tool_command="bash -c 'if echo \"$last_response\" | grep -iEq \"approve|agreed|\\byes\\b|\\bok\\b|lgtm\"; then echo approved; else echo corrected; fi'"
+  ];
+
+  // Deliberately no dedicated retry-budget/blocked node here, mirroring
+  // idea_to_shipped.dot's RevisePlan -> PlanConfidenceCheck precedent
+  // exactly: this loop is human-steered, not an LLM guessing blind, so it
+  // trusts the human to converge rather than capping them. Trusted to do
+  // the whole job itself in one turn, no separate classify/re-verify
+  // node: incorporate the correction, AND -- only if it's a genuine
+  // factual/grounding claim the human corrected -- go re-check that
+  // specific claim against the real repo right now, in the same breath.
+  // A product-taste/direction call is different: that's simply the answer
+  // now, not something to re-litigate by re-running restless-old-brian's
+  // judge against a human's own explicit call (the same deference
+  // EstablishDesign's Mode A already gives a human's prior concrete
+  // decisions). Writes a fresh judgment.json itself and loops back through
+  // the SAME CheckDesignJudgment router above -- no new gate needed.
+  ReviseDesignFromHuman [
+    shape=box, fidelity="full",
+    label="Revise Design From Human (incorporate, re-verify facts, trust taste)",
+    prompt="Read the human's reply (${last_response}) and incorporate it into ${paths.design_doc}. If they corrected a FACTUAL/GROUNDING claim -- something about what the real code actually does, a wrong file/function/call-site reference -- go verify that specific claim against $repo yourself right now before writing it down; don't just take their word for a factual claim about the codebase either, confirm it. If instead they told you what they actually want on a fork where the answer depends on their intent, not the codebase (a product-taste/direction call), that is now simply the answer -- do not second-guess it or treat it as something to re-verify. Write a fresh .resolve/design/judgment.json reflecting the design's status after your revision: {\"verdict\": \"pass\"|\"fail\", \"reason\": \"<only if fail>\", \"needs_human_input\": true|false, \"human_question\": \"<only if true>\", \"recommended_default\": \"<only if true>\"} -- typically verdict=pass and needs_human_input=false once the human has actually weighed in, unless your own re-verification just now turned up a genuine new problem. Print the single line: design_revised"
   ];
 
   // --- Phase 2: Plan Like Ken -- three-tier VDD evidence hierarchy for HOW
@@ -167,23 +493,57 @@ digraph idea_to_pr {
   // actually done. This rubric -- not a round count -- is what SelfEvaluate
   // judges against. ---
   Plan [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Plan Like Ken (VDD evidence + weighted rubric)",
-    prompt="Read docs/plans/<date>-<topic>-design.md. Human attention is the most sacred resource -- do not waste it, and do not waste the pipeline's effort on a rubric that only checks the obvious. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work, the way a user experiencing this feature would judge it?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each.\n\nSTEP A -- EVIDENCE METHOD per task: classify each task and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state, anything touching a simulated DOM but not needing a real browser. This is the default for UI logic not tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for focus management, keyboard navigation, accessibility, visual layout truth -- the exception, never the default. CRITICAL COMMAND-CORRECTNESS RULE FOR TIERS 1 AND 2: if the verification command is vitest (or any watch-mode-by-default test runner), it MUST be invoked in single-run/CI mode -- vitest's own CLI default is watch mode, which never exits and would hang the pipeline waiting for a process that never terminates. Always write the command as `vitest run` (or `vitest --run`), NEVER a bare `vitest` or `npm test`/`pnpm test`/`yarn test` unless that script itself already passes --run or sets CI=true internally -- check the repo's package.json test script and if it doesn't already force non-watch mode, write the exact non-watch invocation instead of relying on it. The same applies to any other watch-mode-by-default runner (e.g. jest --watch is opt-in so jest is fine bare, but always double check against the actual tool's documented default before writing the command). For EACH task write: exact file paths, complete copy-pasteable implementation, the static analysis command (always first), which tier applies and why, and the exact command to run for that tier (confirmed non-watch/non-blocking). Write docs/plans/<date>-<feature>-implementation.md with the standard structure (Goal/Architecture/Tech Stack/Verification approach, then Task N: Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit).\n\nSTEP B -- WEIGHTED RUBRIC (the real definition of done, following https://github.com/microsoft/amplifier-bundle-evaluation rubric-design methodology): before writing a single criterion, name the 2-3 things that would separate a genuinely good result on THIS feature from a competent-looking but shallow one -- a subtle requirement buried in the design that a skimming implementer would miss, a behavior only visible if you actually use the feature the way a user would, or a failure mode you can already picture (e.g. 'the error message technically appears but doesn't tell the user what to actually do'). These become your heavy-weighted, CRITICAL: criteria. Then for EVERY criterion: (1) phrase it as an OBSERVABLE QUESTION a judge can answer by looking at or using the artifact -- 'Does the README include (a) install steps (b) the exact run command (c) expected output?' not 'is the README good?'; 'Does submitting the form with an empty required field show an inline error naming which field is missing, not just a generic failure banner?' not 'does validation work?'. If you cannot phrase a criterion as something concrete and pointable, find the observable property underneath it or cut it. (2) THINK LIKE A USER, NOT AN ENGINEER, for both writing and later judging -- the question is never 'did the function get called' but 'would someone using this feature actually get what they came for, notice if it broke, or be confused by the result'. (3) Cut any criterion every implementation will trivially pass (file exists, script exits 0) -- those are gates that belong in the VDD evidence steps, not point-bearing rubric entries. (4) Allocate points by discriminating power: the 2-3 criteria from above should hold roughly HALF the total points combined; trivial-but-required checks get small slices. Mark heavy criteria with a 'CRITICAL:' prefix in their description. (5) Where partial credit is possible, spell out exactly how it's earned in the description (e.g. 'full credit for handling all 3 listed edge cases, 33% credit per case if some but not all are handled') so the judge isn't inventing a scale. (6) Write a short 'steps' evidence-gathering plan alongside the criteria -- what to run, read, or actually try as a user before scoring, mapped to the VDD tiers from Step A -- so every criterion has something concrete backing its judgment; gate on failure explicitly ('if the script errors or times out, score 0 for every criterion in this task's evidence'). Write .resolve/plan/rubric.json: {\\\"steps\\\": \\\"<ordered evidence-gathering plan: what to run/read/try, referencing the VDD tier commands from the plan doc>\\\", \\\"pass_threshold\\\": 0.85, \\\"criteria\\\": {\\\"<snake_case_name>\\\": {\\\"points\\\": <int>, \\\"task\\\": <N or null for an overall/cross-cutting criterion>, \\\"description\\\": \\\"<observable, user-facing question; prefix with 'CRITICAL:' if this is one of the 2-3 heavy-weighted ones>\\\"}, ...}}. Do not let this become mechanical busywork disconnected from what the feature is actually for -- if a criterion wouldn't matter to someone using the result, it doesn't belong.\n\nSTEP C -- REFERENCE THE RUBRIC FROM THE PLAN DOC: since the rubric lives in its own file (rubric.json), don't leave docs/plans/<date>-<feature>-implementation.md silent about it. Under each Task N section, add a short 'Acceptance' subsection listing that task's criterion name(s), points, and one-line description verbatim from rubric.json, plus the line 'Full rubric: .resolve/plan/rubric.json'. Do the same under an 'Overall Acceptance' section near the top for the cross-cutting criteria. A human skimming the plan doc alone should understand what 'done' means without having to open the JSON separately.\n\nSTEP D -- TIGHTNESS CHECK: a rubric criterion this pipeline can't realistically earn full points on in 1-2 full implement+verify loops (a 'loop' is one complete Implement -> SelfEvaluate -> Fix -> SelfEvaluate cycle, NOT a conversational turn) means the underlying TASK is too big or too ambiguous -- split it further rather than writing a loose criterion and hoping the fix loop absorbs the gap. Every criterion must be answerable using only what's already pinned down in the design doc.\n\nPrint the single line: plan_done"
+    prompt="Read ${paths.design_doc}. If .resolve/plan/validation_feedback.txt exists (from a prior failed rubric-schema verification of this exact plan), read it first and fix exactly what it names before anything else. Human attention is the most sacred resource -- do not waste it, and do not waste the pipeline's effort on a rubric that only checks the obvious. This is Verification Driven Development: the question for every task is never 'does a test pass?' -- it's 'does this actually work, the way a user experiencing this feature would judge it?' Break the design into bite-sized (2-5 min each) tasks, ONE logical unit of work each.\n\nSTEP A -- EVIDENCE METHOD per task: classify each task and assign EXACTLY ONE of these three verification tiers, in order of preference -- pick the cheapest tier that actually proves the claim: (1) UNIT TEST for library code -- pure functions, data transforms, business logic with no DOM/network/process boundary. (2) LIGHTWEIGHT JSDOM + NODE TEST ENV for integration tests -- component wiring, event handlers, state, anything touching a simulated DOM but not needing a real browser. This is the default for UI logic not tier-1-eligible. (3) REAL BROWSER VERIFICATION (playwright-cli / browser-tester) ONLY for focus management, keyboard navigation, accessibility, visual layout truth -- the exception, never the default. CRITICAL COMMAND-CORRECTNESS RULE FOR TIERS 1 AND 2: if the verification command is vitest (or any watch-mode-by-default test runner), it MUST be invoked in single-run/CI mode -- vitest's own CLI default is watch mode, which never exits and would hang the pipeline waiting for a process that never terminates. Always write the command as `vitest run` (or `vitest --run`), NEVER a bare `vitest` or `npm test`/`pnpm test`/`yarn test` unless that script itself already passes --run or sets CI=true internally -- check the repo's package.json test script and if it doesn't already force non-watch mode, write the exact non-watch invocation instead of relying on it. The same applies to any other watch-mode-by-default runner (e.g. jest --watch is opt-in so jest is fine bare, but always double check against the actual tool's documented default before writing the command). For EACH task write: exact file paths, complete copy-pasteable implementation, the static analysis command (always first), which tier applies and why, and the exact command to run for that tier (confirmed non-watch/non-blocking). Write ${plan.plan_doc} with the standard structure (Goal/Architecture/Tech Stack/Verification approach, then Task N: Files/Implementation/Static Analysis/Verification Tier/Verification Command/Commit).\n\nSTEP B -- WEIGHTED RUBRIC (the real definition of done, following https://github.com/microsoft/amplifier-bundle-evaluation rubric-design methodology): before writing a single criterion, name the 2-3 things that would separate a genuinely good result on THIS feature from a competent-looking but shallow one -- a subtle requirement buried in the design that a skimming implementer would miss, a behavior only visible if you actually use the feature the way a user would, or a failure mode you can already picture (e.g. 'the error message technically appears but doesn't tell the user what to actually do'). These become your heavy-weighted, CRITICAL: criteria. Then for EVERY criterion: (1) phrase it as an OBSERVABLE QUESTION a judge can answer by looking at or using the artifact -- 'Does the README include (a) install steps (b) the exact run command (c) expected output?' not 'is the README good?'; 'Does submitting the form with an empty required field show an inline error naming which field is missing, not just a generic failure banner?' not 'does validation work?'. If you cannot phrase a criterion as something concrete and pointable, find the observable property underneath it or cut it. (2) THINK LIKE A USER, NOT AN ENGINEER, for both writing and later judging -- the question is never 'did the function get called' but 'would someone using this feature actually get what they came for, notice if it broke, or be confused by the result'. (3) Cut any criterion every implementation will trivially pass (file exists, script exits 0) -- those are gates that belong in the VDD evidence steps, not point-bearing rubric entries. (4) Allocate points by discriminating power: the 2-3 criteria from above should hold roughly HALF the total points combined; trivial-but-required checks get small slices. Mark heavy criteria with a 'CRITICAL:' prefix in their description. (5) Where partial credit is possible, spell out exactly how it's earned in the description (e.g. 'full credit for handling all 3 listed edge cases, 33% credit per case if some but not all are handled') so the judge isn't inventing a scale. (6) Write a short 'steps' evidence-gathering plan alongside the criteria -- what to run, read, or actually try as a user before scoring, mapped to the VDD tiers from Step A -- so every criterion has something concrete backing its judgment; gate on failure explicitly ('if the script errors or times out, score 0 for every criterion in this task's evidence'). Write .resolve/plan/rubric.json: {\\\"steps\\\": \\\"<ordered evidence-gathering plan: what to run/read/try, referencing the VDD tier commands from the plan doc>\\\", \\\"pass_threshold\\\": 0.85, \\\"criteria\\\": {\\\"<snake_case_name>\\\": {\\\"points\\\": <int>, \\\"task\\\": <N or null for an overall/cross-cutting criterion>, \\\"description\\\": \\\"<observable, user-facing question; prefix with 'CRITICAL:' if this is one of the 2-3 heavy-weighted ones>\\\"}, ...}}. Do not let this become mechanical busywork disconnected from what the feature is actually for -- if a criterion wouldn't matter to someone using the result, it doesn't belong.\n\nSTEP C -- REFERENCE THE RUBRIC FROM THE PLAN DOC: since the rubric lives in its own file (rubric.json), don't leave ${plan.plan_doc} silent about it. Under each Task N section, add a short 'Acceptance' subsection listing that task's criterion name(s), points, and one-line description verbatim from rubric.json, plus the line 'Full rubric: .resolve/plan/rubric.json'. Do the same under an 'Overall Acceptance' section near the top for the cross-cutting criteria. A human skimming the plan doc alone should understand what 'done' means without having to open the JSON separately.\n\nSTEP D -- TIGHTNESS CHECK: a rubric criterion this pipeline can't realistically earn full points on in 1-2 full implement+verify loops (a 'loop' is one complete Implement -> SelfEvaluate -> Fix -> SelfEvaluate cycle, NOT a conversational turn) means the underlying TASK is too big or too ambiguous -- split it further rather than writing a loose criterion and hoping the fix loop absorbs the gap. Every criterion must be answerable using only what's already pinned down in the design doc.\n\nPrint the single line: plan_done"
+  ];
+
+  // Cheap deterministic gate, same "cheap gate before expensive gate"
+  // doctrine as VerifyDesignDoc above -- but here the stakes are higher:
+  // Plan's output isn't just consumed once, it's the DEFINITION OF DONE the
+  // entire (expensive) Implement<->SelfEvaluate loop converges against. In
+  // v1 there was NO check at all between Plan and Implement -- a malformed
+  // or schema-violating rubric.json would only surface once SelfEvaluate
+  // tried to use it, and an LLM node handed an unparseable/missing rubric
+  // is disposed to hallucinate plausible-looking criteria rather than halt
+  // ("wrong-but-plausible", primer.md's named worst failure class) instead
+  // of failing loud. Checks: rubric.json parses; has non-empty 'steps'; has
+  // a 'pass_threshold' in (0,1]; has at least one criterion; at least one
+  // criterion is marked CRITICAL: (Plan's own STEP B requirement); and the
+  // plan doc actually contains an Acceptance section (STEP C requirement).
+  ValidateRubric [
+    shape=parallelogram, label="Validate Rubric Schema",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/plan\npython3 -c \"import json,os,sys\ntry:\n    d=json.load(open('.resolve/plan/rubric.json'))\nexcept Exception:\n    print('missing/unparseable .resolve/plan/rubric.json'); sys.exit(1)\ncrit=d.get('criteria') or {}\nmissing=[]\nif not d.get('steps'): missing.append('rubric.json is missing a non-empty steps field')\npt=d.get('pass_threshold')\nif not isinstance(pt,(int,float)) or not (0 < pt <= 1): missing.append('rubric.json pass_threshold must be a number in (0,1]')\nif not crit: missing.append('rubric.json has no criteria')\nif crit and not any('CRITICAL:' in (c.get('description') or '') for c in crit.values()): missing.append('rubric.json has no CRITICAL: criterion (STEP B requires 2-3 heavy-weighted ones)')\nif missing:\n    print(chr(10).join(missing)); sys.exit(1)\nsys.exit(0)\n\" > .resolve/plan/validation_feedback.txt 2>&1 && grep -qi 'acceptance' \\\"$plan.plan_doc\\\" && { rm -f .resolve/plan/validation_feedback.txt; printf 'ok'; } || { [ -s .resolve/plan/validation_feedback.txt ] || echo 'plan doc missing an Acceptance section (STEP C)' > .resolve/plan/validation_feedback.txt; printf 'fail'; }"
+  ];
+
+  // Same counter pattern as DesignRetryCheck -- independent budget, own key.
+  PlanRetryCheck [
+    shape=parallelogram, label="Check Plan Retry Budget (backstop)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};d['plan_retries']=d.get('plan_retries',0)+1;json.dump(d,open(p,'w'));print(d['plan_retries'])\")\nmax=${max_plan_retries:-2}\nif [ \"$count\" -le \"$max\" ]; then printf 'retry_ok'; else printf 'retry_exhausted'; fi"
+  ];
+
+  PlanBlocked [
+    shape=parallelogram, label="Mark Blocked (plan schema backstop tripped)",
+    tool_command="printf '{\"build.verdict\": \"blocked\", \"build.blocked_reason\": \"Plan backstop tripped after $max_plan_retries retries -- see .resolve/plan/validation_feedback.txt\", \"build.fix_rounds_used\": 0, \"build.plan_revisions_used\": 0, \"build.rubric_result\": \"\", \"build.rubric_score\": 0}'",
+    parse_json="true"
   ];
 
   // --- Phase 3: Build, gated by weighted rubric achievement (not a round
-  // count), with a safety-backstop fix loop. THE LOOP: Implement ->
-  // SelfEvaluate -> CheckRubric -> [fail] CheckFixRounds -> Fix ->
-  // SelfEvaluate (loop_restart) -- visible right here at the root level. ---
+  // count), with two safety-backstop loops. THE LOOPS (see ClassifyFailure
+  // below for how CheckRubric's failure routes between them): (a) implementation
+  // gap -> Implement -> SelfEvaluate -> CheckRubric -> [fail/impl_gap] ->
+  // CheckFixRounds -> Fix -> SelfEvaluate (loop_restart); (b) plan/design
+  // contradiction -> ... -> [fail/plan_defect] -> PlanRevisionCheck ->
+  // RevisePlan -> Implement (loop_restart). Both visible right here at the
+  // root level. ---
   // Implements the plan's tasks and gathers the evidence rubric.json's
   // "steps" call for, but does NOT self-declare pass/fail or award its own
   // points -- that judgment belongs entirely to the independent
   // SelfEvaluate step below, which doesn't trust Implement's own account.
   Implement [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Implement",
-    prompt="Read docs/plans/<date>-<feature>-implementation.md and .resolve/plan/rubric.json (including its 'steps' evidence plan). For EACH task not yet marked complete, in order: (1) run static analysis FIRST and fix any pre-existing issues; (2) implement exactly what's specified -- no extra features, no 'while I'm here' improvements; (3) run static analysis again; (4) run the VDD verification command the plan assigned this task's tier (unit test / jsdom+node integration test / real browser -- do NOT substitute a cheaper check, and do NOT reach for a browser if the plan's tier is unit or jsdom). If that command is vitest (or any other watch-mode-by-default runner) and the plan wrote a bare `vitest`/`npm test`, do NOT run it as-is -- run `vitest run` (or add `--run`) instead, since vitest's own default is watch mode and a bare invocation will hang forever waiting for a process that never exits. Never run a test command in watch mode in this pipeline. Also actually exercise the feature the way rubric.json's 'steps' describes for this task's criteria -- if a criterion is about what a user would experience, go look at or try that, don't infer it from the code. Document the ACTUAL output/behavior you saw verbatim -- do not summarize or paraphrase it. (5) Commit atomically: 'feat: [what this does]'. Append your result to docs/plans/<feature>-status.md under this task's heading with the exact static-analysis output, the exact verification command + output, and what you observed when exercising the feature per the rubric's steps. After all tasks are attempted, also work through rubric.json's overall 'steps' (e.g. full test suite, static analysis clean, any cross-cutting user-facing check) and document that output too. Do NOT self-score against the rubric and do NOT declare victory -- just report what you did and what actually happened. Print the single line: implement_done"
+    prompt="Read ${plan.plan_doc} and .resolve/plan/rubric.json (including its 'steps' evidence plan). For EACH task not yet marked complete, in order: (1) run static analysis FIRST and fix any pre-existing issues; (2) implement exactly what's specified -- no extra features, no 'while I'm here' improvements; (3) run static analysis again; (4) run the VDD verification command the plan assigned this task's tier (unit test / jsdom+node integration test / real browser -- do NOT substitute a cheaper check, and do NOT reach for a browser if the plan's tier is unit or jsdom). If that command is vitest (or any other watch-mode-by-default runner) and the plan wrote a bare `vitest`/`npm test`, do NOT run it as-is -- run `vitest run` (or add `--run`) instead, since vitest's own default is watch mode and a bare invocation will hang forever waiting for a process that never exits. Never run a test command in watch mode in this pipeline. Also actually exercise the feature the way rubric.json's 'steps' describes for this task's criteria -- if a criterion is about what a user would experience, go look at or try that, don't infer it from the code. Document the ACTUAL output/behavior you saw verbatim -- do not summarize or paraphrase it. (5) Commit atomically: 'feat: [what this does]'. Append your result to ${build.status_doc} under this task's heading with the exact static-analysis output, the exact verification command + output, and what you observed when exercising the feature per the rubric's steps. After all tasks are attempted, also work through rubric.json's overall 'steps' (e.g. full test suite, static analysis clean, any cross-cutting user-facing check) and document that output too. Do NOT self-score against the rubric and do NOT declare victory -- just report what you did and what actually happened. Print the single line: implement_done"
   ];
 
   // The judge. Adversarial and independent: gathers/re-gathers evidence
@@ -192,9 +552,9 @@ digraph idea_to_pr {
   // like a user experiencing the result, not an engineer confirming a
   // command exited 0.
   SelfEvaluate [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Self-Evaluate (judge, weighted rubric)",
-    prompt="Read .resolve/plan/rubric.json in full (its 'steps', 'pass_threshold', and every criterion) and docs/plans/<feature>-status.md. First, work through rubric.json's 'steps' yourself right now -- re-run commands, read the actual files, and where a criterion is about user-facing behavior, actually use the feature the way a real user would rather than reading the code and assuming. If status.md's account looks incomplete, inconsistent, or suspiciously clean anywhere, that is exactly when to re-verify directly rather than trust it. Then, for EACH criterion in rubric.json: think like a user, not an engineer -- award points_awarded from 0 up to that criterion's max points based on what the evidence actually shows, using any partial-credit rule stated in the criterion's own description (do not invent your own scale). A 'CRITICAL:' criterion failing should cost real points, not a token deduction. Do not award points for something merely claimed in status.md without evidence backing it. Do not invent criteria that aren't in rubric.json, and do not skip any that are. Compute overall_score = sum(points_awarded) / sum(points) across all criteria. Write .resolve/verify/rubric_result.json: {\\\"overall_score\\\": <float 0-1>, \\\"pass_threshold\\\": <copied from rubric.json>, \\\"results\\\": [{\\\"id\\\": \\\"<criterion id>\\\", \\\"points\\\": <max>, \\\"points_awarded\\\": <awarded>, \\\"reasoning\\\": \\\"<what evidence you checked and why this many points>\\\"}, ...]}. Print the single line: rubric_verdict=pass if overall_score >= pass_threshold, or rubric_verdict=fail otherwise, followed on the next line by rubric_score=<overall_score>."
+    prompt="Read .resolve/plan/rubric.json in full (its 'steps', 'pass_threshold', and every criterion) and ${build.status_doc}. First, work through rubric.json's 'steps' yourself right now -- re-run commands, read the actual files, and where a criterion is about user-facing behavior, actually use the feature the way a real user would rather than reading the code and assuming. If status.md's account looks incomplete, inconsistent, or suspiciously clean anywhere, that is exactly when to re-verify directly rather than trust it. Then, for EACH criterion in rubric.json: think like a user, not an engineer -- award points_awarded from 0 up to that criterion's max points based on what the evidence actually shows, using any partial-credit rule stated in the criterion's own description (do not invent your own scale). A 'CRITICAL:' criterion failing should cost real points, not a token deduction. Do not award points for something merely claimed in status.md without evidence backing it. Do not invent criteria that aren't in rubric.json, and do not skip any that are. Compute overall_score = sum(points_awarded) / sum(points) across all criteria. Additionally, decide plan_defect_detected: set it true ONLY if at least one failing criterion is failing not because of an implementation shortfall but because the design or plan itself is contradictory, underspecified in a way that makes the criterion unanswerable as written, or asks for something impossible given $design -- if so, name exactly which criterion and why in plan_defect_reason. Default false. Do NOT use this as an escape hatch to avoid awarding low scores for merely incomplete or low-quality work -- reserve it strictly for genuine plan/design contradictions a Fix pass on the CODE could not possibly resolve. Write .resolve/verify/rubric_result.json: {\\\"overall_score\\\": <float 0-1>, \\\"pass_threshold\\\": <copied from rubric.json>, \\\"plan_defect_detected\\\": <true|false>, \\\"plan_defect_reason\\\": \\\"<empty string if false>\\\", \\\"results\\\": [{\\\"id\\\": \\\"<criterion id>\\\", \\\"points\\\": <max>, \\\"points_awarded\\\": <awarded>, \\\"reasoning\\\": \\\"<what evidence you checked and why this many points>\\\"}, ...]}. Print the single line: rubric_verdict=pass if overall_score >= pass_threshold, or rubric_verdict=fail otherwise, followed on the next line by rubric_score=<overall_score>."
   ];
 
   // Reads .resolve/verify/rubric_result.json directly rather than grepping
@@ -214,21 +574,73 @@ digraph idea_to_pr {
     tool_command="#!/bin/sh\nset -e\npython3 -c \"import json,os,sys; p='.resolve/verify/rubric_result.json'; d=json.load(open(p)) if os.path.exists(p) else {}; sys.exit(0 if d.get('overall_score', 0) >= d.get('pass_threshold', 1) else 1)\" && printf 'pass' || printf 'fail'"
   ];
 
-  // Safety backstop ONLY -- not the completion mechanism. Default 2
-  // matches the "typically 1-2 loops per task" expectation a tight,
-  // well-weighted rubric should produce: attempt 1 (Implement's own
-  // pass), then at most one Fix pass. If the rubric was scoped correctly,
-  // this rarely trips; if it trips often, the fix is tighter task/rubric
-  // decomposition in Plan, not a larger number here.
+  // Differentiated failure edges (primer.md doctrine #6 -- "route each
+  // failure class back to the phase that can fix it"; RUBRIC.md §4 calls a
+  // single generic retry edge "a degenerate basin"). v1 routed EVERY
+  // rubric failure to Fix, always, as if every gap were an implementation
+  // shortfall -- but SelfEvaluate can now (see its updated prompt above)
+  // detect a genuine plan/design contradiction instead, and no amount of
+  // Fix passes on the CODE will resolve a contradiction in the SPEC. This
+  // node reads that signal and routes accordingly.
+  ClassifyFailure [
+    shape=parallelogram, label="Classify Failure (impl gap vs plan defect)",
+    tool_command="#!/bin/sh\nset -e\npython3 -c \"import json,os; p='.resolve/verify/rubric_result.json'; d=json.load(open(p)) if os.path.exists(p) else {}; print('plan_defect' if d.get('plan_defect_detected') else 'impl_gap')\""
+  ];
+
+  // Deliberately a SMALLER budget than max_fix_rounds -- a plan/rubric
+  // revision is a heavier corrective action than one more Fix pass, and if
+  // one targeted revision doesn't resolve it, hammering the plan further
+  // without new information is unlikely to help either (primer.md doctrine
+  // #7: "don't let the loop absorb deterministic bugs... if a corrective
+  // edge fires repeatedly on the same failure signature, stop iterating").
+  PlanRevisionCheck [
+    shape=parallelogram, label="Check Plan Revision Budget (backstop)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};d['plan_revisions']=d.get('plan_revisions',0)+1;json.dump(d,open(p,'w'));print(d['plan_revisions'])\")\nmax=${max_plan_revisions:-1}\nif [ \"$count\" -le \"$max\" ]; then printf 'revise_ok'; else printf 'revise_exhausted'; fi"
+  ];
+
+  // Narrow, targeted revision -- fixes exactly the contradiction
+  // SelfEvaluate named, not a full plan rewrite (mirrors Fix's own
+  // "no broad rewrite, address exactly what's short" discipline, applied
+  // one layer up). Re-enters Implement directly rather than routing back
+  // through ValidateRubric: RevisePlan's prompt is deliberately narrow
+  // (lower risk of wholesale rubric malformation than Plan's from-scratch
+  // generation), and if it DOES produce something broken, the existing
+  // evidence-gated build loop (CheckRubric/SelfEvaluate) still catches it
+  // one iteration later -- a deliberate, documented scope trade-off to
+  // keep this "lite" pipeline's new machinery proportionate.
+  RevisePlan [
+    shape=box, fidelity="full",
+    label="Revise Plan (targeted, plan/design contradiction only)",
+    prompt="Read .resolve/verify/rubric_result.json's plan_defect_reason. SelfEvaluate has determined that at least one failing rubric criterion is not an implementation gap but a contradiction or gap in ${plan.plan_doc}, .resolve/plan/rubric.json, or the underlying ${paths.design_doc} itself. Revise ONLY the specific criterion/criteria and/or plan section(s) plan_defect_reason names -- do not rewrite the whole plan or rubric, and do not touch criteria/sections it doesn't mention. If the contradiction actually traces back to $design being wrong (not just underspecified), say so explicitly in your revision notes rather than quietly overriding the human's design intent. Update ${plan.plan_doc}'s Acceptance section(s) and .resolve/plan/rubric.json to match your revision. Print the single line: plan_revised"
+  ];
+
+  PlanDefectBlocked [
+    shape=parallelogram, label="Mark Blocked (plan-defect revision budget tripped)",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('fix_rounds',0))\")\nscore=$(python3 -c \"import json,os;p='.resolve/verify/rubric_result.json';print(json.load(open(p)).get('overall_score', 0) if os.path.exists(p) else 0)\")\nrevisions=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('plan_revisions',0))\")\nprintf '{\"build.verdict\": \"escalated\", \"build.blocked_reason\": \"SelfEvaluate repeatedly flagged a plan/design contradiction (see .resolve/verify/rubric_result.json plan_defect_reason) and the plan-revision backstop ($max_plan_revisions) is exhausted -- this needs a human to resolve the underlying design question, not another automated pass\", \"build.fix_rounds_used\": %s, \"build.plan_revisions_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\", \"build.rubric_score\": %s}' \"$count\" \"$revisions\" \"$score\"",
+    parse_json="true"
+  ];
+
+  // Safety backstop ONLY -- not the completion mechanism. VERIFIED ACTUAL
+  // BEHAVIOR (v1's own comment here was off-by-one from what the code
+  // below actually does -- corrected per RUBRIC.md's own "verified
+  // behavior, not assumed" methodology): the counter increments on EVERY
+  // CheckRubric failure and permits a Fix round whenever count <= max, so
+  // default_max_fix_rounds=2 allows TWO Fix passes (Implement's own pass,
+  // then Fix round 1, then Fix round 2 -- three total attempts) before
+  // count=3 trips fix_exhausted. If the rubric was scoped correctly this
+  // rarely trips; if it trips often, the fix is tighter task/rubric
+  // decomposition in Plan, not a larger number here. Counter now lives in
+  // the consolidated .resolve/run_state.json (key "fix_rounds") alongside
+  // the other backstop counters, all cleared together by ResetRunState.
   CheckFixRounds [
     shape=parallelogram, label="Check Fix Rounds (safety backstop)",
-    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';d=json.load(open(p)) if os.path.exists(p) else {'count':0};d['count']+=1;json.dump(d,open(p,'w'));print(d['count'])\")\nmax=${max_fix_rounds:-2}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};d['fix_rounds']=d.get('fix_rounds',0)+1;json.dump(d,open(p,'w'));print(d['fix_rounds'])\")\nmax=${max_fix_rounds:-2}\nif [ \"$count\" -le \"$max\" ]; then printf 'fix_ok'; else printf 'fix_exhausted'; fi"
   ];
 
   Fix [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Fix (address lowest-scoring rubric criteria)",
-    prompt="Read .resolve/verify/rubric_result.json. Prioritize any criterion whose description was marked 'CRITICAL:' and scored below full points, then work through the rest by largest points-lost (points - points_awarded). For each, fix the SPECIFIC gap the reasoning field points to -- no broad rewrite, address exactly what's short. Re-run that criterion's evidence per rubric.json's 'steps' and confirm the fresh result actually earns more points before moving to the next one. Update docs/plans/<feature>-status.md with what changed and the fresh evidence. Print the single line: fix_attempted"
+    prompt="Read .resolve/verify/rubric_result.json. Prioritize any criterion whose description was marked 'CRITICAL:' and scored below full points, then work through the rest by largest points-lost (points - points_awarded). For each, fix the SPECIFIC gap the reasoning field points to -- no broad rewrite, address exactly what's short. Re-run that criterion's evidence per rubric.json's 'steps' and confirm the fresh result actually earns more points before moving to the next one. Update ${build.status_doc} with what changed and the fresh evidence. Print the single line: fix_attempted"
   ];
 
 // Split into two literal-outcome nodes rather than one shared node that
@@ -241,23 +653,29 @@ digraph idea_to_pr {
   // and computes the shared rubric_score itself.
   ExtractVerdictMet [
     shape=parallelogram, label="Extract Verdict (rubric met)",
-    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nscore=$(python3 -c \"import json,os;p='.resolve/verify/rubric_result.json';print(json.load(open(p)).get('overall_score', 0) if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"rubric_met\", \"build.fix_rounds_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\", \"build.rubric_score\": %s}' \"$count\" \"$score\"",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('fix_rounds',0))\")\nrevisions=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('plan_revisions',0))\")\nscore=$(python3 -c \"import json,os;p='.resolve/verify/rubric_result.json';print(json.load(open(p)).get('overall_score', 0) if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"rubric_met\", \"build.fix_rounds_used\": %s, \"build.plan_revisions_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\", \"build.rubric_score\": %s}' \"$count\" \"$revisions\" \"$score\"",
     parse_json="true"
   ];
 
   ExtractVerdictEscalated [
     shape=parallelogram, label="Extract Verdict (escalated)",
-    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/fix_state.json';print(json.load(open(p))['count'] if os.path.exists(p) else 0)\")\nscore=$(python3 -c \"import json,os;p='.resolve/verify/rubric_result.json';print(json.load(open(p)).get('overall_score', 0) if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"escalated\", \"build.fix_rounds_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\", \"build.rubric_score\": %s}' \"$count\" \"$score\"",
+    tool_command="#!/bin/sh\nset -e\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('fix_rounds',0))\")\nrevisions=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};print(d.get('plan_revisions',0))\")\nscore=$(python3 -c \"import json,os;p='.resolve/verify/rubric_result.json';print(json.load(open(p)).get('overall_score', 0) if os.path.exists(p) else 0)\")\nprintf '{\"build.verdict\": \"escalated\", \"build.blocked_reason\": \"fix-round safety backstop tripped after $max_fix_rounds fix attempts without reaching pass_threshold -- see rubric_result.json for which criteria are still short\", \"build.fix_rounds_used\": %s, \"build.plan_revisions_used\": %s, \"build.rubric_result\": \".resolve/verify/rubric_result.json\", \"build.rubric_score\": %s}' \"$count\" \"$revisions\" \"$score\"",
     parse_json="true"
   ];
 
   // --- Phase 4: Deliver the PR (commit, push, verify the push landed, open
   // PR). Linear once the rubric is met -- no loop needed here, CheckPush is
   // a one-shot evidence gate, not a convergence loop. ---
+  // NOTE: v1 (and every copy of the shared deliver_pr.dot pattern this was
+  // inlined from -- hello_world, idea_to_shipped, ship_ready all carry the
+  // identical bug) told this node to "reference .resolve/design/design.md
+  // and .ai/plan.md for context" -- neither path is ever written by ANY
+  // pipeline in this repo. Fixed here to reference the real, now-tracked
+  // context vars.
   CommitPush [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Commit + Push",
-    prompt="Stage all changes, write a conventional commit message summarizing the work (reference .resolve/design/design.md and .ai/plan.md for context), commit, and push the current branch to origin. After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: pushed"
+    prompt="Stage all changes, write a conventional commit message summarizing the work (reference ${paths.design_doc} and ${plan.plan_doc} for context), commit, and push the current branch to origin. After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: pushed"
   ];
 
   CheckPush [
@@ -265,8 +683,27 @@ digraph idea_to_pr {
     tool_command="#!/bin/sh\nset -e\nif [ -f .resolve/delivery/push_status.txt ] && tail -1 .resolve/delivery/push_status.txt | grep -q pushed; then\n  printf 'pushed'\nelse\n  printf 'push_failed'\nfi"
   ];
 
+  // Delivery-phase corrective loop (closes a flow-vs-attractor gap: v1 had
+  // deterministic evidence gates here -- good -- but NO edge back on
+  // failure, only a bare Failed. A gate that can detect a bad day but
+  // never tries to correct it is a tripwire, not a basin. Bounded
+  // deliberately small (default 1): a push failure is usually either
+  // trivially recoverable (remote moved on -> rebase and retry) or not
+  // recoverable by retrying at all (auth/permissions) -- more than one
+  // retry rarely helps either way.
+  PushRetryCheck [
+    shape=parallelogram, label="Check Push Retry Budget (backstop)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};d['push_retries']=d.get('push_retries',0)+1;json.dump(d,open(p,'w'));print(d['push_retries'])\")\nmax=${max_push_retries:-1}\nif [ \"$count\" -le \"$max\" ]; then printf 'retry_ok'; else printf 'retry_exhausted'; fi"
+  ];
+
+  RetryPush [
+    shape=box, fidelity="full",
+    label="Retry Push (diagnose + rebase if needed)",
+    prompt="The previous push attempt could not be verified (see .resolve/delivery/push_status.txt). Run git status and git fetch origin to diagnose why: if there are uncommitted changes, stage and commit them; if the remote branch has moved ahead, rebase onto it (or merge if rebase conflicts are non-trivial) and resolve conflicts favoring the intended change; if there is genuinely nothing to push, say so plainly rather than force-pushing a no-op. If the failure looks like an auth/permissions problem a retry cannot fix, say so plainly and do NOT fabricate a push. Otherwise retry: push the current branch to origin, then run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: retry_attempted"
+  ];
+
   OpenPR [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Open PR",
     prompt="Open a REAL pull request on GitHub (https://github.com/$repo) for the pushed branch against $repo's default branch -- use the gh CLI (`gh pr create --repo $repo ...`) or the GitHub REST API directly (POST https://api.github.com/repos/$repo/pulls with GH_TOKEN), NOT any other git host or a simulated/local PR. Write a PR description summarizing the design, the task list completed, and verification evidence. Write the resulting real github.com PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
   ];
@@ -277,7 +714,7 @@ digraph idea_to_pr {
   // output the agent misreads, without a PR actually existing on GitHub.
   ExtractPRUrl [
     shape=parallelogram, label="Extract PR URL (claimed)",
-    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
+    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt 2>/dev/null || printf '')\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
     parse_json="true"
   ];
 
@@ -296,7 +733,20 @@ digraph idea_to_pr {
   // API call before Report is allowed to claim success.
   CheckPROpened [
     shape=parallelogram, label="Verify PR Actually Opened",
-    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery.pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+  ];
+
+  // Same corrective-loop pattern as PushRetryCheck/RetryPush above, applied
+  // to the other ungated-failure spot in the delivery phase.
+  PrRetryCheck [
+    shape=parallelogram, label="Check PR Retry Budget (backstop)",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve\ncount=$(python3 -c \"import json,os;p='.resolve/run_state.json';d=json.load(open(p)) if os.path.exists(p) else {};d['pr_retries']=d.get('pr_retries',0)+1;json.dump(d,open(p,'w'));print(d['pr_retries'])\")\nmax=${max_pr_retries:-1}\nif [ \"$count\" -le \"$max\" ]; then printf 'retry_ok'; else printf 'retry_exhausted'; fi"
+  ];
+
+  RetryOpenPR [
+    shape=box, fidelity="full",
+    label="Retry Open PR",
+    prompt="The previous attempt to open a pull request could not be independently verified via gh pr view / the GitHub API. First check whether a PR already exists for this branch (`gh pr list --repo $repo --head <branch> --json url,number`) -- if one already exists, write ITS real URL to .resolve/delivery/pr_url.txt rather than creating a duplicate. Otherwise diagnose why the previous attempt failed (auth/token scope, wrong repo, API rate limit, wrong branch) and retry opening a REAL pull request on GitHub (https://github.com/$repo) against $repo's default branch via `gh pr create --repo $repo ...` or the GitHub REST API (POST https://api.github.com/repos/$repo/pulls with GH_TOKEN). Write the resulting real github.com PR URL to .resolve/delivery/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
   ];
 
   // Only set delivery.result="opened" once CheckPROpened has independently
@@ -315,42 +765,165 @@ digraph idea_to_pr {
   ];
 
   Report [
-    shape=box, goal_gate=true, fidelity="summary:high",
+    shape=box, fidelity="summary:high",
     label="Report",
-    prompt="Summarize the run: design (docs/plans/<date>-<topic>-design.md), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), final build verdict (${build.verdict}), final weighted rubric score (${build.rubric_score}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'escalated' (the fix-round safety backstop tripped before the rubric's pass_threshold was met), say so plainly and list which specific criteria are still short of full points and why -- do not claim success. If delivery.result is 'failed' (push did not land), say so plainly and do not claim a PR was opened. Print the single line: reported"
+    prompt="Summarize the run: design (${paths.design_doc}), rubric (.resolve/plan/rubric.json), fix rounds used (${build.fix_rounds_used}), plan revisions used (${build.plan_revisions_used}), final build verdict (${build.verdict}), final weighted rubric score (${build.rubric_score}), rubric evaluation detail (${build.rubric_result}), and PR (${delivery.pr_url}). If build.verdict is 'blocked', the pipeline never reached the implementation phase at all -- report ${build.blocked_reason} plainly and do not reference a rubric score since none was computed. If build.verdict is 'escalated', at least one real implementation attempt happened but a safety backstop tripped before the rubric's pass_threshold was met (or a plan/design contradiction was found that needs a human) -- report ${build.blocked_reason} plainly, list which specific criteria are still short of full points and why, and do not claim success. If delivery.result is 'failed' (push did not land or the PR could not be independently verified after retry), say so plainly and do not claim a PR was opened. Print the single line: reported"
   ];
 
   // ═══════════════════════════════════════════════ EDGES ═══════════════════════════════════════════════
+  //
+  // FAIL-NET AUDIT (added after a live run on resolve.amplifier.ms hit this
+  // exact bug): RUBRIC.md foot-gun #2 -- "FAIL doesn't traverse plain edges.
+  // It only routes via condition="outcome=fail" edges, runs_on=always|failure
+  // nodes, or retry_target." Every "plain" (unconditioned) edge below had
+  // this bug: if the SOURCE node's own execution fails outright (exhausts
+  // its retries -- "Max retries exceeded", not "succeeded but wrote bad
+  // content"), there was no edge for the engine to route on, and the whole
+  // pipeline hard-fails with error_type=no_matching_edge. This was caught
+  // live: instance 9da59c1af6fb failed exactly this way at EstablishDesign
+  // after 3 attempts. EstablishDesign is not special -- EVERY node below with a
+  // single plain edge had the identical latent bug (v1 had it too, e.g. its
+  // own `EstablishDesign -> Plan;`). Fixed by adding a `condition="outcome=fail"`
+  // edge alongside every plain edge, reusing the SAME downstream target --
+  // in every case that target is already a deterministic gate (or Report)
+  // that gracefully handles "missing/absent evidence" via file-existence
+  // checks, so no new nodes are needed, just the missing wall of the basin.
+  // This mirrors the ONE place this file already did this correctly:
+  // CheckPROpened's pre-existing `-> PrRetryCheck [condition="outcome=fail"]`
+  // safety net (RUBRIC.md 3.2) -- that was the proof this pattern works: it
+  // just wasn't applied everywhere else it needed to be.
 
-  Start        -> ResetFixState;
-  ResetFixState -> AcceptDesign;
-  AcceptDesign -> Plan;
-  Plan         -> Implement;                                    // no PlanConfidenceCheck / PlanApproval gate
+  Start          -> ResetRunState;
+  ResetRunState  -> ComputeRunPaths;
+  ResetRunState  -> ComputeRunPaths [condition="outcome=fail"];
+  ComputeRunPaths -> EstablishDesign;
+  ComputeRunPaths -> EstablishDesign [condition="outcome=fail"];
 
-  // --- Build/verify loop (visible at root level) ---
-  Implement      -> SelfEvaluate;
+  // --- Phase 1 loop: EstablishDesign is a genuine (if low-judgment) LLM node.
+  // v1 left it acyclic with zero gate -- a three-question-test failure at
+  // phase granularity even though the WHOLE graph had a cycle elsewhere.
+  // Now: cheap deterministic gate + small bounded retry. ---
+  EstablishDesign       -> VerifyDesignDocExists;
+  EstablishDesign       -> VerifyDesignDocExists [condition="outcome=fail"];
+  VerifyDesignDocExists -> JudgeDesignDoc     [condition="context.tool.last_line=ok", weight="2", label="design doc exists", thread_id="design-judge-thread"];
+  VerifyDesignDocExists -> DesignRetryCheck   [condition="context.tool.last_line=fail", label="design doc missing/too short"];
+  JudgeDesignDoc        -> CheckDesignJudgment;
+  JudgeDesignDoc        -> CheckDesignJudgment [condition="outcome=fail"];
+  CheckDesignJudgment   -> Plan             [condition="context.tool.last_line=ok",          weight="2", label="design judged substantive, no human input needed"];
+  CheckDesignJudgment   -> DesignApproval   [condition="context.tool.last_line=needs_human",              label="genuine product-taste question -- earned gate"];
+  CheckDesignJudgment   -> DesignRetryCheck [condition="context.tool.last_line=fail",                     label="design judged inadequate"];
+  DesignRetryCheck -> EstablishDesign     [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_design_retries)"];
+  DesignRetryCheck -> DesignBlocked    [condition="context.tool.last_line=retry_exhausted", label="backstop tripped"];
+  DesignBlocked    -> Report;
+  DesignBlocked    -> Report [condition="outcome=fail"];
+
+  // --- Earned human gate: only ever reached via the "needs_human" edge
+  // above. No dedicated retry-budget/blocked node here -- mirrors
+  // idea_to_shipped.dot's RevisePlan -> PlanConfidenceCheck precedent:
+  // this loop is human-steered, trusted to converge, not capped. Human's
+  // SKIPPED answer returns outcome=fail per the wait.human handler --
+  // fail-net edge per this file's own doctrine (RUBRIC.md foot-gun #2).
+  // fidelity="full": a human's freeform reply must not be truncated
+  // before CheckDesignApproval reads it (foot-gun #4). ---
+  DesignApproval      -> CheckDesignApproval [fidelity="full"];
+  DesignApproval      -> CheckDesignApproval [condition="outcome=fail", fidelity="full"];
+  CheckDesignApproval -> Plan                  [condition="context.tool.last_line=approved", weight="2", label="human approved"];
+  CheckDesignApproval -> ReviseDesignFromHuman  [condition="context.tool.last_line=corrected", label="human sent a correction"];
+  CheckDesignApproval -> ReviseDesignFromHuman  [condition="outcome=fail", label="check crashed -- treat as a correction round"];
+
+  // Loops back through the SAME CheckDesignJudgment router used on the
+  // first pass -- ReviseDesignFromHuman writes its own fresh judgment.json
+  // (see its prompt above), so no separate re-verify/trust-human split
+  // node is needed here; that judgment call is made inline, in the same
+  // turn, by ReviseDesignFromHuman itself. No thread_id needed on this
+  // edge -- CheckDesignJudgment is deterministic, not a second LLM judge
+  // call; the "independent judge" isolation only matters for JudgeDesignDoc
+  // itself, which this path deliberately does not re-enter.
+  ReviseDesignFromHuman -> CheckDesignJudgment [loop_restart="true"];
+  ReviseDesignFromHuman -> CheckDesignJudgment [condition="outcome=fail", loop_restart="true"];
+
+  // --- Phase 2 loop: same pattern for Plan -- its output is the
+  // DEFINITION OF DONE the entire build loop below converges against, so a
+  // malformed rubric here is higher-stakes than a malformed design doc. ---
+  Plan            -> ValidateRubric;
+  Plan            -> ValidateRubric [condition="outcome=fail"];
+  ValidateRubric  -> Implement       [condition="context.tool.last_line=ok", weight="2", label="rubric schema verified"];
+  ValidateRubric  -> PlanRetryCheck  [condition="context.tool.last_line=fail", label="rubric malformed/incomplete"];
+  PlanRetryCheck  -> Plan            [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_plan_retries)"];
+  PlanRetryCheck  -> PlanBlocked     [condition="context.tool.last_line=retry_exhausted", label="backstop tripped"];
+  PlanBlocked     -> Report;
+  PlanBlocked     -> Report [condition="outcome=fail"];
+
+  // --- Phase 3: Build/verify loop (visible at root level). SelfEvaluate
+  // gets its own thread_id -- isolates the judge from the generator's own
+  // framing/optimism instead of inheriting Implement/Fix's conversation,
+  // mirroring this repo's pr-review-exhaustive.dot isolation pattern
+  // (primer.md doctrine #10: parallelism/independence is for disagreement,
+  // not just throughput -- applies just as much to a single judge as to a
+  // fan-out of many). ---
+  Implement      -> SelfEvaluate            [thread_id="judge-thread"];
+  Implement      -> SelfEvaluate            [condition="outcome=fail", thread_id="judge-thread"];
   SelfEvaluate   -> CheckRubric;
-  CheckRubric    -> ExtractVerdictMet       [condition="context.tool.last_line=pass", weight="2", label="rubric met"];
-  CheckRubric    -> CheckFixRounds          [condition="context.tool.last_line=fail", label="rubric unmet"];
+  SelfEvaluate   -> CheckRubric             [condition="outcome=fail"];
+  CheckRubric    -> ExtractVerdictMet   [condition="context.tool.last_line=pass", weight="2", label="rubric met"];
+  CheckRubric    -> ClassifyFailure     [condition="context.tool.last_line=fail", label="rubric unmet"];
+
+  // --- Differentiated failure edges: plan/design contradiction routes to
+  // a bounded plan-revision loop; a genuine implementation gap routes to
+  // the original Fix loop. One generic retry edge (v1's shape) is what
+  // RUBRIC.md §4 calls "a degenerate basin" -- this replaces it with two
+  // walls, each routing to the phase that can actually fix that failure
+  // class (primer.md doctrine #6). ---
+  ClassifyFailure    -> PlanRevisionCheck [condition="context.tool.last_line=plan_defect", label="plan/design contradiction"];
+  ClassifyFailure    -> CheckFixRounds    [condition="context.tool.last_line=impl_gap", label="implementation gap"];
+
+  PlanRevisionCheck -> RevisePlan        [condition="context.tool.last_line=revise_ok", label="revise (backstop max $max_plan_revisions)"];
+  PlanRevisionCheck -> PlanDefectBlocked [condition="context.tool.last_line=revise_exhausted", label="revision backstop tripped -- needs a human"];
+  RevisePlan        -> Implement         [loop_restart="true"];   // re-attempt against the corrected spec
+  RevisePlan        -> Implement         [condition="outcome=fail", loop_restart="true"];
+  PlanDefectBlocked -> Report;
+  PlanDefectBlocked -> Report            [condition="outcome=fail"];
+
   CheckFixRounds -> Fix                     [condition="context.tool.last_line=fix_ok",       label="fix round (backstop max $max_fix_rounds)"];
   CheckFixRounds -> ExtractVerdictEscalated [condition="context.tool.last_line=fix_exhausted", label="backstop tripped -- escalate"];
-  Fix            -> SelfEvaluate            [loop_restart="true"];    // <-- THE LOOP
+  Fix            -> SelfEvaluate            [loop_restart="true", thread_id="judge-thread"];    // <-- THE LOOP
+  Fix            -> SelfEvaluate            [condition="outcome=fail", loop_restart="true", thread_id="judge-thread"];
 
   // --- Rubric met -> deliver PR; escalated -> skip straight to Report ---
   ExtractVerdictMet       -> CommitPush [weight="2"];
   ExtractVerdictEscalated -> Report;
+  ExtractVerdictEscalated -> Report     [condition="outcome=fail"];
 
-  // --- Delivery sequence (linear, evidence-gated, no loop needed) ---
-  CommitPush    -> CheckPush;
-  CheckPush     -> OpenPR       [condition="context.tool.last_line=pushed", weight="2"];
-  CheckPush     -> Failed       [condition="context.tool.last_line=push_failed"];
+  // --- Delivery sequence: evidence-gated, AND now with a bounded
+  // corrective loop on each gate instead of a bare fail-and-give-up (closes
+  // the flow-vs-attractor gap: v1's CheckPush/CheckPROpened could DETECT a
+  // bad day but had no dynamic that ever pulled it back). ---
+  CommitPush     -> CheckPush;
+  CommitPush     -> CheckPush      [condition="outcome=fail"];
+  CheckPush      -> OpenPR         [condition="context.tool.last_line=pushed", weight="2"];
+  CheckPush      -> PushRetryCheck [condition="context.tool.last_line=push_failed"];
+  PushRetryCheck -> RetryPush      [condition="context.tool.last_line=retry_ok", label="retry (backstop max $max_push_retries)"];
+  PushRetryCheck -> Failed         [condition="context.tool.last_line=retry_exhausted"];
+  RetryPush      -> CheckPush      [loop_restart="true"];
+  RetryPush      -> CheckPush      [condition="outcome=fail", loop_restart="true"];
+
   OpenPR        -> ExtractPRUrl;
+  OpenPR        -> ExtractPRUrl [condition="outcome=fail"];
   ExtractPRUrl  -> CheckPROpened;
+  ExtractPRUrl  -> CheckPROpened [condition="outcome=fail"];
   CheckPROpened -> MarkOpened   [condition="context.tool.last_line=verified", weight="2"];
-  CheckPROpened -> Failed       [condition="context.tool.last_line=not_verified"];
-  CheckPROpened -> Failed       [condition="outcome=fail"];  // safety net: tool_command crashed entirely (RUBRIC.md 3.2)
+  CheckPROpened -> PrRetryCheck [condition="context.tool.last_line=not_verified"];
+  CheckPROpened -> PrRetryCheck [condition="outcome=fail"];  // safety net: tool_command crashed entirely (RUBRIC.md 3.2) -- the ORIGINAL instance of this pattern in this file, proof it works.
+  PrRetryCheck  -> RetryOpenPR  [condition="context.tool.last_line=retry_ok", label="retry (backstop max $max_pr_retries)"];
+  PrRetryCheck  -> Failed       [condition="context.tool.last_line=retry_exhausted"];
+  RetryOpenPR   -> ExtractPRUrl [loop_restart="true"];
+  RetryOpenPR   -> ExtractPRUrl [condition="outcome=fail", loop_restart="true"];
+
   MarkOpened    -> Report;
+  MarkOpened    -> Report [condition="outcome=fail"];
   Failed        -> Report;
+  Failed        -> Report [condition="outcome=fail"];
 
   Report -> Exit;
+  Report -> Exit [condition="outcome=fail"];   // a flaky final summarization must never erase an already-earned PR/escalation outcome
 }
