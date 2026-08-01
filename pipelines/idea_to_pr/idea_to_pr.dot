@@ -203,7 +203,7 @@ digraph idea_to_pr {
   // gate nodes below), so one rm covers all of them.
   ResetRunState [
     shape=parallelogram, label="Reset Run State (idempotency, widened)",
-    tool_command="rm -f .resolve/run_state.json .resolve/verify/rubric_result.json .resolve/delivery/push_status.txt .resolve/delivery/pr_url.txt .resolve/design/validation_feedback.txt .resolve/plan/validation_feedback.txt && printf 'reset'"
+    tool_command="rm -f .resolve/run_state.json .resolve/verify/rubric_result.json .resolve/delivery/push_status.txt .resolve/delivery/pr_url.txt .resolve/design/validation_feedback.txt .resolve/plan/validation_feedback.txt; printf 'reset'"
   ];
 
   // Deterministic, computed exactly ONCE -- closes finding #1 (v1 asked
@@ -483,7 +483,7 @@ digraph idea_to_pr {
   // output the agent misreads, without a PR actually existing on GitHub.
   ExtractPRUrl [
     shape=parallelogram, label="Extract PR URL (claimed)",
-    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt)\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
+    tool_command="#!/bin/sh\nset -e\nurl=$(cat .resolve/delivery/pr_url.txt 2>/dev/null || printf '')\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
     parse_json="true"
   ];
 
@@ -540,31 +540,58 @@ digraph idea_to_pr {
   ];
 
   // ═══════════════════════════════════════════════ EDGES ═══════════════════════════════════════════════
+  //
+  // FAIL-NET AUDIT (added after a live run on resolve.amplifier.ms hit this
+  // exact bug): RUBRIC.md foot-gun #2 -- "FAIL doesn't traverse plain edges.
+  // It only routes via condition="outcome=fail" edges, runs_on=always|failure
+  // nodes, or retry_target." Every "plain" (unconditioned) edge below had
+  // this bug: if the SOURCE node's own execution fails outright (exhausts
+  // its retries -- "Max retries exceeded", not "succeeded but wrote bad
+  // content"), there was no edge for the engine to route on, and the whole
+  // pipeline hard-fails with error_type=no_matching_edge. This was caught
+  // live: instance 9da59c1af6fb failed exactly this way at AcceptDesign
+  // after 3 attempts. AcceptDesign is not special -- EVERY node below with a
+  // single plain edge had the identical latent bug (v1 had it too, e.g. its
+  // own `AcceptDesign -> Plan;`). Fixed by adding a `condition="outcome=fail"`
+  // edge alongside every plain edge, reusing the SAME downstream target --
+  // in every case that target is already a deterministic gate (or Report)
+  // that gracefully handles "missing/absent evidence" via file-existence
+  // checks, so no new nodes are needed, just the missing wall of the basin.
+  // This mirrors the ONE place this file already did this correctly:
+  // CheckPROpened's pre-existing `-> PrRetryCheck [condition="outcome=fail"]`
+  // safety net (RUBRIC.md 3.2) -- that was the proof this pattern works: it
+  // just wasn't applied everywhere else it needed to be.
 
   Start          -> ResetRunState;
   ResetRunState  -> ComputeRunPaths;
+  ResetRunState  -> ComputeRunPaths [condition="outcome=fail"];
   ComputeRunPaths -> AcceptDesign;
+  ComputeRunPaths -> AcceptDesign [condition="outcome=fail"];
 
   // --- Phase 1 loop: AcceptDesign is a genuine (if low-judgment) LLM node.
   // v1 left it acyclic with zero gate -- a three-question-test failure at
   // phase granularity even though the WHOLE graph had a cycle elsewhere.
   // Now: cheap deterministic gate + small bounded retry. ---
   AcceptDesign     -> VerifyDesignDoc;
+  AcceptDesign     -> VerifyDesignDoc [condition="outcome=fail"];
   VerifyDesignDoc  -> Plan             [condition="context.tool.last_line=ok", weight="2", label="design doc verified"];
   VerifyDesignDoc  -> DesignRetryCheck [condition="context.tool.last_line=fail", label="design doc missing/malformed"];
   DesignRetryCheck -> AcceptDesign     [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_design_retries)"];
   DesignRetryCheck -> DesignBlocked    [condition="context.tool.last_line=retry_exhausted", label="backstop tripped"];
   DesignBlocked    -> Report;
+  DesignBlocked    -> Report [condition="outcome=fail"];
 
   // --- Phase 2 loop: same pattern for Plan -- its output is the
   // DEFINITION OF DONE the entire build loop below converges against, so a
   // malformed rubric here is higher-stakes than a malformed design doc. ---
   Plan            -> ValidateRubric;
+  Plan            -> ValidateRubric [condition="outcome=fail"];
   ValidateRubric  -> Implement       [condition="context.tool.last_line=ok", weight="2", label="rubric schema verified"];
   ValidateRubric  -> PlanRetryCheck  [condition="context.tool.last_line=fail", label="rubric malformed/incomplete"];
   PlanRetryCheck  -> Plan            [condition="context.tool.last_line=retry_ok", loop_restart="true", label="retry (backstop max $max_plan_retries)"];
   PlanRetryCheck  -> PlanBlocked     [condition="context.tool.last_line=retry_exhausted", label="backstop tripped"];
   PlanBlocked     -> Report;
+  PlanBlocked     -> Report [condition="outcome=fail"];
 
   // --- Phase 3: Build/verify loop (visible at root level). SelfEvaluate
   // gets its own thread_id -- isolates the judge from the generator's own
@@ -574,7 +601,9 @@ digraph idea_to_pr {
   // not just throughput -- applies just as much to a single judge as to a
   // fan-out of many). ---
   Implement      -> SelfEvaluate            [thread_id="judge-thread"];
+  Implement      -> SelfEvaluate            [condition="outcome=fail", thread_id="judge-thread"];
   SelfEvaluate   -> CheckRubric;
+  SelfEvaluate   -> CheckRubric             [condition="outcome=fail"];
   CheckRubric    -> ExtractVerdictMet   [condition="context.tool.last_line=pass", weight="2", label="rubric met"];
   CheckRubric    -> ClassifyFailure     [condition="context.tool.last_line=fail", label="rubric unmet"];
 
@@ -590,38 +619,50 @@ digraph idea_to_pr {
   PlanRevisionCheck -> RevisePlan        [condition="context.tool.last_line=revise_ok", label="revise (backstop max $max_plan_revisions)"];
   PlanRevisionCheck -> PlanDefectBlocked [condition="context.tool.last_line=revise_exhausted", label="revision backstop tripped -- needs a human"];
   RevisePlan        -> Implement         [loop_restart="true"];   // re-attempt against the corrected spec
+  RevisePlan        -> Implement         [condition="outcome=fail", loop_restart="true"];
   PlanDefectBlocked -> Report;
+  PlanDefectBlocked -> Report            [condition="outcome=fail"];
 
   CheckFixRounds -> Fix                     [condition="context.tool.last_line=fix_ok",       label="fix round (backstop max $max_fix_rounds)"];
   CheckFixRounds -> ExtractVerdictEscalated [condition="context.tool.last_line=fix_exhausted", label="backstop tripped -- escalate"];
   Fix            -> SelfEvaluate            [loop_restart="true", thread_id="judge-thread"];    // <-- THE LOOP
+  Fix            -> SelfEvaluate            [condition="outcome=fail", loop_restart="true", thread_id="judge-thread"];
 
   // --- Rubric met -> deliver PR; escalated -> skip straight to Report ---
   ExtractVerdictMet       -> CommitPush [weight="2"];
   ExtractVerdictEscalated -> Report;
+  ExtractVerdictEscalated -> Report     [condition="outcome=fail"];
 
   // --- Delivery sequence: evidence-gated, AND now with a bounded
   // corrective loop on each gate instead of a bare fail-and-give-up (closes
   // the flow-vs-attractor gap: v1's CheckPush/CheckPROpened could DETECT a
   // bad day but had no dynamic that ever pulled it back). ---
   CommitPush     -> CheckPush;
+  CommitPush     -> CheckPush      [condition="outcome=fail"];
   CheckPush      -> OpenPR         [condition="context.tool.last_line=pushed", weight="2"];
   CheckPush      -> PushRetryCheck [condition="context.tool.last_line=push_failed"];
   PushRetryCheck -> RetryPush      [condition="context.tool.last_line=retry_ok", label="retry (backstop max $max_push_retries)"];
   PushRetryCheck -> Failed         [condition="context.tool.last_line=retry_exhausted"];
   RetryPush      -> CheckPush      [loop_restart="true"];
+  RetryPush      -> CheckPush      [condition="outcome=fail", loop_restart="true"];
 
   OpenPR        -> ExtractPRUrl;
+  OpenPR        -> ExtractPRUrl [condition="outcome=fail"];
   ExtractPRUrl  -> CheckPROpened;
+  ExtractPRUrl  -> CheckPROpened [condition="outcome=fail"];
   CheckPROpened -> MarkOpened   [condition="context.tool.last_line=verified", weight="2"];
   CheckPROpened -> PrRetryCheck [condition="context.tool.last_line=not_verified"];
-  CheckPROpened -> PrRetryCheck [condition="outcome=fail"];  // safety net: tool_command crashed entirely (RUBRIC.md 3.2)
+  CheckPROpened -> PrRetryCheck [condition="outcome=fail"];  // safety net: tool_command crashed entirely (RUBRIC.md 3.2) -- the ORIGINAL instance of this pattern in this file, proof it works.
   PrRetryCheck  -> RetryOpenPR  [condition="context.tool.last_line=retry_ok", label="retry (backstop max $max_pr_retries)"];
   PrRetryCheck  -> Failed       [condition="context.tool.last_line=retry_exhausted"];
   RetryOpenPR   -> ExtractPRUrl [loop_restart="true"];
+  RetryOpenPR   -> ExtractPRUrl [condition="outcome=fail", loop_restart="true"];
 
   MarkOpened    -> Report;
+  MarkOpened    -> Report [condition="outcome=fail"];
   Failed        -> Report;
+  Failed        -> Report [condition="outcome=fail"];
 
   Report -> Exit;
+  Report -> Exit [condition="outcome=fail"];   // a flaky final summarization must never erase an already-earned PR/escalation outcome
 }
