@@ -1,0 +1,76 @@
+// resolve_hello_world.dot
+//
+// Resolve-platform-flavored sibling of pipelines/hello_world/hello_world.dot.
+// Same minimal shape (write -> commit/push -> open PR), but this variant is
+// deliberately NOT portable across engines -- it leans on Amplifier Resolve
+// platform mechanism as much as possible instead of staying engine-agnostic:
+//
+//   - Clone: NOT a pipeline step. Driven by the standard `repo_url`
+//     instantiation param every dot-graph resolver pipeline gets for free,
+//     resolved via the resolver's workspace_spec() before Start ever fires.
+//   - Migrate to Gitea: NOT a pipeline step. workspace_spec() requests a
+//     Gitea sidecar for the instance; the platform mirrors the target repo
+//     into it before the worker container starts. By the time WriteHelloWorld
+//     runs, `origin` already points at the Gitea mirror, not upstream GitHub.
+//   - PR delivery: uses the platform's provider-agnostic
+//     /usr/local/bin/create-pr script (injected into every worker container
+//     by amplifier-resolve's git_provider.py) instead of raw `gh`/`curl`.
+//     It resolves GitHub-vs-Gitea destination and auth (GitHub App
+//     installation token first, PAT fallback) from the container's
+//     GIT_PROVIDER / GIT_PROVIDER_HOST env -- this pipeline never touches
+//     credentials directly.
+//
+// Use pipelines/hello_world/hello_world.dot instead if you need this pipeline
+// to run outside an Amplifier Resolve worker container (create-pr will not
+// exist there).
+//
+// Context inputs:
+//   $repo   - target repo slug (owner/name), same convention as hello_world.
+//
+// Context outputs:
+//   delivery.pr_url  - PR URL, set by DeliverPRResolve subgraph
+//   delivery.result  - "opened" | "failed"
+
+digraph resolve_hello_world {
+  graph [
+    label="Resolve Hello World -- minimal write-a-file-and-open-a-PR demo via the Amplifier Resolve platform",
+    goal="$repo",
+    rankdir=LR,
+    default_max_retry=2,
+    default_fidelity="summary:high",
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; }"
+  ];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // One box node does the entire "work": create a branch and write the
+  // file. Deliberately not split further -- mirrors hello_world.dot's own
+  // rationale: this pipeline exists to be trivial, not to demonstrate VDD.
+  WriteHelloWorld [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Write hello_world.txt",
+    prompt="Create a new branch off the repo's default branch named hello-world-resolve-<short timestamp, e.g. hello-world-resolve-20260729143000>. On that branch, write a file named hello_world.txt at the repo root with exactly this content:\n\nHello, World!\n\nThis file was created by the resolve_hello_world pipeline in kenotron-ms/attractor-pipelines -- a minimal end-to-end demo that leans on the Amplifier Resolve platform's own clone/Gitea-migrate/create-pr mechanism as much as possible.\n\nDo NOT commit yet -- the next step handles staging, commit, push, and opening the PR via the platform's create-pr script. Print the single line: hello_world_written"
+  ];
+
+  // Reuses the same shape=folder delegation pattern as hello_world.dot's
+  // DeliverPR, but the subgraph itself swaps the portable gh/curl delivery
+  // mechanism for the platform's create-pr script.
+  DeliverPRResolve [
+    shape=folder, label="Deliver PR (via platform create-pr)",
+    dot_file="subgraphs/deliver_pr_resolve.dot",
+    outputs="delivery.pr_url,delivery.result"
+  ];
+
+  Report [
+    shape=box, goal_gate=true, fidelity="summary:high",
+    label="Report",
+    prompt="Report the outcome: if ${delivery.result} is 'opened', state the PR URL (${delivery.pr_url}) plainly. If it's 'failed', say so plainly and do not claim success. Print the single line: reported"
+  ];
+
+  Start            -> WriteHelloWorld;
+  WriteHelloWorld  -> DeliverPRResolve;
+  DeliverPRResolve -> Report [condition="context.delivery.result=opened", weight="2"];
+  DeliverPRResolve -> Report [condition="context.delivery.result=failed"];
+  Report           -> Exit;
+}

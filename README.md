@@ -35,6 +35,39 @@ Point the attractor bundle at it via:
 git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/hello_world/hello_world.dot
 ```
 
+## Pipeline: resolve hello world
+
+`pipelines/resolve_hello_world/resolve_hello_world.dot` — a sibling of
+`hello_world.dot` with the same minimal shape (write → commit/push → open
+PR), but deliberately **not** portable across engines: it leans on
+Amplifier Resolve platform mechanism as much as possible instead of staying
+engine-agnostic.
+
+- **Clone** and **migrate to Gitea** are not pipeline steps — both are
+  handled automatically by the platform (`workspace_spec()` + Gitea sidecar
+  mirroring) before the pipeline's `Start` node ever fires.
+- **PR delivery** goes through the platform's provider-agnostic
+  `/usr/local/bin/create-pr` script (injected into every worker container)
+  instead of raw `gh`/`curl` — it resolves GitHub-vs-Gitea destination and
+  auth (GitHub App token first, PAT fallback) from container env, so the
+  pipeline never touches credentials directly.
+
+Use `hello_world.dot` instead if this pipeline needs to run outside an
+Amplifier Resolve worker container (`create-pr` will not exist there).
+
+```
+pipelines/resolve_hello_world/
+  resolve_hello_world.dot         # entry pipeline
+  subgraphs/
+    deliver_pr_resolve.dot          # commit, push, open PR via create-pr
+```
+
+Point the attractor bundle at it via:
+
+```
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/resolve_hello_world/resolve_hello_world.dot
+```
+
 ## Pipeline: idea-to-shipped SDLC pipeline
 
 `pipelines/idea_to_shipped/idea_to_shipped.dot` — a full "idea to shipped"

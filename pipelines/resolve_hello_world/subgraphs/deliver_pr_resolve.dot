@@ -1,0 +1,77 @@
+// deliver_pr_resolve.dot
+//
+// Resolve-platform-flavored sibling of pipelines/hello_world/subgraphs/deliver_pr.dot.
+// Same shape (commit/push -> open PR -> independently verify), but swaps the
+// portable gh/curl delivery mechanism for the Amplifier Resolve platform's
+// provider-agnostic /usr/local/bin/create-pr script -- this subgraph is
+// Resolve-worker-container-specific by design (see resolve_hello_world.dot's
+// header comment for why).
+//
+// Required context variables: $repo (owner/name to open the PR against)
+// Context outputs: delivery.pr_url, delivery.result ("opened"|"failed")
+
+digraph deliver_pr_resolve {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  CommitPush [
+    shape=box, goal_gate=true, fidelity="full",
+    label="Commit + Push",
+    prompt="Stage all changes, write a conventional commit message summarizing the work, commit, and push the current branch to origin (the Gitea mirror -- already the platform's `origin` remote by the time this pipeline runs). After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: pushed"
+  ];
+
+  CommitPush -> CheckPush;
+
+  CheckPush [
+    shape=parallelogram, label="Check Push",
+    tool_command="#!/bin/sh\nset -e\nif [ -f .resolve/delivery/push_status.txt ] && tail -1 .resolve/delivery/push_status.txt | grep -q pushed; then\n  printf 'pushed'\nelse\n  printf 'push_failed'\nfi"
+  ];
+
+  // Deterministic delivery via the platform's own tooling -- no LLM node
+  // needed here at all, unlike deliver_pr.dot's OpenPR (which needs an LLM
+  // to construct a PR body/pick a title). create-pr already resolves
+  // GitHub-vs-Gitea destination and auth (App-token-first, PAT-fallback)
+  // from container env, so this is a plain deterministic tool_command.
+  OpenPRResolve [
+    shape=parallelogram, label="Open PR (platform create-pr)",
+    tool_command="#!/bin/sh\nset -e\nbranch=$(git rev-parse --abbrev-ref HEAD)\nurl=$(/usr/local/bin/create-pr --title 'resolve_hello_world: add hello_world.txt' --body 'Opened by the resolve_hello_world pipeline (write -> commit -> push -> create-pr), via the Amplifier Resolve platform create-pr script.' --head \"$branch\" --base main)\nmkdir -p .resolve/delivery\nprintf '%s' \"$url\" > .resolve/delivery/pr_url.txt\nprintf '{\\\"delivery.pr_url\\\": \\\"%s\\\"}' \"$url\"",
+    parse_json="true"
+  ];
+
+  OpenPRResolve -> CheckPROpened [condition="context.tool.last_line=pushed", weight="2"];
+  CheckPush -> OpenPRResolve [condition="context.tool.last_line=pushed", weight="2"];
+  CheckPush -> Failed        [condition="context.tool.last_line=push_failed"];
+
+  // Independent verification that create-pr's claimed side effect (a real
+  // PR) actually happened -- mirrors deliver_pr.dot's CheckPROpened
+  // rationale: a tool_command emitting a URL string is not itself proof a
+  // PR exists. Uses gh/curl against $repo (the real destination create-pr
+  // resolved to) as the independent check, same as deliver_pr.dot.
+  CheckPROpened [
+    shape=parallelogram, label="Verify PR Actually Opened",
+    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+  ];
+
+  CheckPROpened -> MarkOpened     [condition="context.tool.last_line=verified", weight="2"];
+  CheckPROpened -> Failed         [condition="context.tool.last_line=not_verified"];
+  CheckPROpened -> Failed         [condition="outcome=fail"];  // safety net: tool_command crashed entirely
+
+  // Only set delivery.result="opened" once CheckPROpened has independently
+  // confirmed the PR is real -- mirrors deliver_pr.dot's own rule: this is
+  // the only place in the subgraph allowed to claim success.
+  MarkOpened [
+    shape=parallelogram, label="Mark Opened (verified)",
+    tool_command="printf '{\\\"delivery.result\\\": \\\"opened\\\"}'",
+    parse_json="true"
+  ];
+  MarkOpened -> Exit;
+
+  Failed [
+    shape=parallelogram, label="Mark Failed",
+    tool_command="printf '{\\\"delivery.result\\\": \\\"failed\\\"}'",
+    parse_json="true"
+  ];
+  Failed -> Exit;
+}
