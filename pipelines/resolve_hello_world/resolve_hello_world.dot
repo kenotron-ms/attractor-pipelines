@@ -44,13 +44,32 @@ digraph resolve_hello_world {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
-  // One box node does the entire "work": create a branch and write the
-  // file. Deliberately not split further -- mirrors hello_world.dot's own
-  // rationale: this pipeline exists to be trivial, not to demonstrate VDD.
+  // Deterministic tool node -- creates the branch and writes the file via
+  // a real shell command, not LLM judgment.
+  //
+  // This was previously a `shape=box, goal_gate=true` LLM node whose prompt
+  // only asked for a prose confirmation ("Print the single line:
+  // hello_world_written"). Per the attractor engine's fail-closed goal-gate
+  // contract (specs/EXTENSIONS.md Sec25; context/engine-semantics.md Sec5),
+  // a goal_gate=true node MUST provide an explicit verdict (a
+  // `report_outcome` call, JSON, or a tool node's own exit code) -- plain
+  // prose falls through to the RETRY path no matter what it says. That LLM
+  // node retried out (default_max_retry=2 => 3 attempts) and then hit the
+  // "FAIL does not traverse plain edges" rule (engine-semantics.md Sec2
+  // #2: WriteHelloWorld -> DeliverPRResolve was an unconditional edge),
+  // producing PIPELINE_ERROR error_type=no_matching_edge -- observed
+  // directly on a real staging run (instance 3c3689b633a8).
+  //
+  // Fixed by moving goal_gate onto a parallelogram/tool node whose exit
+  // code IS the verdict (engine-semantics.md Sec5, the `is_explicit` rule),
+  // using the canonical `cmd && printf ok || printf fail` idiom routed on
+  // context.tool.last_line (engine-semantics.md Sec3). Literal shell `$` is
+  // escaped as `$$` per the engine's own substitution rule (Sec4) so the
+  // pipeline's variable-expansion pass doesn't touch it.
   WriteHelloWorld [
-    shape=box, goal_gate=true, fidelity="summary:high",
+    shape=parallelogram, goal_gate=true,
     label="Write hello_world.txt",
-    prompt="Create a new branch off the repo's default branch named hello-world-resolve-<short timestamp, e.g. hello-world-resolve-20260729143000>. On that branch, write a file named hello_world.txt at the repo root with exactly this content:\n\nHello, World!\n\nThis file was created by the resolve_hello_world pipeline in kenotron-ms/attractor-pipelines -- a minimal end-to-end demo that leans on the Amplifier Resolve platform's own clone/Gitea-migrate/create-pr mechanism as much as possible.\n\nDo NOT commit yet -- the next step handles staging, commit, push, and opening the PR via the platform's create-pr script. Print the single line: hello_world_written"
+    tool_command="BRANCH=hello-world-resolve-$$(date -u +%Y%m%d%H%M%S); git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git checkout -b \"$$BRANCH\" >/dev/null 2>&1; printf 'Hello, World!\n\nThis file was created by the resolve_hello_world pipeline in kenotron-ms/attractor-pipelines -- a minimal end-to-end demo that leans on the Amplifier Resolve platform (clone / Gitea-migrate / create-pr) mechanism as much as possible.\n' > hello_world.txt; test -f hello_world.txt && printf ok || printf fail"
   ];
 
   // Reuses the same shape=folder delegation pattern as hello_world.dot's
@@ -62,14 +81,21 @@ digraph resolve_hello_world {
     outputs="delivery.pr_url,delivery.result"
   ];
 
+  // Plain reporting step -- no goal to gate here (nothing downstream
+  // depends on this node's own verdict; Report -> Exit is unconditional),
+  // so goal_gate is correctly omitted. Per engine-semantics.md Sec5,
+  // ordinary (non-goal_gate) box nodes get SUCCESS on prose completion --
+  // this node's prior goal_gate=true was the same misapplied pattern as
+  // WriteHelloWorld's, just never reached by a real run (yet).
   Report [
-    shape=box, goal_gate=true, fidelity="summary:high",
+    shape=box, fidelity="summary:high",
     label="Report",
-    prompt="Report the outcome: if ${delivery.result} is 'opened', state the PR URL (${delivery.pr_url}) plainly. If it's 'failed', say so plainly and do not claim success. Print the single line: reported"
+    prompt="Report the outcome: if ${delivery.result} is 'opened', state the PR URL (${delivery.pr_url}) plainly. If it's 'failed', say so plainly and do not claim success."
   ];
 
   Start            -> WriteHelloWorld;
-  WriteHelloWorld  -> DeliverPRResolve;
+  WriteHelloWorld  -> DeliverPRResolve [condition="context.tool.last_line=ok"];
+  WriteHelloWorld  -> Exit             [condition="context.tool.last_line=fail"];
   DeliverPRResolve -> Report [condition="context.delivery.result=opened", weight="2"];
   DeliverPRResolve -> Report [condition="context.delivery.result=failed"];
   Report           -> Exit;
