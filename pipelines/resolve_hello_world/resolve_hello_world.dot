@@ -30,6 +30,40 @@
 // Context outputs:
 //   delivery.pr_url  - PR URL, set by DeliverPRResolve subgraph
 //   delivery.result  - "opened" | "failed"
+//
+// Submitting this job correctly (REQUIRED for real PR delivery):
+//
+// PR delivery only works if the RESOLVE INSTANCE ITSELF is submitted with
+// two specific instantiation params, on top of `repo_url` -- this is a
+// platform-level requirement enforced by amplifier-resolve's
+// POST /internal/instances/{id}/repos/{repo}/promote/pr endpoint, not
+// something this pipeline can request after the instance is already
+// running:
+//
+//   delivery_mode: "promote"
+//     Without this, the promote/pr endpoint refuses with HTTP 409
+//     "Promotion was not requested" (routes/internal.py).
+//   branch_name: "resolve/<repo-name>-<first-8-chars-of-instance-id>"
+//     Optional -- if omitted, the platform derives this exact value
+//     itself as the expected branch. Supplying it explicitly is only
+//     useful if you need to know the branch name before the instance
+//     starts. If the branch actually pushed doesn't match this pattern
+//     exactly, the endpoint 422s with "Promotion branch does not match
+//     submitted instance."
+//
+// In natural language, correctly submitting this job looks like:
+//
+//   "Submit a dot-graph job using pipeline
+//   git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/resolve_hello_world/resolve_hello_world.dot,
+//   against repo_url=<target-repo-https-url>, with delivery_mode=promote.
+//   Let the platform derive branch_name itself unless you have a reason
+//   to pin it."
+//
+// See resolve_hello_world.md (this folder) for the full walkthrough,
+// worked examples, and exact remote.py / amplifier-resolve CLI
+// invocations. This pipeline is meant to be the reference example for
+// how a remote dot-graph pipeline delivers a real GitHub PR -- read that
+// doc before adapting this pattern into a new pipeline.
 
 digraph resolve_hello_world {
   graph [
