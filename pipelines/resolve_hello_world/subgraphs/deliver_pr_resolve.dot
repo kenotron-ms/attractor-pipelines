@@ -1,11 +1,33 @@
 // deliver_pr_resolve.dot
 //
 // Resolve-platform-flavored sibling of pipelines/hello_world/subgraphs/deliver_pr.dot.
-// Same shape (commit/push -> open PR -> independently verify), but swaps the
-// portable gh/curl delivery mechanism for the Amplifier Resolve platform's
-// provider-agnostic /usr/local/bin/create-pr script -- this subgraph is
-// Resolve-worker-container-specific by design (see resolve_hello_world.dot's
-// header comment for why).
+// Same shape (commit/push -> open PR), but delivers via the Amplifier Resolve
+// platform's internal promote/pr endpoint instead of the portable gh/curl
+// mechanism -- this subgraph is Resolve-worker-container-specific by design
+// (see resolve_hello_world.dot's header comment for why).
+//
+// PR delivery mechanism (OpenPRResolve): POSTs to
+// {platform_url}/internal/instances/{instance_id}/repos/{repo}/promote/pr,
+// reading platform_url/instance_id/sub_container_token from
+// /project/.resolve/config.json (never env vars, never argv). The SERVER
+// re-materializes the branch this subgraph already pushed to the Gitea
+// sidecar (git fetch + checkout -B against the Gitea origin -- this only
+// works because CommitPush/CheckPush pushed it there first), force-pushes
+// it to the real GitHub repo with its own credentials, and opens the PR.
+// This subgraph never calls gh/create-pr, and never touches GitHub
+// credentials directly. Modeled on amplifier-resolver-dot-graph's
+// subgraphs/deliver_promote.dot (CallPromotePR), the canonical, tested
+// reference for this exact mechanism -- used in production by that repo's
+// implement.dot, dev_machine.dot (as the DEFAULT non-interactive PR path),
+// and expert_builder.dot.
+//
+// IMPORTANT: promote/pr requires the RESOLVE INSTANCE to have been
+// submitted with delivery_mode="promote", and the branch pushed here MUST
+// match either an explicitly-submitted branch_name param or the platform's
+// own default resolve/<repo-name>-<instance_id[:8]> (see
+// resolve_hello_world.dot's header and resolve_hello_world.md for the full
+// submission recipe). Get either of those wrong and this subgraph fails
+// with a 409 or 422 from the endpoint, not a bug in this file.
 //
 // Required context variables: $repo (owner/name to open the PR against)
 // Context outputs: delivery.pr_url, delivery.result ("opened"|"failed")
@@ -37,6 +59,8 @@ digraph deliver_pr_resolve {
     prompt="Stage all changes, write a conventional commit message summarizing the work, commit, and push the current branch to origin (the Gitea mirror -- already the platform's `origin` remote by the time this pipeline runs). After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt."
   ];
 
+  Start -> CommitPush;
+
   CommitPush -> CheckPush;
 
   CheckPush [
@@ -44,71 +68,32 @@ digraph deliver_pr_resolve {
     tool_command="#!/bin/sh\nset -e\nif [ -f .resolve/delivery/push_status.txt ] && tail -1 .resolve/delivery/push_status.txt | grep -q pushed; then\n  printf 'pushed'\nelse\n  printf 'push_failed'\nfi"
   ];
 
-  // Deterministic delivery via the platform's own tooling -- no LLM node
-  // needed here at all, unlike deliver_pr.dot's OpenPR (which needs an LLM
-  // to construct a PR body/pick a title). create-pr already resolves
-  // GitHub-vs-Gitea destination and auth (App-token-first, PAT-fallback)
-  // from container env, so this is a plain deterministic tool_command.
+  // Calls the platform's internal promote/pr endpoint -- see this file's
+  // header comment for the full mechanism and the amplifier-resolver-
+  // dot-graph reference (subgraphs/deliver_promote.dot's CallPromotePR).
+  // parse_json="true" merges delivery.pr_url and delivery.result directly
+  // from this node's own response, matching the reference's design: the
+  // promote/pr response is a platform-side (not a self-reported) verdict,
+  // so no separate re-verification step is needed downstream (this replaces
+  // what were previously two extra nodes -- CheckPROpened and MarkOpened --
+  // removed in this revision; see git history for why they existed and
+  // what was wrong with them).
   OpenPRResolve [
-    shape=parallelogram, label="Open PR (platform create-pr)",
-    tool_command="#!/bin/sh\nset -e\nbranch=$(git rev-parse --abbrev-ref HEAD)\nurl=$(/usr/local/bin/create-pr --title 'resolve_hello_world: add hello_world.txt' --body 'Opened by the resolve_hello_world pipeline (write -> commit -> push -> create-pr), via the Amplifier Resolve platform create-pr script.' --head \"$branch\" --base main)\nmkdir -p .resolve/delivery\nprintf '%s' \"$url\" > .resolve/delivery/pr_url.txt\nprintf '{\\\"delivery.pr_url\\\": \\\"%s\\\"}' \"$url\"",
-    parse_json="true"
+    shape=parallelogram, label="Open PR (platform promote/pr)",
+    parse_json="true",
+    tool_command="#!/bin/sh\nset -e\ncat > /tmp/call_promote_pr.py <<'PYEOF2'\nimport json, os, subprocess, sys, urllib.error, urllib.request\nwork_dir = '/project/workspace'\nwith open('/project/.resolve/config.json') as f:\n    cfg = json.load(f)\nplatform_url = cfg.get('platform_url', '').rstrip('/')\ninstance_id = cfg.get('instance_id', '')\nsub_container_token = cfg.get('sub_container_token', '')\nif not platform_url or not instance_id or not sub_container_token:\n    print('ERROR: platform_url/instance_id/sub_container_token missing from config.json', file=sys.stderr)\n    sys.exit(1)\nraw_url = subprocess.run(['git', '-C', work_dir, 'remote', 'get-url', 'origin'], check=True, capture_output=True, text=True).stdout.strip()\nurl = raw_url\nif '://' in url and '@' in url:\n    scheme_end = url.index('://') + 3\n    at_pos = url.index('@', scheme_end)\n    url = url[:scheme_end] + url[at_pos + 1:]\nif url.endswith('.git'):\n    url = url[:-4]\nrepo_name = url.rstrip('/').split('/')[-1]\nbranch = subprocess.run(['git', '-C', work_dir, 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, capture_output=True, text=True).stdout.strip()\npr_title = 'resolve_hello_world: add hello_world.txt'\npr_body = 'Opened by the resolve_hello_world pipeline (write -> commit -> push -> promote/pr), via the Amplifier Resolve platform internal promote/pr endpoint.'\napi_url = platform_url + '/internal/instances/' + instance_id + '/repos/' + repo_name + '/promote/pr'\nprint('[promote-pr] POST ' + api_url + ' branch=' + branch, file=sys.stderr)\npayload = json.dumps({'pr_title': pr_title, 'pr_body': pr_body, 'branch': branch, 'target_branch': 'main'}).encode()\nheaders = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sub_container_token}\nreq = urllib.request.Request(api_url, data=payload, headers=headers, method='POST')\nclass _NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):\n        return None\ntry:\n    opener = urllib.request.build_opener(_NoRedirect())\n    with opener.open(req) as resp:\n        result = json.loads(resp.read())\n    pr_url = result.get('pr_url') or ''\n    if not result.get('success', False) or not pr_url:\n        print('ERROR: promote/pr did not create a PR', file=sys.stderr)\n        sys.exit(1)\n    print('[promote-pr] created: ' + pr_url, file=sys.stderr)\n    print(json.dumps({'delivery.pr_url': pr_url, 'delivery.result': 'opened'}))\nexcept urllib.error.HTTPError as e:\n    print('ERROR: promote/pr API returned ' + str(e.code), file=sys.stderr)\n    sys.exit(1)\nexcept Exception:\n    print('ERROR: promote/pr failed', file=sys.stderr)\n    sys.exit(1)\nPYEOF2\n/opt/uv-tools/amplifier/bin/python /tmp/call_promote_pr.py"
   ];
 
   CheckPush -> OpenPRResolve [condition="context.tool.last_line=pushed", weight="2"];
   CheckPush -> Failed        [condition="context.tool.last_line=push_failed"];
 
-  // Fixed: the prior edge here was `condition="context.tool.last_line=pushed"`
-  // -- checking the STALE token left over from CheckPush, not anything about
-  // OpenPRResolve's own result. Confirmed via the actual tool handler source
-  // (handlers/tool.py): a successful tool node ALWAYS overwrites
-  // context.tool.last_line to its own last stdout line -- here, the JSON
-  // blob OpenPRResolve prints for parse_json, never the literal string
-  // "pushed". That made this edge dead on every real successful run.
-  //
-  // Fix: a plain (unconditional) edge is the correct gate here -- FAIL is
-  // fail-fast and does not traverse plain edges (engine-semantics.md Sec2
-  // #2), so OpenPRResolve's own exit code is already an implicit
-  // outcome=success gate (dot-reference.md's documented pattern). The
-  // explicit `outcome=fail` edge below (matching this file's own existing
-  // CheckPROpened -> Failed safety-net convention) closes the failure path
-  // that previously had no route at all.
-  OpenPRResolve -> CheckPROpened;
-  OpenPRResolve -> Failed       [condition="outcome=fail"];
-
-  // Independent verification that create-pr's claimed side effect (a real
-  // PR) actually happened -- mirrors deliver_pr.dot's CheckPROpened
-  // rationale: a tool_command emitting a URL string is not itself proof a
-  // PR exists. Uses gh/curl against $repo (the real destination create-pr
-  // resolved to) as the independent check, same as deliver_pr.dot.
-  //
-  // Fixed: `$delivery_pr_url` (underscore) matched no real context key --
-  // OpenPRResolve's parse_json sets the literal dotted key "delivery.pr_url"
-  // (confirmed via handlers/tool.py: context.set(key, value) uses the raw
-  // JSON key as-is). The engine's substitution pass (engine-semantics.md
-  // Sec4: "$key and ${key} resolve, including dotted keys") left the
-  // unmatched `$delivery_pr_url` token as literal text, so the shell saw an
-  // always-unset variable, `num` was always empty, and this gate always
-  // printed 'not_verified' -- even when the PR was created successfully.
-  // Corrected to `$delivery.pr_url`, matching the actual key.
-  CheckPROpened [
-    shape=parallelogram, label="Verify PR Actually Opened",
-    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery.pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
-  ];
-
-  CheckPROpened -> MarkOpened     [condition="context.tool.last_line=verified", weight="2"];
-  CheckPROpened -> Failed         [condition="context.tool.last_line=not_verified"];
-  CheckPROpened -> Failed         [condition="outcome=fail"];  // safety net: tool_command crashed entirely
-
-  // Only set delivery.result="opened" once CheckPROpened has independently
-  // confirmed the PR is real -- mirrors deliver_pr.dot's own rule: this is
-  // the only place in the subgraph allowed to claim success.
-  MarkOpened [
-    shape=parallelogram, label="Mark Opened (verified)",
-    tool_command="printf '{\\\"delivery.result\\\": \\\"opened\\\"}'",
-    parse_json="true"
-  ];
-  MarkOpened -> Exit;
+  // OpenPRResolve's own exit code is the goal here -- a plain edge only
+  // traverses on SUCCESS (FAIL is fail-fast, engine-semantics.md Sec2 #2),
+  // so this is already an implicit outcome=success gate. The explicit
+  // outcome=fail edge below covers a genuine promote/pr failure (wrong
+  // branch name, delivery_mode not set, network/API error, etc.).
+  OpenPRResolve -> Exit;
+  OpenPRResolve -> Failed [condition="outcome=fail"];
 
   Failed [
     shape=parallelogram, label="Mark Failed",
