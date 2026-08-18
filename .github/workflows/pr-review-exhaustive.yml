@@ -46,7 +46,7 @@ jobs:
       - uses: microsoft/amplifier-app-actions@main
         with:
           # Fetch the sample pipeline straight from this repo — no local copy.
-          attractor_source: git+https://github.com/kenotron-ms/dot-graph-samples@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
+          attractor_source: git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/pr-review-exhaustive/pr-review-exhaustive.dot
         env:
           # Provider auth for the anthropic model set in the graph's model_stylesheet.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
