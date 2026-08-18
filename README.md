@@ -58,6 +58,7 @@ Amplifier Resolve worker container (`create-pr` will not exist there).
 ```
 pipelines/resolve_hello_world/
   resolve_hello_world.dot         # entry pipeline
+  resolve_hello_world.md          # required reading: how to SUBMIT this job correctly
   subgraphs/
     deliver_pr_resolve.dot          # commit, push, open PR via create-pr
 ```
@@ -67,6 +68,14 @@ Point the attractor bundle at it via:
 ```
 git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/resolve_hello_world/resolve_hello_world.dot
 ```
+
+**Before submitting a job for this pipeline, read
+[`pipelines/resolve_hello_world/resolve_hello_world.md`](pipelines/resolve_hello_world/resolve_hello_world.md)**
+-- real PR delivery requires two instantiation params
+(`delivery_mode=promote` + an optional matching `branch_name`) that this
+pipeline cannot request on its own after the instance is already running.
+This is the reference example in this repo for correct remote PR delivery
+via the Amplifier Resolve platform.
 
 ## Pipeline: idea-to-shipped SDLC pipeline
 
