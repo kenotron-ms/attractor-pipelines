@@ -12,17 +12,20 @@
 //     Gitea sidecar for the instance; the platform mirrors the target repo
 //     into it before the worker container starts. By the time WriteHelloWorld
 //     runs, `origin` already points at the Gitea mirror, not upstream GitHub.
-//   - PR delivery: uses the platform's provider-agnostic
-//     /usr/local/bin/create-pr script (injected into every worker container
-//     by amplifier-resolve's git_provider.py) instead of raw `gh`/`curl`.
-//     It resolves GitHub-vs-Gitea destination and auth (GitHub App
-//     installation token first, PAT fallback) from the container's
-//     GIT_PROVIDER / GIT_PROVIDER_HOST env -- this pipeline never touches
-//     credentials directly.
+//   - PR delivery: calls the platform's internal
+//     POST /internal/instances/{id}/repos/{repo}/promote/pr endpoint
+//     (amplifier-resolve's routes/internal.py) instead of `create-pr`/`gh`.
+//     The SERVER re-materializes the branch this pipeline already pushed
+//     to the Gitea sidecar (`git checkout -B <branch> origin/<branch>` --
+//     this only works because the pipeline pushed it first) and force-
+//     pushes it to the real GitHub repo using the platform's own
+//     credentials -- this pipeline never touches GitHub credentials
+//     directly, and never calls `gh`/`create-pr` (which cannot resolve a
+//     Gitea-mirror origin to a real GitHub destination at all).
 //
 // Use pipelines/hello_world/hello_world.dot instead if you need this pipeline
-// to run outside an Amplifier Resolve worker container (create-pr will not
-// exist there).
+// to run outside an Amplifier Resolve worker container (the promote/pr
+// endpoint will not exist there).
 //
 // Context inputs:
 //   $repo   - target repo slug (owner/name), same convention as hello_world.
@@ -78,39 +81,40 @@ digraph resolve_hello_world {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
-  // Deterministic tool node -- creates the branch and writes the file via
-  // a real shell command, not LLM judgment.
+  // Deterministic tool node -- computes the branch name the platform's
+  // promote/pr endpoint expects, creates that branch, and writes the file.
   //
-  // This was previously a `shape=box, goal_gate=true` LLM node whose prompt
-  // only asked for a prose confirmation ("Print the single line:
-  // hello_world_written"). Per the attractor engine's fail-closed goal-gate
-  // contract (specs/EXTENSIONS.md Sec25; context/engine-semantics.md Sec5),
-  // a goal_gate=true node MUST provide an explicit verdict (a
-  // `report_outcome` call, JSON, or a tool node's own exit code) -- plain
-  // prose falls through to the RETRY path no matter what it says. That LLM
-  // node retried out (default_max_retry=2 => 3 attempts) and then hit the
-  // "FAIL does not traverse plain edges" rule (engine-semantics.md Sec2
-  // #2: WriteHelloWorld -> DeliverPRResolve was an unconditional edge),
-  // producing PIPELINE_ERROR error_type=no_matching_edge -- observed
-  // directly on a real staging run (instance 3c3689b633a8).
+  // Branch naming is NOT arbitrary. amplifier-resolve's promote/pr endpoint
+  // (routes/internal.py) requires the pushed branch to exactly match either
+  // an explicitly-submitted `branch_name` instantiation param, or its own
+  // server-computed default `resolve/<repo-name>-<instance_id[:8]>` -- any
+  // other branch name gets a 422 "Promotion branch does not match submitted
+  // instance" later, in the DeliverPRResolve subgraph. Confirmed by reading
+  // routes/internal.py directly (`expected_branch = configured_branch or
+  // f"resolve/{repo_name}-{instance_id[:8]}"`). See resolve_hello_world.md
+  // for the full submission recipe.
   //
-  // Fixed by moving goal_gate onto a parallelogram/tool node whose exit
-  // code IS the verdict (engine-semantics.md Sec5, the `is_explicit` rule),
-  // using the canonical `cmd && printf ok || printf fail` idiom routed on
-  // context.tool.last_line (engine-semantics.md Sec3). Literal shell `$` is
-  // escaped as `$$` per the engine's own substitution rule (Sec4) so the
-  // pipeline's variable-expansion pass doesn't touch it.
+  // Uses tool_env="branch_name" (not $ substitution) to read an optional
+  // submitted branch_name param as a real env var, matching the convention
+  // used throughout this repo's other promote-based subgraphs
+  // (subgraphs/deliver_promote.dot's PushPromoteBranch/CallPromotePR).
+  //
+  // This node is also where the prior goal_gate anti-pattern was fixed
+  // (see git history) -- shape=parallelogram means the exit code IS the
+  // goal_gate verdict (engine-semantics.md Sec5's `is_explicit` rule), no
+  // LLM judgment involved.
   WriteHelloWorld [
     shape=parallelogram, goal_gate=true,
     label="Write hello_world.txt",
-    tool_command="BRANCH=hello-world-resolve-$$(date -u +%Y%m%d%H%M%S); git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git checkout -b \"$$BRANCH\" >/dev/null 2>&1; printf 'Hello, World!\n\nThis file was created by the resolve_hello_world pipeline in kenotron-ms/attractor-pipelines -- a minimal end-to-end demo that leans on the Amplifier Resolve platform (clone / Gitea-migrate / create-pr) mechanism as much as possible.\n' > hello_world.txt; test -f hello_world.txt && printf ok || printf fail"
+    tool_env="branch_name",
+    tool_command="#!/bin/sh\nset -e\ncat > /tmp/write_hello_world.py <<'PYEOF'\nimport json, os, subprocess, sys\nwork_dir = '/project/workspace'\nraw_url = subprocess.run(['git', '-C', work_dir, 'remote', 'get-url', 'origin'], check=True, capture_output=True, text=True).stdout.strip()\nurl = raw_url\nif '://' in url and '@' in url:\n    scheme_end = url.index('://') + 3\n    at_pos = url.index('@', scheme_end)\n    url = url[:scheme_end] + url[at_pos + 1:]\nif url.endswith('.git'):\n    url = url[:-4]\nrepo_name = url.rstrip('/').split('/')[-1]\nbranch_name_env = (os.environ.get('BRANCH_NAME') or '').strip()\nif branch_name_env:\n    branch = branch_name_env\nelse:\n    instance_id = ''\n    try:\n        with open('/project/.resolve/config.json') as f:\n            instance_id = (json.load(f).get('instance_id') or '').strip()\n    except Exception:\n        instance_id = ''\n    branch = ('resolve/' + repo_name + '-' + instance_id[:8]) if instance_id else repo_name\nsubprocess.run(['git', '-C', work_dir, 'checkout', '-B', branch], check=True, stdout=sys.stderr, stderr=sys.stderr)\ncontent = ('Hello, World!\\n\\nThis file was created by the resolve_hello_world pipeline in kenotron-ms/attractor-pipelines -- a minimal end-to-end demo that leans on the Amplifier Resolve platform (clone / Gitea-migrate / promote-pr) mechanism as much as possible.\\n')\nwith open(os.path.join(work_dir, 'hello_world.txt'), 'w') as f:\n    f.write(content)\nok = os.path.isfile(os.path.join(work_dir, 'hello_world.txt'))\nprint('[write-hello-world] branch=' + branch + ' file_written=' + str(ok), file=sys.stderr)\nprint('ok' if ok else 'fail')\nPYEOF\n/opt/uv-tools/amplifier/bin/python /tmp/write_hello_world.py"
   ];
 
   // Reuses the same shape=folder delegation pattern as hello_world.dot's
   // DeliverPR, but the subgraph itself swaps the portable gh/curl delivery
-  // mechanism for the platform's create-pr script.
+  // mechanism for the platform's internal promote/pr endpoint.
   DeliverPRResolve [
-    shape=folder, label="Deliver PR (via platform create-pr)",
+    shape=folder, label="Deliver PR (via platform promote/pr)",
     dot_file="subgraphs/deliver_pr_resolve.dot",
     outputs="delivery.pr_url,delivery.result"
   ];
