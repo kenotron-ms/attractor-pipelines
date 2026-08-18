@@ -16,10 +16,25 @@ digraph deliver_pr_resolve {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
+  // `goal_gate=true` removed -- this was the same misapplied pattern as
+  // resolve_hello_world.dot's original WriteHelloWorld bug: an LLM node
+  // whose only "verdict" was prose ("Print the single line: pushed"), which
+  // the engine's fail-closed goal-gate contract (engine-semantics.md Sec5)
+  // never accepts -- it returns RETRY regardless of what the prose says,
+  // and this node's plain unconditional edge to CheckPush cannot carry a
+  // RETRY/FAIL outcome once retries exhaust (Sec2 #2), producing the same
+  // no_matching_edge failure.
+  //
+  // Per DOT-AUTHORING-GUIDE.md's own doctrine: "goal_gate belongs on
+  // evidence-bearing nodes, not implementation nodes... Attaching it to an
+  // implementation node makes 'the implementer finished' the exit
+  // criterion." CheckPush (below) is the real evidence-bearing gate --
+  // CommitPush is correctly left as an ordinary (non-goal_gate) box node,
+  // which gets SUCCESS on prose completion by design (Sec5).
   CommitPush [
-    shape=box, goal_gate=true, fidelity="full",
+    shape=box, fidelity="full",
     label="Commit + Push",
-    prompt="Stage all changes, write a conventional commit message summarizing the work, commit, and push the current branch to origin (the Gitea mirror -- already the platform's `origin` remote by the time this pipeline runs). After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt. Print the single line: pushed"
+    prompt="Stage all changes, write a conventional commit message summarizing the work, commit, and push the current branch to origin (the Gitea mirror -- already the platform's `origin` remote by the time this pipeline runs). After pushing, run: git rev-parse --abbrev-ref HEAD > .resolve/delivery/push_status.txt && echo pushed >> .resolve/delivery/push_status.txt."
   ];
 
   CommitPush -> CheckPush;
@@ -40,18 +55,45 @@ digraph deliver_pr_resolve {
     parse_json="true"
   ];
 
-  OpenPRResolve -> CheckPROpened [condition="context.tool.last_line=pushed", weight="2"];
   CheckPush -> OpenPRResolve [condition="context.tool.last_line=pushed", weight="2"];
   CheckPush -> Failed        [condition="context.tool.last_line=push_failed"];
+
+  // Fixed: the prior edge here was `condition="context.tool.last_line=pushed"`
+  // -- checking the STALE token left over from CheckPush, not anything about
+  // OpenPRResolve's own result. Confirmed via the actual tool handler source
+  // (handlers/tool.py): a successful tool node ALWAYS overwrites
+  // context.tool.last_line to its own last stdout line -- here, the JSON
+  // blob OpenPRResolve prints for parse_json, never the literal string
+  // "pushed". That made this edge dead on every real successful run.
+  //
+  // Fix: a plain (unconditional) edge is the correct gate here -- FAIL is
+  // fail-fast and does not traverse plain edges (engine-semantics.md Sec2
+  // #2), so OpenPRResolve's own exit code is already an implicit
+  // outcome=success gate (dot-reference.md's documented pattern). The
+  // explicit `outcome=fail` edge below (matching this file's own existing
+  // CheckPROpened -> Failed safety-net convention) closes the failure path
+  // that previously had no route at all.
+  OpenPRResolve -> CheckPROpened;
+  OpenPRResolve -> Failed       [condition="outcome=fail"];
 
   // Independent verification that create-pr's claimed side effect (a real
   // PR) actually happened -- mirrors deliver_pr.dot's CheckPROpened
   // rationale: a tool_command emitting a URL string is not itself proof a
   // PR exists. Uses gh/curl against $repo (the real destination create-pr
   // resolved to) as the independent check, same as deliver_pr.dot.
+  //
+  // Fixed: `$delivery_pr_url` (underscore) matched no real context key --
+  // OpenPRResolve's parse_json sets the literal dotted key "delivery.pr_url"
+  // (confirmed via handlers/tool.py: context.set(key, value) uses the raw
+  // JSON key as-is). The engine's substitution pass (engine-semantics.md
+  // Sec4: "$key and ${key} resolve, including dotted keys") left the
+  // unmatched `$delivery_pr_url` token as literal text, so the shell saw an
+  // always-unset variable, `num` was always empty, and this gate always
+  // printed 'not_verified' -- even when the PR was created successfully.
+  // Corrected to `$delivery.pr_url`, matching the actual key.
   CheckPROpened [
     shape=parallelogram, label="Verify PR Actually Opened",
-    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery.pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -n \"$num\" ] && gh pr view \"$num\" --repo \"$repo\" --json state >/dev/null 2>&1; then\n  printf 'verified'\nelif [ -n \"$num\" ] && curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" >/dev/null 2>&1; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
   ];
 
   CheckPROpened -> MarkOpened     [condition="context.tool.last_line=verified", weight="2"];
