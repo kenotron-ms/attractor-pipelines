@@ -77,6 +77,53 @@ pipeline cannot request on its own after the instance is already running.
 This is the reference example in this repo for correct remote PR delivery
 via the Amplifier Resolve platform.
 
+## Pipeline: resolve expert builder
+
+`pipelines/resolve_expert_builder/resolve_expert_builder.dot` -- an
+autonomous, seven-stage spec-to-PR builder, ported from
+[`microsoft/amplifier-resolver-dot-graph`](https://github.com/microsoft/amplifier-resolver-dot-graph)'s
+`expert_builder.dot`. Given a high-level spec and an existing target repo,
+it runs unattended end to end: an autonomous admission gate (no human in
+the loop) -> decompose the hard parts and spike each in parallel ->
+fan-in to an ordered implementation plan -> implement task-by-task ->
+validate by using the build like a new user would -> an INDEPENDENT
+reality-check against the original spec -> deliver as a GitHub PR. Like
+`resolve_hello_world.dot`, this pipeline is deliberately **not portable**
+-- it leans on Amplifier Resolve platform mechanism (a live Gitea sidecar,
+the platform's reality-check and promote/pr endpoints,
+`/opt/uv-tools/amplifier/bin/python`) as heavily as the source pipeline
+always did. Only the four `dot_file=` sub-pipeline paths changed in this
+port; every node, edge, and prompt is otherwise byte-for-byte identical to
+the source.
+
+```
+pipelines/resolve_expert_builder/
+  resolve_expert_builder.dot              # entry pipeline (7 stages)
+  resolve_expert_builder.md                # required reading: platform dependencies + submission params
+  resolve_expert_builder.resolver.yaml    # ported resolver manifest, for reference
+  subgraphs/
+    admission.dot                         # autonomous admission gate
+    expert_builder_explorer.dot           # per-hard-part spike + package (parallel fan-out)
+    reality_check.dot                     # independent reality-check against the original spec
+    deliver_promote.dot                   # commit, push, open PR via the platform promote/pr endpoint
+  python/
+    admission_lint.py                     # invoked by admission.dot's Lint node (reference only)
+    reality_check_invoke.py               # invoked by reality_check.dot's RealityCheck node (reference only)
+    reality_check.py                      # copy-paste SDK node handlers (reference only)
+```
+
+Point the attractor bundle at it via:
+
+```
+git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/resolve_expert_builder/resolve_expert_builder.dot
+```
+
+**Before submitting a job for this pipeline, read
+[`pipelines/resolve_expert_builder/resolve_expert_builder.md`](pipelines/resolve_expert_builder/resolve_expert_builder.md)**
+-- it requires `spec`, `repo_url` (must already exist), and
+`delivery_mode=promote`, and explains why the `python/` files are included
+for reference only and are not directly runnable in this repo.
+
 ## Pipeline: idea-to-shipped SDLC pipeline
 
 `pipelines/idea_to_shipped/idea_to_shipped.dot` — a full "idea to shipped"

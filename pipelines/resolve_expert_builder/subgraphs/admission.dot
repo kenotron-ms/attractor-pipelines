@@ -1,0 +1,180 @@
+// admission.dot -- autonomous admission gate (v1, bare-attractor).
+//
+// Answers ONE question: should this request proceed?
+// It does NOT write a spec. It writes the acceptance criteria the request
+// already implies, tags each one with its source, and declares what it cannot
+// resolve.
+//
+// Shape:
+//   Screen -> WriteCriteria -> Lint -> {Admit | Enrich | Escalate | Reject}
+//   Enrich -> WriteCriteria   (the loop)
+//
+// The floor is `Lint` -- a deterministic Python script, not a model's prose
+// verdict. Routing is on DESCENT of the open-item count, not on a revision
+// budget: a pass that fails to reduce the count escalates rather than burning
+// another turn. That is the one thing dev_machine's PlanLint and the
+// admission_gate harness both get wrong.
+//
+// Params (all via `attractor run --param k=v`):
+//   request           the request text (use --param request=@request.md)
+//   repo              path to the staged target repo (always a path now; the
+//                     caller derives it from the clone -- empty repo = greenfield)
+//   admission_regime  'greenfield' | 'brownfield', set by the caller (RepoGate).
+//                     Blank on a standalone run -> the criteria/enrich prompts
+//                     fall back to reading the repo content to decide the regime.
+//
+// The lint step runs as a packaged module
+// (`amplifier_resolver_dot_graph.admission.lint`), following the same
+// invocation convention as dev_machine's PlanLint/InitState nodes. There is
+// no `lint_script` path param -- an absolute host path would not resolve
+// inside the run container.
+//
+// Requires no Resolve platform service.
+
+digraph admission {
+    graph [
+        goal="Decide whether a build request should proceed, by writing its acceptance criteria and declaring what cannot be resolved without asking."
+    ]
+
+    start [shape=Mdiamond, label="Start"]
+    done  [shape=Msquare,  label="Done"]
+
+    // The engine permits exactly one exit node, so the four verdicts are
+    // recorded by deterministic tool nodes that converge on `done`. The real
+    // exit of a run is `.ai/outcome.txt`, written as `<verdict>|<stage>`.
+
+    OutAdmit [
+        shape=parallelogram,
+        label="Record: admit",
+        tool_command="printf 'admit|lint\\n' > .ai/outcome.txt; echo recorded"
+    ]
+
+    OutEscalate [
+        shape=parallelogram,
+        label="Record: escalate",
+        style=dashed,
+        tool_command="printf 'escalate|lint\\n' > .ai/outcome.txt; echo recorded"
+    ]
+
+    OutReject [
+        shape=parallelogram,
+        label="Record: reject",
+        style=dashed,
+        tool_command="printf 'reject|lint\\n' > .ai/outcome.txt; echo recorded"
+    ]
+
+    OutScreenReject [
+        shape=parallelogram,
+        label="Record: reject (screen)",
+        style=dashed,
+        tool_command="mkdir -p .ai; printf 'reject|screen\\n' > .ai/outcome.txt; echo recorded"
+    ]
+
+    // =====================================================================
+    // Screen -- deliberately cheap, deliberately low bar.
+    //
+    // This is NOT the admission decision. It only stops requests with no
+    // subject at all, so the expensive criteria pass is not spent on them.
+    // Naming a product category is enough to pass; the real judgment happens
+    // downstream where it can be evidenced.
+    // =====================================================================
+
+    Screen [
+        shape=box,
+        label="Screen",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="15",
+        prompt="You are a cheap pre-screen in front of an expensive admission stage. You are NOT deciding whether the request is well specified -- a later stage does that with evidence. You answer ONE question: does this request have a subject at all?\n\nTHE REQUEST:\n$request\n\nAlso look at any files in the current directory (for example specs/) that came with the request.\n\nPASS (ok) if the request names ANY of: a recognizable product category, a domain, an artifact type, a named capability, or a concrete behavior. A vague request that still names what KIND of thing is wanted PASSES. When in doubt, PASS -- the downstream stage is the real filter and it fails safely.\n\nFAIL (insufficient) ONLY if the request names no subject whatsoever: it asks for 'an app' or 'a tool' or 'something' with no category, no domain and no capability, or the materials are empty. A request that could only be acted on by inventing the entire subject FAILS.\n\nWrite a one-sentence justification to .ai/screen.md (create .ai/ if needed).\n\nThen, as your LAST action, write the verdict file with a tool call:\n  on pass: run `echo ok > .ai/screen-verdict.txt`\n  on fail: run `echo insufficient > .ai/screen-verdict.txt`\n\nThe verdict FILE is the routing signal; your chat text is ignored for routing. After writing it, end your turn with one short plain line such as 'Screen: ok'."
+    ]
+
+    ReadScreen [
+        shape=parallelogram,
+        label="Read screen verdict",
+        tool_command="v=$(cat .ai/screen-verdict.txt 2>/dev/null); rm -f .ai/screen-verdict.txt; case \"$v\" in ok) echo ok;; *) echo insufficient;; esac"
+    ]
+
+    // =====================================================================
+    // WriteCriteria -- the work node.
+    //
+    // Criteria authoring and blocking-unknown detection are the SAME act:
+    // you find the blocking unknowns by trying to write criteria and noticing
+    // where you cannot. There is no separate discovery phase.
+    //
+    // There is no 'invented' source tag. A criterion that cannot name a
+    // source has nowhere to go -- which is exactly the intended failure for
+    // scope expansion.
+    // =====================================================================
+
+    WriteCriteria [
+        shape=box,
+        label="Write criteria",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="50",
+        prompt="You are deciding whether a build request can proceed. You do NOT write a specification and you do NOT expand the request. You write the acceptance criteria the request ALREADY implies, and you declare honestly what you cannot resolve.\n\nTHE REQUEST:\n$request\n\nTARGET REPO: '$repo'. REGIME: '$admission_regime'. A greenfield regime means the repo is an EMPTY starting point -- there is no prior code, so no repo-sourced criteria exist; write only stated or entailed criteria. A brownfield regime means the repo holds existing code you should read and may cite. If the regime is blank or unresolved (a standalone run), decide it yourself by reading the repo: an empty repo with no files is greenfield.\n\nSTEP 1 -- read what you already have.\n- Any files that came with the request (for example specs/) in the current directory.\n- .ai/admission_report.md if it exists. This is deterministic lint feedback on your PREVIOUS attempt. Read it FIRST and fix every violation it names.\n- Everything under .ai/evidence/ if it exists. That is evidence a previous enrichment pass gathered for you, with citations. Use it.\n- If a repo path is given, read it: conventions, AGENTS.md, README, existing modules and tests.\n\nSTEP 2 -- try to write acceptance criteria. For EACH one, tag where it came from:\n  stated     the user actually wrote it. No citation needed.\n  entailed   the words of the request mean this. Citation is a one-line justification of the entailment.\n  repo       the answer already exists in the target repo. Citation MUST be a real path, optionally path:line, that RESOLVES. It is checked mechanically.\n  convention an org or repo convention document says so. Citation MUST be a real path that RESOLVES.\n\nThere is no tag for anything else. If you want to write a criterion you cannot tag with one of those four, DO NOT WRITE IT. Either it is a blocking unknown, or it is scope you are inventing and it does not belong.\n\nThe test: would the user recognize this criterion as something they asked for, or be surprised by it? Surprise means you are expanding scope.\n\nSTEP 3 -- where you CANNOT write a criterion without first deciding something, record a blocking unknown. An unknown is blocking if and only if the acceptance criteria cannot be written without resolving it. Anything else that is merely unstated but harmless is an assumption -- declare it and move on.\n\nSTEP 4 -- write .ai/admission.yaml, exactly this shape:\n\nrequest: <the request, verbatim>\nregime: greenfield | feature\ncriteria:\n  - id: AC-1\n    text: <one observable, checkable behavior>\n    source: stated | entailed | repo | convention\n    citation: <required unless source is stated>\nblocking_unknowns:\n  - id: BU-1\n    text: <the question that must be answered>\n    why_blocking: <which criterion cannot be written until it is>\nassumptions:\n  - id: AS-1\n    text: <what you assumed and are declaring>\n\nYAML QUOTING -- hard requirement, and the most common way this step fails. Write every text: and citation: value on ONE line, wrapped in SINGLE quotes. If the value itself contains a single quote, double it. This matters most when a value BEGINS with a double-quote character: left unwrapped, the parser reads only the quoted span and then fails on the remainder, and the whole file is discarded even though its content was correct. Wrap the entire value in single quotes instead. Do not use block scalars. Before you end your turn, re-read the file you just wrote and confirm every text: and citation: value is single-quoted.\n\nblocking_unknowns and assumptions may be empty lists. criteria may not.\n\nDo not invent a citation. A citation that does not resolve is a worse failure than an honest blocking unknown, because it hides the gap. Write the file now, then end your turn with one short plain line."
+    ]
+
+    // =====================================================================
+    // Lint -- the floor. Deterministic Python, always exits 0, emits exactly
+    // one routing sentinel as its last stdout line.
+    //
+    //   admit    open items == 0
+    //   enrich   open items dropped since the last pass
+    //   escalate open items did not drop (stall), first time
+    //   reject   stalled again after an escalation
+    //
+    // 'open items' = lint violations + declared blocking unknowns. Both are
+    // things a further pass is supposed to reduce, so they share one number.
+    // =====================================================================
+
+    Lint [
+        shape=parallelogram,
+        label="Lint + descent router",
+        tool_command="bash -c 'PYTHON=$( [ -x /opt/uv-tools/amplifier/bin/python ] && echo /opt/uv-tools/amplifier/bin/python || echo python3 ); $PYTHON -m amplifier_resolver_dot_graph.admission.lint --repo \"$repo\"'"
+    ]
+
+    // =====================================================================
+    // Enrich -- the only thing that makes the loop honest.
+    //
+    // With the human gone, the only source of new information is the repo and
+    // the world. Enrich gathers evidence; it does NOT edit the criteria file.
+    // Keeping those separate is what makes each pass a real attempt rather
+    // than an in-place patch, and it means evidence accumulates across passes
+    // instead of being overwritten.
+    // =====================================================================
+
+    Enrich [
+        shape=box,
+        label="Enrich from sources",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="50",
+        prompt="A deterministic lint has rejected the current admission artifact. Your job is to GATHER EVIDENCE that would let the next pass resolve what is open. You do NOT edit .ai/admission.yaml -- another node does that.\n\nTHE REQUEST:\n$request\n\nTARGET REPO: '$repo'. REGIME: '$admission_regime'. In a greenfield regime the repo is empty, so there is no repo evidence to gather -- rely on the request and any files that came with it. In a brownfield regime read the repo for evidence. If the regime is blank or unresolved, read the repo: an empty repo with no files means greenfield.\n\nSTEP 1 -- read .ai/admission_report.md. It lists every violation and every blocking unknown by name. That is your worklist.\n\nSTEP 2 -- for each item, go looking for an answer that ALREADY EXISTS:\n- in the target repo, if there is one: conventions, AGENTS.md, README, existing modules, existing tests, prior art\n- in the files that came with the request (for example specs/)\n- in what the words of the request necessarily entail\n\nSTEP 3 -- write what you found to .ai/evidence/NN.md, where NN is the next unused two-digit number (01, 02, ...). Create .ai/evidence/ if needed. NEVER overwrite an existing evidence file -- they accumulate, and the next pass reads all of them.\n\nFor each finding record: which report item it addresses, what the answer is, and the citation -- a real path, optionally path:line, that resolves. Citations are checked mechanically, so a made-up path will fail the next lint.\n\nSTEP 4 -- be honest about what you could NOT find. In the same file, list the items for which no existing answer exists anywhere you can reach. Do not guess to fill the gap: an unanswerable item is supposed to survive to escalation, and inventing an answer defeats the whole gate.\n\nWrite the evidence file now, then end your turn with one short plain line."
+    ]
+
+    // ---- wiring ----------------------------------------------------------
+
+    start -> Screen
+
+    Screen     -> ReadScreen
+    ReadScreen -> WriteCriteria    [label="ok",         condition="context.tool.last_line=ok"]
+    ReadScreen -> OutScreenReject  [label="no subject", condition="context.tool.last_line=insufficient"]
+
+    WriteCriteria -> Lint
+
+    Lint -> OutAdmit    [label="clean",      condition="context.tool.last_line=admit"]
+    Lint -> Enrich      [label="descending", condition="context.tool.last_line=enrich"]
+    Lint -> OutEscalate [label="stalled",    condition="context.tool.last_line=escalate"]
+    Lint -> OutReject   [label="stalled 2x", condition="context.tool.last_line=reject"]
+
+    Enrich -> WriteCriteria [label="re-write with new evidence", loop_restart="true"]
+
+    OutAdmit        -> done
+    OutEscalate     -> done
+    OutReject       -> done
+    OutScreenReject -> done
+}

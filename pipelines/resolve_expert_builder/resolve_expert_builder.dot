@@ -1,0 +1,1130 @@
+digraph expert_builder {
+    graph [goal="Decide autonomously whether a build request can proceed, then identify the hard parts, spike solutions, plan, implement, validate against the admitted acceptance criteria, and deliver"]
+
+    start [shape=Mdiamond, label="Start"]
+    done  [shape=Msquare,  label="Done"]
+
+    // =====================================================================
+    // STEP 1 - Autonomous admission gate. Decides whether this request should
+    // proceed at all, WITHOUT asking the user anything. Runs admission.dot as
+    // a sub-pipeline. It writes .ai/admission.yaml -- the acceptance criteria
+    // the request already implies, each tagged with its source
+    // (stated/entailed/repo/convention), plus any blocking unknowns and
+    // declared assumptions -- and records its verdict in .ai/outcome.txt as
+    // '<verdict>|<stage>'.
+    //
+    // This replaces the former clarify loop (InitClarify -> AskSpec ->
+    // EvalSpec -> LoadGate -> CheckGate), which placed a human-in-the-loop
+    // conversation at the front of the graph. Admission is unattended: it
+    // either proceeds or stops with a stated reason. Escalation is a real
+    // exit, not a prompt -- this graph has no user to answer it mid-run.
+    // =====================================================================
+
+    // Bind the pipeline's declared input into the names admission.dot reads.
+    // admission.dot is standalone-runnable and takes `request` and `repo`;
+    // expert_builder declares `spec`. The folder node clones the parent context,
+    // so the binding has to exist as real context keys before Admission runs.
+    //
+    // The spec text is passed via tool_env (exposed uppercase per
+    // handlers/tool.py) rather than $-substituted into the command, so arbitrary
+    // user prose cannot break out into the shell.
+    //
+    // This node NO LONGER emits `repo` into context. `repo_url` is the ONE
+    // required input -- `workspace_repo_from: repo_url` in the resolver.yaml
+    // makes it drive the workspace clone -- so it is anything but vestigial;
+    // do NOT make it optional again (that reintroduces DEFECT -1). What
+    // AdmissionInit ignores is the RAW operator-supplied value: it is owner/repo
+    // at submit time, not a staged path, and must never be trusted as one.
+    // RepoGate (below) derives the verified absolute path from the clone that
+    // actually landed and emits it as context.repo for downstream use.
+    AdmissionInit [
+        shape=parallelogram,
+        label="Bind admission input",
+        parse_json="true",
+        tool_env="spec",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os, sys
+nl = chr(10)
+request = os.environ.get('SPEC') or os.environ.get('spec') or ''
+if not request.strip():
+    sys.stderr.write('ERROR: no spec supplied; nothing to admit' + nl)
+    sys.exit(1)
+sys.stderr.write('[admission-init] request chars=' + str(len(request)) + nl)
+os.makedirs('.ai', exist_ok=True)
+print(json.dumps(dict(request=request)))
+PYEOF"
+    ]
+
+    // =====================================================================
+    // RepoGate -- reconcile what was CLONED with what admission cites against.
+    //
+    // There is now ONE repo input. `repo_url` is required and, via
+    // `workspace_repo_from: repo_url` in the resolver.yaml, it is BOTH the clone
+    // source and admission's lint target. The old split -- a typed `repo` that
+    // drove lint while an auto-injected `workspace_repo` drove the clone, with
+    // nothing mapping one to the other -- reached lint with `repo` empty and
+    // failed every repo-sourced citation, declining a real spec in a real repo
+    // for lack of the repo it was handed. `repo` is now DERIVED from the staged
+    // clone, never trusted as typed input.
+    //
+    // Greenfield is an empty-but-existing target repo, NOT the absence of a
+    // repo. So this node decides the REGIME by content, and emits one of:
+    //   repo_state=ok,       repo=<abs path>, admission_regime=brownfield
+    //       a staged worktree with a HEAD and a non-empty tree
+    //   repo_state=ok,       repo=<abs path>, admission_regime=greenfield
+    //       a staged clone that is empty (no HEAD, or an empty tree) -- the
+    //       user pointed at an empty repo on purpose. This case is VALID and
+    //       admits; it does NOT escalate.
+    //   repo_state=unstaged
+    //       a repo was requested but is NOT staged: the clone failed, is
+    //       unreachable, the path is not a directory, or the value is a URL.
+    //       Only THIS case escalates.
+    //
+    // CONTENT is verified, not status: an async clone that produced an empty
+    // tree still reports status=='ok'. `git rev-parse HEAD` plus a non-empty
+    // `ls-tree` is what separates brownfield from greenfield. A genuine clone
+    // FAILURE (status != ok, missing directory) is the only thing that
+    // escalates -- an empty-but-successful clone is an honest greenfield start.
+    //
+    // lint.py requires this contract: --repo must name an existing directory or
+    // be omitted; anything else is a hard error (exit 2), deliberately, so a
+    // mis-wired caller cannot reach lint with a bogus path.
+    RepoGate [
+        shape=parallelogram,
+        label="Reconcile staged repo",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os, subprocess, sys
+nl = chr(10)
+
+# `context.work_dir` is seeded by the dot-graph resolver; `context.target_dir`
+# is an engine-reserved key. Both are dotted, so they only substitute under an
+# engine new enough to have substitute_context(). If a token survives verbatim
+# (standalone `attractor run`), fall back -- an absent config.json simply reads
+# as 'no repo requested', which is correct for a standalone run.
+work_dir = '$context.work_dir'
+if 'context.work_dir' in work_dir:
+    work_dir = '/project/.resolve'
+target_dir = '$context.target_dir'
+if 'context.target_dir' in target_dir:
+    target_dir = os.getcwd()
+
+cfg = {}
+cfg_path = os.path.join(work_dir, 'config.json')
+try:
+    with open(cfg_path) as handle:
+        cfg = json.load(handle)
+except Exception as exc:
+    sys.stderr.write('[repo-gate] no readable config at ' + cfg_path + ': ' + str(exc) + nl)
+
+params = cfg.get('params') or {}
+# Intent: a repo is always asked for now (`repo_url` is required). It is the
+# submitted param key; `workspace_repo` is what `workspace_repo_from: repo_url`
+# maps the clone to; `cfg[repo_url]` is written from the workspace spec even
+# when no `repo_url` param was submitted -- all read as fallbacks.
+intent = str(params.get('repo_url') or params.get('workspace_repo') or cfg.get('repo_url') or '').strip()
+report = params.get('workspace_report') or {}
+entries = report.get('repos') or []
+
+# PRIMARY = the entry with no `path` key: it clones to the workspace root.
+# Sub-repos declare a `path` and are out of scope -- `repo` is a scalar and
+# admission cites against one tree. Submodule evidence is future work.
+primary = None
+for entry in entries:
+    if isinstance(entry, dict) and not str(entry.get('path') or '').strip():
+        primary = entry
+        break
+
+def classify(candidate):
+    # Returns (abspath, regime, why).
+    #   ('<path>', 'brownfield', '')  staged worktree with HEAD + non-empty tree
+    #   ('<path>', 'greenfield', '')  staged but empty (no HEAD / empty tree)
+    #   ('',       '',          why)  not staged / not a dir / URL -> escalate
+    cand = str(candidate or '').strip()
+    if not cand:
+        return '', '', 'no clone path was recorded'
+    # A URL (or an auth-embedded Gitea URL) is never a staged directory. Reject
+    # it here so a credential can never reach the lint command line.
+    if '://' in cand or '@' in cand:
+        return '', '', 'clone path is a URL, not a staged directory'
+    if not os.path.isdir(cand):
+        return '', '', 'clone path is not a directory: ' + cand
+    abspath = os.path.abspath(cand)
+    # Content, not status, decides the regime. No HEAD (an empty repo with no
+    # commits) or an empty tree is a valid greenfield start, not a failure.
+    head = subprocess.run(['git', '-C', cand, 'rev-parse', 'HEAD'], capture_output=True, text=True)
+    if head.returncode != 0:
+        sys.stderr.write('[repo-gate] staged but no HEAD at ' + cand + ' -- greenfield' + nl)
+        return abspath, 'greenfield', ''
+    tree = subprocess.run(['git', '-C', cand, 'ls-tree', '-r', '--name-only', 'HEAD'], capture_output=True, text=True)
+    if tree.returncode != 0 or not tree.stdout.strip():
+        sys.stderr.write('[repo-gate] staged but empty tree at ' + cand + ' -- greenfield' + nl)
+        return abspath, 'greenfield', ''
+    return abspath, 'brownfield', ''
+
+repo, regime, why = '', '', ''
+if primary is not None:
+    status = str(primary.get('status') or '').strip()
+    if status and status != 'ok':
+        # A genuine clone FAILURE -- distinct from a successful-but-empty clone.
+        why = 'staging reported status=' + status
+        if primary.get('error'):
+            why = why + ': ' + str(primary.get('error'))
+    else:
+        repo, regime, why = classify(primary.get('clone_path'))
+elif intent:
+    # workspace_report injection is best-effort and can be absent even when the
+    # clone succeeded. Probe the workspace directly before declaring failure.
+    repo, regime, why = classify(target_dir)
+    if repo:
+        sys.stderr.write('[repo-gate] no workspace_report; classified the staged tree directly' + nl)
+    else:
+        why = 'no workspace_report was written and ' + why
+else:
+    # No config at all (standalone `attractor run` with no repo): treat as an
+    # empty greenfield start with no staged tree.
+    sys.stderr.write('[repo-gate] no repo requested -- greenfield (no staged tree)' + nl)
+    regime = 'greenfield'
+
+if repo:
+    sys.stderr.write('[repo-gate] staged repo: ' + repo + ' (' + regime + ')' + nl)
+    print(json.dumps(dict(repo=repo, repo_state='ok', admission_regime=regime)))
+elif intent:
+    reason = 'A target repo was requested (' + intent + ') but it is not staged: ' + (why or 'reason unknown') + '.'
+    sys.stderr.write('[repo-gate] ESCALATE -- ' + reason + nl)
+    os.makedirs('.ai', exist_ok=True)
+    with open('.ai/escalation.md', 'w') as handle:
+        handle.write(nl.join([
+            '# Target repo requested but not staged',
+            '',
+            reason,
+            '',
+            'Admission was NOT run. The target repo could not be cloned, so there is no',
+            'workspace to build in or admit against. An empty repo would have been a valid',
+            'greenfield start; this is a clone FAILURE, not an empty repo.',
+            '',
+            '## What to check',
+            '',
+            '- the target repo exists and is reachable with the credentials in use',
+            '- the repo path is owner/repo (not a raw URL) and the clone completed',
+            '- for a greenfield build, create an empty repo and point `repo_url` at it',
+            '',
+            'Nothing was built.',
+        ]) + nl)
+    print(json.dumps(dict(repo='', repo_state='unstaged', admission_regime='', admission_verdict='escalate', admission_stage='repo_staging')))
+else:
+    print(json.dumps(dict(repo='', repo_state='ok', admission_regime='greenfield')))
+PYEOF"
+    ]
+
+    CheckRepo [shape=diamond, label="Repo staged?"]
+
+    Admission [shape=folder, label="Admission gate", dot_file="subgraphs/admission.dot"]
+
+    // Deterministic verdict read. Only 'admit' proceeds. 'escalate' and
+    // 'reject' both halt: escalate means admission found a blocking unknown
+    // it could not resolve from the request or the repo, and answering it
+    // requires a human who is not present during an unattended run.
+    AdmissionClassify [
+        shape=parallelogram,
+        label="Read admission verdict",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os
+verdict, stage = 'reject', 'missing'
+if os.path.exists('.ai/outcome.txt'):
+    raw = open('.ai/outcome.txt').read().strip()
+    parts = raw.split('|')
+    verdict = parts[0].strip() or 'reject'
+    stage = (parts[1].strip() if len(parts) > 1 else '') or 'unknown'
+print(json.dumps(dict(
+    admission_state=('admit' if verdict == 'admit' else 'halt'),
+    admission_verdict=verdict,
+    admission_stage=stage,
+)))
+PYEOF"
+    ]
+
+    CheckAdmission [shape=diamond, label="Admitted?"]
+
+    // Not admitted. Surface WHY to the user rather than exiting silently:
+    // .ai/escalation.md holds the question set when admission escalated,
+    // .ai/admission_report.md holds the violations and open items.
+    AdmissionHalt [
+        shape=parallelogram,
+        label="Report non-admission",
+        tool_env="admission_verdict,admission_stage",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import os
+nl = chr(10)
+verdict = os.environ.get('ADMISSION_VERDICT') or 'unknown'
+stage = os.environ.get('ADMISSION_STAGE') or 'unknown'
+parts = ['# Not admitted', '',
+         'This request was not admitted for building. Verdict: ' + verdict + ' (at stage: ' + stage + ').', '']
+for path, heading in (('.ai/escalation.md', 'What needs to be answered'),
+                      ('.ai/admission_report.md', 'Admission report')):
+    if os.path.exists(path):
+        parts += ['## ' + heading, '', open(path).read().rstrip(), '']
+parts += ['Nothing was built. Answer the above and re-run to re-enter admission.']
+os.makedirs('/project/.resolve/data', exist_ok=True)
+open('/project/.resolve/data/delivery.md', 'w').write(nl.join(parts) + nl)
+print('not_admitted:' + verdict)
+PYEOF"
+    ]
+
+    // =====================================================================
+    // STEP 2 - Decompose into hard parts, spike each, package pros/cons.
+    // =====================================================================
+
+    Decompose [
+        shape=box,
+        label="Decompose into hard parts",
+        goal_gate="true",
+        max_retries="1",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="50",
+        prompt="You are scoping a build task. Read the admitted request and its acceptance criteria at .ai/admission.yaml -- it contains the original `request`, a `criteria` list (each with an id, text and a `source` tag recording whether it was stated by the user, entailed by the request, or evidenced in the repo), and an `assumptions` list of things assumed rather than established. Treat the criteria as the definition of 'done' and the assumptions as known risk. Then identify EXACTLY TWO of the hardest or riskiest parts to build. When judging what is hard or risky, weigh not just the happy path but ROBUSTNESS: unknown or rate-limited external APIs, authentication or access constraints (headers, keys, user-agent policies), and the FULL range of inputs the spec implies -- boundary, historical, large, empty, or unusual inputs -- plus error and failure handling. Favor parts that are easy to fake on one trivial input but hard to get right across every input the user expects.\n\nCreate the directory .ai/hard_parts/ and write two files:\n- .ai/hard_parts/slot_1.md : describe hard part 1: what it is, why it is risky, and what a good solution MUST achieve. Be explicit and concrete about the edge cases and the full input range it has to handle correctly (not just one easy example), and how to tell it actually works on those.\n- .ai/hard_parts/slot_2.md : same for hard part 2.\n\nKeep each file focused but concrete: a few short paragraphs plus an explicit list of the edge cases and input range that part must handle. Write both files now.\n\nWhen you are done, your FINAL message must END with a JSON verdict object and NOTHING after it -- no closing remarks, no summary, no code fence, and no other braces after it. Emit it exactly in this shape:\n\n{\"status\": \"success\", \"notes\": \"<one line naming the two hard parts>\"}\n\nIf you could not write BOTH files, use status fail -- do not report success on one.\n\nValid status values for this node: \"success\" or \"fail\". Use lowercase exactly as shown. The notes value must be plain prose with NO braces in it. The object must be the last thing in your reply."
+    ]
+
+    ExploreFork [shape=component, label="Explore hard parts (fan out)", max_parallel="2"]
+
+    Explore_1 [shape=folder, label="Explore part 1", dot_file="subgraphs/expert_builder_explorer.dot", "context.slot"="1"]
+    Explore_2 [shape=folder, label="Explore part 2", dot_file="subgraphs/expert_builder_explorer.dot", "context.slot"="2"]
+
+    ExploreJoin [shape=tripleoctagon, label="Join explorations"]
+
+    // Fails when any explore slot produced no SOLUTION.md. Without this the run
+    // degrades silently: ParallelHandler returns PARTIAL_SUCCESS on a dead branch,
+    // ExploreJoin returns SUCCESS on one survivor, and a plain `cat` of the glob
+    // exits 0 on half the input -- so Plan builds against half the hard parts and
+    // every downstream verdict still reads PASS. The banner is written EITHER WAY so
+    // the gap is visible to Plan and to the human reading the delivery.
+    Synthesize [
+        shape=parallelogram,
+        label="Synthesize INDEX",
+        retry_target="ExploreFork",
+        tool_command="mkdir -p .ai/pieces; found=$(ls .ai/hard_parts/slot_*/SOLUTION.md 2>/dev/null | wc -l | tr -d ' '); missing=''; for s in 1 2; do [ -f .ai/hard_parts/slot_$s/SOLUTION.md ] || missing=\"$missing $s\"; done; { echo '# Explored hard parts'; echo; if [ -n \"$missing\" ]; then echo \"> INCOMPLETE INPUT: expected 2 hard parts, found $found. MISSING slot(s):$missing\"; echo '> A plan built from this file covers ONLY the parts below. Do not treat it as complete.'; else echo '> Complete: both hard parts explored.'; fi; echo; cat .ai/hard_parts/slot_*/SOLUTION.md 2>/dev/null; } > .ai/pieces/INDEX.md; echo \"WROTE_INDEX: found=$found missing=$missing\"; cat .ai/pieces/INDEX.md; [ -z \"$missing\" ] || { echo \"explore_incomplete: missing slot(s):$missing\" >&2; exit 1; }"
+    ]
+
+    // =====================================================================
+    // STEP 3 - Fan-in: build a detailed, ORDERED implementation plan from the
+    // clarified spec + the explored/spiked pieces. Reuse decisions are explicit.
+    // Writes .ai/plan/ (INDEX.md + ordered task files). File-based verify+retry.
+    // =====================================================================
+
+    Plan [
+        shape=box,
+        label="Build implementation plan",
+        goal_gate="true",
+        max_retries="1",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="80",
+        prompt="You are writing a detailed implementation plan that a later stage will execute task-by-task. A good plan is concrete enough that a coder can follow it without re-deciding the architecture.\n\nREAD these inputs in order:\n- .ai/admission.yaml (the request, the acceptance criteria that define 'done', and the declared assumptions)\n- .ai/pieces/INDEX.md (summary of the explored hard parts)\n- .ai/hard_parts/slot_1/SOLUTION.md and .ai/hard_parts/slot_2/SOLUTION.md (the RECOMMENDATION + pros/cons for each hard part)\n- the spiked proof-of-concept code under .ai/hard_parts/slot_1/approach_1, slot_1/approach_2, slot_2/approach_1, slot_2/approach_2 (each has a NOTES.md). This is real code you MAY reuse.\n\nFor EACH spiked piece, decide REUSE (copy as-is), ADAPT (modify), or DISCARD (build fresh) and give a one-line reason. Prefer reusing the spikes the SOLUTION files recommend.\n\nWrite the plan under .ai/plan/ (create the directory):\n- .ai/plan/INDEX.md : the ordered manifest. Start with a REUSE section listing each spiked piece and your REUSE/ADAPT/DISCARD decision with its source path. Then an ORDERED task list, one line each: 'NN. task_NN_<name>.md - <one-line summary>', in the exact order they must be implemented.\n- .ai/plan/task_NN_<short-name>.md : one file per task, numbered to match the INDEX order (task_01_..., task_02_...). Each task file MUST contain: the task goal, the exact files to create or modify, the public interface/contract, which spiked piece (if any) to copy or adapt and from which path, and concrete acceptance criteria ('how to know this task is done').\n\nGranularity: if the build is genuinely simple, ONE task file is fine, but ALWAYS write INDEX.md plus at least one task_NN file. If it is complex, decompose into several ordered task files; you MAY give a large multi-file task its own subdirectory .ai/plan/task_NN_<name>/ as long as INDEX.md lists it in order.\n\nIf you see a tradeoff the user should approve BEFORE building (for example a capability only reliably achievable via a paid or external API, or a data source with legal/rate limits), write it to .ai/plan/CONCERNS.md as a short bulleted list. Otherwise do not create that file.\n\nWrite INDEX.md LAST so it reflects the final task breakdown.\n\nWhen you are done, your FINAL message must END with a JSON verdict object and NOTHING after it -- no closing remarks, no summary, no code fence, and no other braces after it. Emit it exactly in this shape:\n\n{\"status\": \"success\", \"notes\": \"<one line on the plan shape>\"}\n\nValid status values for this node: \"success\" or \"fail\". Use lowercase exactly as shown. The notes value must be plain prose with NO braces in it. The object must be the last thing in your reply."
+    ]
+
+    // Deterministic check: INDEX.md exists + non-empty AND >=1 task_* exists.
+    // Node success alone is not trustworthy, so verify the artifacts on disk.
+    VerifyPlan [
+        shape=parallelogram,
+        label="Verify plan artifacts",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, glob, os
+index = '.ai/plan/INDEX.md'
+ok = os.path.isfile(index) and os.path.getsize(index) > 0 and len(glob.glob('.ai/plan/task_*')) > 0
+print(json.dumps(dict(plan_state=('plan_ok' if ok else 'plan_missing'))))
+PYEOF"
+    ]
+
+    CheckPlan [shape=diamond, label="Plan written?"]
+
+    // =====================================================================
+    // STEP 4 - Implement the plan. Walks .ai/plan/ task files one at a time in
+    // INDEX order, implementing each per its spec and reusing the spiked pieces
+    // the plan names. Each task leaves a breadcrumb in .ai/plan/PROGRESS.md that
+    // the next task reads. Deterministic marker-count gate loops until done,
+    // with stall + max-iteration safety exits.
+    // =====================================================================
+
+    ImplementInit [
+        shape=parallelogram,
+        label="Init implement state",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import os, json, glob
+nl = chr(10)
+plan = '.ai/plan'
+os.makedirs(os.path.join(plan, '.done'), exist_ok=True)
+ntasks = len(glob.glob(os.path.join(plan, 'task_*')))
+# total_impl is the ONE counter spanning the whole corrective surface. `iter`
+# is per-leg and IS reset by Reopen/BuildRCFix; total_impl is minted once here
+# and never reset, so the validation and reality-check fix loops cannot refill
+# the implement budget. Without it the worst case is the PRODUCT of the legs
+# (20 x (1 + 3 val + 2 rc) = 120 Implement invocations at 80 opus turns each);
+# with it the run-wide ceiling is total_impl_max.
+state = dict(iter=0, max_iter=20, stall_max=3, prev_remaining=ntasks, stall_count=0, total_impl=0, total_impl_max=40)
+json.dump(state, open('.ai/impl_state.json', 'w'))
+header = ['# Implementation Progress',
+          '',
+          'Breadcrumb trail. Each task appends what it did, the interfaces/decisions',
+          'the next task needs, what remains, and any gotchas. Read this before you',
+          'start so your work stays consistent with what came before.',
+          '']
+open(os.path.join(plan, 'PROGRESS.md'), 'w').write(nl.join(header) + nl)
+print('impl_init tasks=' + str(ntasks))
+PYEOF"
+    ]
+
+    Implement [
+        shape=box,
+        label="Implement next task",
+        goal_gate="true",
+        max_retries="1",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="80",
+        prompt="You are implementing an approved plan, ONE task at a time, in order.\n\nFIRST read the breadcrumb trail at .ai/plan/PROGRESS.md. It tells you what previous tasks already did, the interfaces and decisions they established, what remains, and any gotchas. Use it so your work is consistent with what came before.\n\nThen read .ai/plan/INDEX.md for the ordered task list and (if present) its REUSE section naming spiked pieces under .ai/hard_parts/ to copy or adapt.\n\nFind the FIRST task in INDEX order whose marker file is MISSING. For a task file .ai/plan/task_01_foo.md the marker is .ai/plan/.done/task_01_foo.md. Open that ONE task file and implement exactly it:\n- create or modify the files it names\n- honor its stated interface/contract\n- when the plan marks a spiked piece REUSE or ADAPT, copy it from its .ai/hard_parts/... path rather than rewriting from scratch\n- satisfy its acceptance criteria; if they include tests, run them and make them pass\n\nImplement ONLY that single task, then STOP. Do not start the next task.\n\nWhen, and only when, the acceptance criteria are actually met:\n1. Create the marker file .ai/plan/.done/<task-filename> (an empty file is fine).\n2. APPEND a breadcrumb entry to .ai/plan/PROGRESS.md (do not overwrite what is already there) with this shape:\n   ## <task-filename> (done)\n   - Did: <1-3 sentences on what you built>\n   - Interfaces/decisions the next task needs: <names, signatures, file paths, key choices>\n   - Remaining tasks: <the task files after this one that still lack a marker>\n   - Watch out for: <any gotcha for the next task, or 'none'>\nIf you could NOT finish the task, do not create the marker and do not append a done breadcrumb.\n\nWhen you are done, your FINAL message must END with a JSON verdict object and NOTHING after it -- no closing remarks, no summary, no code fence, and no other braces after it. Emit it exactly in this shape:\n\n{\"status\": \"success\", \"notes\": \"<one line on the task you advanced>\"}\n\nUse partial_success if you made real progress but did not finish this task.\n\nValid status values for this node: \"success\" or \"partial_success\" or \"fail\". Use lowercase exactly as shown. The notes value must be plain prose with NO braces in it. The object must be the last thing in your reply."
+    ]
+
+    ImplementVerify [
+        shape=parallelogram,
+        label="Verify implement progress",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import os, json, glob
+plan = '.ai/plan'; done = os.path.join(plan, '.done')
+os.makedirs(done, exist_ok=True)
+tasks = sorted(glob.glob(os.path.join(plan, 'task_*')))
+remaining = [t for t in tasks if not os.path.exists(os.path.join(done, os.path.basename(t)))]
+sp = '.ai/impl_state.json'
+st = json.load(open(sp)) if os.path.exists(sp) else dict(iter=0, max_iter=20, stall_max=3, prev_remaining=len(tasks), stall_count=0, total_impl=0, total_impl_max=40)
+st['iter'] += 1
+st['total_impl'] = st.get('total_impl', 0) + 1
+st.setdefault('total_impl_max', 40)
+n = len(remaining)
+if n == 0:
+    state = 'all_done'
+elif st['total_impl'] >= st['total_impl_max']:
+    state = 'total_exhausted'
+elif st['iter'] >= st['max_iter']:
+    state = 'max_iter'
+else:
+    if n >= st['prev_remaining']:
+        st['stall_count'] += 1
+    else:
+        st['stall_count'] = 0
+    state = 'stalled' if st['stall_count'] >= st['stall_max'] else 'continue'
+st['prev_remaining'] = n
+json.dump(st, open(sp, 'w'))
+print(json.dumps(dict(impl_state=state, remaining=n, iter=st['iter'])))
+PYEOF"
+    ]
+
+    CheckImpl [shape=diamond, label="All tasks done?"]
+
+    // =====================================================================
+    // STEP 5 - Validate by USING the build as a new user would. UserRun (a box
+    // with a real shell tool) reads the README, installs/runs the project, and
+    // writes a verdict. On failure it assigns fault (usually implementer); a fix
+    // task is appended to the plan and the Step 4 implement loop re-runs it, then
+    // re-validates. Bounded by a fix-round counter. Harness faults (e.g. no
+    // package manager in the worker) are surfaced, not looped.
+    // =====================================================================
+
+    UserRun [
+        shape=box,
+        label="Use it like a user",
+        goal_gate="true",
+        max_retries="1",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="80",
+        prompt="You are validating a freshly built project by using it exactly as a new user would, and you must test it to COMPLETION: not just that it starts, but that it actually satisfies the spec across the inputs the user expects, including edge cases.\n\nFIRST read .ai/admission.yaml (the request, the acceptance criteria that define 'done', and the declared assumptions), then README.md and any usage docs, plus .ai/plan/PROGRESS.md (how the build is run and any gotchas). From the acceptance criteria, write a short checklist of the CORE requirements and the representative AND edge/boundary inputs that exercise them -- for example a normal input plus an unusual, historical, large, empty, or otherwise tricky input the spec implies.\n\nThen ACTUALLY use the project with the shell tool. Install it the documented way if needed (this worker may lack a package manager on PATH; try in order: 'python3 -m pip install ...', then 'uv pip install ...').\n1. Run the documented command(s) and observe real output and exit codes; prove it works, do not assume.\n2. Run it on SEVERAL inputs from your checklist, INCLUDING at least one edge/boundary case, and verify the OUTPUT is actually correct for each (the right result, file, or format), not merely that the process exited 0.\n3. If the project ships tests (pytest, a tests/ directory, a test script), RUN them to completion and record the results.\n\nDecide the verdict honestly. result is 'pass' ONLY if the core requirements demonstrably work end to end across the inputs you tried, INCLUDING the edge case(s). If it works on a trivial input but is wrong or fails on a required edge case, result is 'fail'. If a live external service rejects, rate-limits, or blocks the project's requests while the network itself works, that is the PROJECT's problem to handle (proper headers or user-agent, retries with backoff, pagination) and counts as 'fail' with fault 'implementer', NOT a harness fault.\n\nThen create .ai/validation/ and write .ai/validation/verdict.json with these keys: result ('pass' or 'fail'); fault ('' if pass, else one of 'implementer' meaning the code or docs are wrong, 'plan' meaning the plan asked for something infeasible, or 'harness' meaning ONLY a missing package manager or a genuinely absent network); summary (1-3 sentences); evidence (the real commands you ran across ALL the inputs and tests you tried, with their actual output and exit codes, quoted not paraphrased); fix_request ('' if pass or harness, else a concrete, code-actionable description of what must change and in which file, naming the specific failing input or edge case). Back every value with what you actually observed.\n\nWhen you are done, your FINAL message must END with a JSON verdict object and NOTHING after it -- no closing remarks, no summary, no code fence, and no other braces after it. Emit it exactly in this shape:\n\n{\"status\": \"success\", \"notes\": \"<one line on what you exercised>\"}\n\nIMPORTANT: this status reports whether YOU completed the validation, NOT whether the build passed. A build that FAILS validation is still status success -- you did your job, and your pass/fail judgement belongs in verdict.json. Use fail only if you could not carry out the validation at all.\n\nValid status values for this node: \"success\" or \"fail\". Use lowercase exactly as shown. The notes value must be plain prose with NO braces in it. The object must be the last thing in your reply."
+    ]
+
+    ReadVerdict [
+        shape=parallelogram,
+        label="Read verdict",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import os, json
+os.makedirs('.ai/validation', exist_ok=True)
+sp = '.ai/validation/state.json'
+st = json.load(open(sp)) if os.path.exists(sp) else dict(round=0, max_rounds=3)
+try:
+    d = json.load(open('.ai/validation/verdict.json'))
+    res = d.get('result', 'fail'); fault = d.get('fault', '')
+except Exception:
+    res = 'fail'; fault = 'implementer'
+if res == 'pass':
+    state = 'pass'
+elif fault == 'harness':
+    state = 'blocked'
+else:
+    st['round'] += 1
+    state = 'exhausted' if st['round'] > st['max_rounds'] else 'fix'
+json.dump(st, open(sp, 'w'))
+print(json.dumps(dict(val_state=state, fault=fault, round=st['round'])))
+PYEOF"
+    ]
+
+    CheckVal [shape=diamond, label="Build works?"]
+
+    Reopen [
+        shape=parallelogram,
+        label="Reopen fix task",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import os, json, glob, re
+nl = chr(10)
+plan = '.ai/plan'
+try:
+    d = json.load(open('.ai/validation/verdict.json'))
+except Exception:
+    d = dict(fix_request='Validation failed but no verdict was written; investigate and fix.', fault='implementer', evidence='')
+rnd = json.load(open('.ai/validation/state.json'))['round']
+nums = []
+for p in glob.glob(os.path.join(plan, 'task_*')):
+    m = re.match(r'task_(\d+)', os.path.basename(p))
+    if m: nums.append(int(m.group(1)))
+nxt = (max(nums) + 1) if nums else 1
+fname = 'task_' + str(nxt).zfill(2) + '_fix_' + str(rnd) + '.md'
+body = ['# Fix task (validation round ' + str(rnd) + ')',
+        '',
+        'Validation by using the build as a user FAILED. Fault: ' + str(d.get('fault', 'implementer')) + '.',
+        '',
+        '## What must change',
+        str(d.get('fix_request', '')),
+        '',
+        '## Evidence from the failed run',
+        json.dumps(d.get('evidence', ''), indent=2) if not isinstance(d.get('evidence', ''), str) else str(d.get('evidence', '')),
+        '',
+        '## Acceptance',
+        'The documented install and run steps succeed when used as a new user would.']
+open(os.path.join(plan, fname), 'w').write(nl.join(body) + nl)
+with open(os.path.join(plan, 'INDEX.md'), 'a') as f:
+    f.write(nl + str(nxt).zfill(2) + '. ' + fname + ' - fix: ' + str(d.get('fix_request', ''))[:80] + nl)
+done = os.path.join(plan, '.done')
+os.makedirs(done, exist_ok=True)
+remaining = [t for t in glob.glob(os.path.join(plan, 'task_*')) if not os.path.exists(os.path.join(done, os.path.basename(t)))]
+_prev = json.load(open('.ai/impl_state.json')) if os.path.exists('.ai/impl_state.json') else {}
+# Reset the per-leg counters only. total_impl carries across so the fix loops
+# cannot refill the run-wide implement budget.
+json.dump(dict(iter=0, max_iter=20, stall_max=3, prev_remaining=len(remaining), stall_count=0, total_impl=_prev.get('total_impl', 0), total_impl_max=_prev.get('total_impl_max', 40)), open('.ai/impl_state.json', 'w'))
+print('reopened ' + fname)
+PYEOF"
+    ]
+
+    // =====================================================================
+    // STEP 6 - Independent reality-check against the ORIGINAL spec. Reality
+    // check clones the software by URL (it cannot see the worker's local
+    // files), so we first PUBLISH the build to the per-instance gitea sidecar,
+    // then patch the clarified spec in as acceptance criteria, then run the
+    // platform reality-check capability (reality_check.dot sub-pipeline) and
+    // route on its verdict. pass -> done; fail/partial -> append an RC fix task
+    // and loop back to the Step 4 implement loop; bounded by a round counter.
+    // Requires AMPLIFIER_RESOLVE_ENABLE_REALITY_CHECK=true AND a worker-
+    // reachable AMPLIFIER_RESOLVE_PLATFORM_URL on the backend (see
+    // notes/2026-06-17-reality-check-findings.md). Reuses develop.dot's proven
+    // PrepareRC/CommitPromote/reality_check-folder/verdict pattern, adapted to
+    // expert_builder's .ai/plan task-file convention.
+    // =====================================================================
+
+    // Patch /project/.resolve/config.json params.acceptance_criteria with the
+    // acceptance criteria ADMISSION already wrote, so reality_check_invoke.py
+    // validates against the ORIGINAL intent rather than a freshly-derived
+    // guess. The criteria are read structurally from .ai/admission.yaml, not
+    // re-synthesized from prose: admission already decided what 'done' means
+    // and tagged each criterion with its source, and re-deriving them here
+    // would silently discard that provenance. Declared assumptions ride along
+    // so the reality check knows what was assumed rather than established.
+    // Fails loudly if the criteria set is missing or empty -- an empty
+    // criteria set would make the reality check vacuously pass.
+    PrepareRC [
+        shape=parallelogram,
+        label="Prepare reality check",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, sys, yaml
+nl = chr(10)
+cfg_path = '/project/.resolve/config.json'
+try:
+    doc = yaml.safe_load(open('.ai/admission.yaml')) or {}
+except Exception as exc:
+    sys.stderr.write('ERROR: cannot read .ai/admission.yaml: ' + str(exc) + nl)
+    sys.exit(1)
+criteria = [c for c in (doc.get('criteria') or []) if (c.get('text') or '').strip()]
+if not criteria:
+    sys.stderr.write('ERROR: .ai/admission.yaml has no acceptance criteria' + nl)
+    sys.exit(1)
+lines = ['# Acceptance criteria', '']
+for c in criteria:
+    src = (c.get('source') or 'unknown').strip()
+    cid = (c.get('id') or '?').strip()
+    lines.append('- [' + cid + '] ' + (c.get('text') or '').strip() + '  (source: ' + src + ')')
+assumptions = [a for a in (doc.get('assumptions') or []) if str(a).strip()]
+if assumptions:
+    lines += ['', '## Declared assumptions (assumed, not established)', '']
+    lines += ['- ' + str(a).strip() for a in assumptions]
+cfg = json.load(open(cfg_path))
+cfg.setdefault('params', {})['acceptance_criteria'] = nl.join(lines) + nl
+json.dump(cfg, open(cfg_path, 'w'), indent=2)
+print('criteria_patched:' + str(len(criteria)))
+PYEOF"
+    ]
+
+    // Commit the build and push it to the per-instance gitea sidecar (origin),
+    // then emit an auth-embedded gitea URL as workspace_repo so the
+    // reality_check sub-pipeline's BuildArtifact resolves software_path.
+    // GITEA_TOKEN is NOT forwarded to the RC runner, hence the embedded creds.
+    // On the fix loop this re-runs each round, so RC validates current state.
+    DeliverGitea [
+        shape=parallelogram,
+        label="Deliver to gitea",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os, subprocess, sys
+wd = '/project/workspace'
+# Keep pipeline scratch OUT of the delivered repo. `.resolve/reality_check/`
+# holds an artifact.json carrying an auth-embedded gitea URL (a live
+# GITEA_TOKEN), and `.ai/` holds admission evidence, spiked throwaway
+# approaches and plan state. Neither belongs in a delivered tree, and on the
+# promote path they would land in a PR against a real repo. Same discipline as
+# implement.dot (.git/info/exclude) and pr_feedback.dot (post-add reset); both
+# are applied here because exclude does not cover already-tracked paths.
+try:
+    ex = os.path.join(wd, '.git/info/exclude')
+    os.makedirs(os.path.dirname(ex), exist_ok=True)
+    cur = open(ex).read() if os.path.exists(ex) else ''
+    with open(ex, 'a') as fh:
+        for pat in ('.ai/', '.resolve/'):
+            if pat not in cur.split():
+                fh.write(pat + chr(10))
+except Exception as exc:
+    sys.stderr.write('WARNING: could not write .git/info/exclude: ' + str(exc) + chr(10))
+subprocess.run(['git', '-C', wd, 'add', '-A'], check=True)
+subprocess.run(['git', '-C', wd, 'reset', '-q', '--', '.ai', '.resolve'], capture_output=True, text=True)
+leaked = subprocess.run(['git', '-C', wd, 'diff', '--cached', '--name-only'], capture_output=True, text=True).stdout.split()
+bad = [f for f in leaked if f.startswith('.ai/') or f.startswith('.resolve/')]
+if bad:
+    sys.stderr.write('ERROR: pipeline scratch still staged: ' + ' '.join(bad) + chr(10))
+    sys.exit(1)
+subprocess.run(['git', '-C', wd, '-c', 'user.email=expert-builder@amplifier.dev', '-c', 'user.name=expert-builder', 'commit', '-m', 'expert_builder: promote build to gitea main for reality-check', '--allow-empty'], capture_output=True, text=True)
+push = subprocess.run(['git', '-C', wd, 'push', 'origin', 'HEAD:main'], capture_output=True, text=True)
+sys.stderr.write(push.stdout + push.stderr)
+if push.returncode != 0:
+    sys.stderr.write('ERROR: git push failed' + chr(10))
+    sys.exit(1)
+tok = os.environ.get('GITEA_TOKEN', '')
+if not tok:
+    sys.stderr.write('ERROR: GITEA_TOKEN not set' + chr(10))
+    sys.exit(1)
+raw = subprocess.run(['git', '-C', wd, 'remote', 'get-url', 'origin'], check=True, capture_output=True, text=True).stdout.strip()
+sp = raw
+for scheme in ('https://', 'http://'):
+    if raw.startswith(scheme):
+        sp = scheme + 'admin:' + tok + '@' + raw[len(scheme):]
+        break
+sys.stderr.write('[deliver] software_path set from origin' + chr(10))
+print(json.dumps(dict(workspace_repo=sp)))
+PYEOF"
+    ]
+
+    // Run the platform reality-check (3-node sub-pipeline: BuildArtifact ->
+    // RealityCheck invoke -> RenderVerdict). Inherits workspace_repo from
+    // DeliverGitea; writes .resolve/reality_check/verdict.json.
+    RealityCheck [shape=folder, label="Reality check", dot_file="subgraphs/reality_check.dot"]
+
+    // Deterministic router: read the RC verdict + a bounded round counter and
+    // emit rc_state. pass -> rc_pass; otherwise increment the round counter and
+    // emit rc_fix until the cap, then rc_exhausted. A missing/unreadable verdict
+    // counts as fail (bounded by the counter). State in .ai/rc_fix_state.json.
+    RCClassify [
+        shape=parallelogram,
+        label="Classify RC verdict",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os, sys
+sp = '.ai/rc_fix_state.json'
+st = json.load(open(sp)) if os.path.exists(sp) else dict(rc_rounds=0, max_rounds=2)
+try:
+    verdict = json.load(open('.resolve/reality_check/verdict.json')).get('verdict') or 'fail'
+except Exception as e:
+    sys.stderr.write('verdict.json unreadable: ' + str(e) + chr(10))
+    verdict = 'fail'
+if verdict == 'pass':
+    state = 'rc_pass'
+else:
+    st['rc_rounds'] += 1
+    state = 'rc_exhausted' if st['rc_rounds'] > st['max_rounds'] else 'rc_fix'
+json.dump(st, open(sp, 'w'))
+print(json.dumps(dict(rc_state=state, rc_round=st['rc_rounds'], rc_verdict=verdict)))
+PYEOF"
+    ]
+
+    CheckRC [shape=diamond, label="Reality check passed?"]
+
+    // Append a reality-check fix task to .ai/plan/ pointing the implementer at
+    // the failing acceptance tests (the RC report.yaml), then reset impl_state
+    // so the Step 4 loop picks it up. Mirrors Step 5's Reopen.
+    BuildRCFix [
+        shape=parallelogram,
+        label="Reopen RC fix task",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import os, json, glob, re
+nl = chr(10)
+plan = '.ai/plan'
+verdict = 'fail'; report_txt = ''
+try:
+    v = json.load(open('.resolve/reality_check/verdict.json'))
+    verdict = v.get('verdict') or 'fail'
+    rp = v.get('report_yaml_path') or ''
+    if rp and os.path.exists(rp):
+        report_txt = open(rp).read()
+except Exception as e:
+    report_txt = 'verdict/report unreadable: ' + str(e)
+rnd = json.load(open('.ai/rc_fix_state.json'))['rc_rounds']
+nums = []
+for p in glob.glob(os.path.join(plan, 'task_*')):
+    m = re.match(r'task_(\d+)', os.path.basename(p))
+    if m: nums.append(int(m.group(1)))
+nxt = (max(nums) + 1) if nums else 1
+fname = 'task_' + str(nxt).zfill(2) + '_rcfix_' + str(rnd) + '.md'
+body = ['# Reality-check fix task (round ' + str(rnd) + ')',
+        '',
+        'An INDEPENDENT reality check against the original spec returned verdict: ' + verdict + '.',
+        'Read the original intent and acceptance criteria in .ai/admission.yaml, then fix the build so it',
+        'satisfies the failing acceptance tests below. Change code or docs in the',
+        'workspace, never the tests.',
+        '',
+        '## Reality-check report (derived acceptance tests + evidence)',
+        '```',
+        report_txt[:6000],
+        '```',
+        '',
+        '## Acceptance',
+        'The reality check passes (all derived acceptance tests pass) on the next run.']
+open(os.path.join(plan, fname), 'w').write(nl.join(body) + nl)
+with open(os.path.join(plan, 'INDEX.md'), 'a') as f:
+    f.write(nl + str(nxt).zfill(2) + '. ' + fname + ' - reality-check fix round ' + str(rnd) + nl)
+done = os.path.join(plan, '.done')
+os.makedirs(done, exist_ok=True)
+remaining = [t for t in glob.glob(os.path.join(plan, 'task_*')) if not os.path.exists(os.path.join(done, os.path.basename(t)))]
+_prev = json.load(open('.ai/impl_state.json')) if os.path.exists('.ai/impl_state.json') else {}
+# Reset the per-leg counters only. total_impl carries across so the fix loops
+# cannot refill the run-wide implement budget.
+json.dump(dict(iter=0, max_iter=20, stall_max=3, prev_remaining=len(remaining), stall_count=0, total_impl=_prev.get('total_impl', 0), total_impl_max=_prev.get('total_impl_max', 40)), open('.ai/impl_state.json', 'w'))
+print('rc_reopened ' + fname)
+PYEOF"
+    ]
+
+    // =====================================================================
+    // STEP 7 - Final Output. The build has passed the reality check. Make the
+    // deliverable clear: write a user-facing README (what it is + concise
+    // install + usage, using only the validated commands) and a short delivery
+    // summary, then commit/push the final state to the gitea repo and write a
+    // delivery note to the platform data dir telling the user where to observe
+    // and how to try it.
+    //
+    // GitHub promote runs CONDITIONALLY. The earlier reasoning -- that promote
+    // targets an existing source repo's owner and expert_builder builds from a
+    // bare spec with no owner to promote to -- holds only for greenfield runs.
+    // Once a run targets an existing repo (feature-into-existing-repo), there
+    // IS an owner, and stopping at the per-instance gitea sidecar would strand
+    // the work in an ephemeral container. So Step 7 probes for a promotable
+    // repo and delegates to subgraphs/deliver_promote.dot when it finds one,
+    // and skips otherwise. Greenfield delivery is unchanged.
+    // =====================================================================
+
+    Deliver [
+        shape=box,
+        label="Prepare delivery",
+        goal_gate="true",
+        max_retries="1",
+        // Retry posture: NO goal-gated box node in this graph carries a retry_target
+        // -- a failed gate terminates rather than rewinding, since failure routing
+        // clears node_outcomes and re-runs with no memory, up to
+        // _MAX_GOAL_GATE_RETRIES (50).
+        //
+        // max_retries="1" covers TRANSIENT handler exceptions only (timeout,
+        // connection, 429/5xx). execute_with_retry returns immediately on FAIL and
+        // only re-attempts on StageStatus.RETRY, which these prompts never emit --
+        // `retry` is deliberately absent from every status vocabulary. It is NOT a
+        // second bite at a bad verdict; do not build on that assumption.
+        //
+        // For Deliver the termination is also affirmatively correct -- delivery
+        // follows a PASSED independent reality check.
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="40",
+        prompt="You are preparing the FINAL delivery of a project that has already PASSED an independent reality check. Make the deliverable clear for a user who will observe and try it.\n\nFIRST read: .ai/admission.yaml (what was asked for and the acceptance criteria it must meet), the existing README.md and the source files in the workspace, and .ai/plan/PROGRESS.md (it records the ACTUAL install and run commands that were validated). Use ONLY those real, validated commands. Do NOT invent, guess, or alter commands, flags, or file names.\n\nThen write TWO files:\n\n1. README.md at the workspace root: a clear, concise, user-facing readme. It MUST contain, in order: a one-line summary; a short 'What this is' paragraph describing what was built; an 'Install' section with the exact minimal commands (or state 'No installation needed' if it is standard-library only); a 'Usage' section with 1 to 3 concrete runnable examples and their expected output. Keep the real validated commands verbatim. Do not pad it with filler.\n\n2. .ai/delivery_summary.md: a short delivery note the user reads first. 2 to 4 sentences on what was built, then a concise 'Install' and 'Use' section with one real example. Skimmable.\n\nWrite both files now.\n\nWhen you are done, your FINAL message must END with a JSON verdict object and NOTHING after it -- no closing remarks, no summary, no code fence, and no other braces after it. Emit it exactly in this shape:\n\n{\"status\": \"success\", \"notes\": \"<one line summary of what was built>\"}\n\nValid status values for this node: \"success\" or \"fail\". Use lowercase exactly as shown. The notes value must be plain prose with NO braces in it. The object must be the last thing in your reply."
+    ]
+
+    DeliverFinalize [
+        shape=parallelogram,
+        label="Finalize delivery",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os, subprocess, sys
+wd = '/project/workspace'
+# Keep pipeline scratch OUT of the delivered repo. `.resolve/reality_check/`
+# holds an artifact.json carrying an auth-embedded gitea URL (a live
+# GITEA_TOKEN), and `.ai/` holds admission evidence, spiked throwaway
+# approaches and plan state. Neither belongs in a delivered tree, and on the
+# promote path they would land in a PR against a real repo. Same discipline as
+# implement.dot (.git/info/exclude) and pr_feedback.dot (post-add reset); both
+# are applied here because exclude does not cover already-tracked paths.
+try:
+    ex = os.path.join(wd, '.git/info/exclude')
+    os.makedirs(os.path.dirname(ex), exist_ok=True)
+    cur = open(ex).read() if os.path.exists(ex) else ''
+    with open(ex, 'a') as fh:
+        for pat in ('.ai/', '.resolve/'):
+            if pat not in cur.split():
+                fh.write(pat + chr(10))
+except Exception as exc:
+    sys.stderr.write('WARNING: could not write .git/info/exclude: ' + str(exc) + chr(10))
+subprocess.run(['git', '-C', wd, 'add', '-A'], check=True)
+subprocess.run(['git', '-C', wd, 'reset', '-q', '--', '.ai', '.resolve'], capture_output=True, text=True)
+leaked = subprocess.run(['git', '-C', wd, 'diff', '--cached', '--name-only'], capture_output=True, text=True).stdout.split()
+bad = [f for f in leaked if f.startswith('.ai/') or f.startswith('.resolve/')]
+if bad:
+    sys.stderr.write('ERROR: pipeline scratch still staged: ' + ' '.join(bad) + chr(10))
+    sys.exit(1)
+subprocess.run(['git', '-C', wd, '-c', 'user.email=expert-builder@amplifier.dev', '-c', 'user.name=expert-builder', 'commit', '-m', 'expert_builder: finalize delivery (clear README + delivery summary)', '--allow-empty'], capture_output=True, text=True)
+push = subprocess.run(['git', '-C', wd, 'push', 'origin', 'HEAD:main'], capture_output=True, text=True)
+sys.stderr.write(push.stdout + push.stderr)
+repo_ref = 'the per-instance gitea repo (branch main)'
+try:
+    raw = subprocess.run(['git', '-C', wd, 'remote', 'get-url', 'origin'], check=True, capture_output=True, text=True).stdout.strip()
+    if raw.endswith('.git'):
+        raw = raw[:-4]
+    if '://' in raw and '@' in raw:
+        i = raw.index('://') + 3
+        raw = raw[:i] + raw[raw.index('@', i) + 1:]
+    repo_ref = '/'.join(raw.split('/')[-2:])
+except Exception as e:
+    sys.stderr.write('repo ref error: ' + str(e) + chr(10))
+iid = ''
+try:
+    iid = json.load(open('/project/.resolve/config.json')).get('instance_id', '')
+except Exception:
+    pass
+nl = chr(10)
+summary = open('.ai/delivery_summary.md').read().rstrip() if os.path.exists('.ai/delivery_summary.md') else '# Delivery' + nl + nl + 'Your project was built and reality-checked against the spec.'
+# Feed the promote PR title/body. deliver_promote.dot's CallPromotePR reads
+# .ai/pr_title.txt and .ai/implementation_summary.md; without them the PR would
+# be titled with implement.dot's generic default. .ai/ is force-excluded from
+# the delivered tree (above), so nothing here leaks into the PR diff.
+try:
+    _first = next((l.strip() for l in summary.splitlines() if l.strip() and not l.startswith('#')), '')
+    open('.ai/pr_title.txt', 'w').write((_first or 'expert_builder: build from spec')[:72] + nl)
+    open('.ai/implementation_summary.md', 'w').write(summary + nl)
+except Exception as exc:
+    sys.stderr.write('WARNING: could not write PR title/body: ' + str(exc) + nl)
+where = ['', '## Where to find it and how to try it', '',
+         'Delivered to the git repo: ' + repo_ref + '. The README.md at the repo root has the full install and usage instructions.',
+         'Browse and run the code in the instance workspace on your machine:',
+         '    ~/.amplifier/resolve/instances/' + (iid or '<instance-id>') + '/workspace/',
+         '', 'It was built from your spec and passed an independent reality check against it.']
+os.makedirs('/project/.resolve/data', exist_ok=True)
+open('/project/.resolve/data/delivery.md', 'w').write(summary + nl + nl + nl.join(where) + nl)
+sys.stderr.write('[deliver] wrote /project/.resolve/data/delivery.md' + chr(10))
+print('Delivered ' + repo_ref + ' (workspace: ~/.amplifier/resolve/instances/' + (iid or '<instance-id>') + '/workspace/). See README.md for install/usage.')
+PYEOF"
+    ]
+
+    // Resolve the promote TARGET from the submitted params and pre-verify the
+    // two conditions the platform enforces (amplifier-resolve
+    // routes/internal.py:150 delivery_mode, :153 repo_url). Promote is
+    // NON-OPTIONAL under the single-repo model: the repo is REQUIRED and always
+    // exists (RepoGate escalates otherwise), so every run ends in a PR against
+    // it -- including an empty greenfield repo. `blocked` means we can PROVE the
+    // endpoint would refuse (no / non-canonical target, or delivery_mode not
+    // promote), so we report that rather than attempt it blind.
+    PromoteCheck [
+        shape=parallelogram,
+        label="Promote target?",
+        parse_json="true",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, re, sys
+nl = chr(10)
+cfg, params = {}, {}
+try:
+    cfg = json.load(open('/project/.resolve/config.json'))
+    params = cfg.get('params') or {}
+except Exception as exc:
+    sys.stderr.write('[promote-check] no readable config: ' + str(exc) + nl)
+raw = str(params.get('repo_url') or cfg.get('repo_url') or '').strip()
+mode = str(params.get('delivery_mode') or '').strip()
+owner_re = re.compile('^[A-Za-z0-9][A-Za-z0-9-]*$')
+repo_re = re.compile('^[A-Za-z0-9._-]+$')
+state, reason, owner, name = 'blocked', '', '', ''
+cand = raw
+if not raw:
+    reason = 'no target repo in the submitted params (repo_url) or in config.json'
+elif '@' in raw:
+    reason = 'SSH or credential-bearing form rejected by the platform: ' + raw + ' -- use owner/repo'
+    cand = ''
+elif '://' in raw:
+    if raw.startswith('https://github.com/'):
+        cand = raw[len('https://github.com/'):]
+    else:
+        reason = 'only owner/repo or https://github.com/<owner>/<repo> is accepted: ' + raw
+        cand = ''
+if cand:
+    cand = cand.rstrip('/')
+    if cand.endswith('.git'):
+        cand = cand[:-4]
+    parts = [p for p in cand.split('/') if p]
+    if len(parts) != 2 or not owner_re.match(parts[0]) or not repo_re.match(parts[1]):
+        reason = 'not a canonical owner/repo: ' + raw
+    else:
+        owner, name = parts[0], parts[1]
+        state = 'promote'
+if state == 'promote' and mode != 'promote':
+    state = 'blocked'
+    reason = 'submitted delivery_mode=' + (mode or '<absent>') + '; the platform promote endpoint requires delivery_mode=promote (409 otherwise). Re-submit with Delivery = Open GitHub PR.'
+target = (owner + '/' + name) if owner else ''
+sys.stderr.write('[promote-check] state=' + state + ' target=' + (target or '<none>') + (' reason=' + reason if reason else '') + nl)
+print(json.dumps(dict(promote_state=state, promote_target=target, promote_reason=reason)))
+PYEOF"
+    ]
+
+    CheckPromote [shape=diamond, label="Promote to GitHub?"]
+
+    // Push a named branch to the gitea sidecar and call the platform
+    // promote/pr endpoint to open a real GitHub PR against the owning repo.
+    // Same subgraph implement.dot and dev_machine use, so PR construction and
+    // failure handling stay in one place. A promote failure is reported, not
+    // fatal: the build already passed its reality check and is delivered to
+    // gitea regardless.
+    Promote [
+        shape=folder,
+        label="Promote to GitHub PR",
+        dot_file="subgraphs/deliver_promote.dot",
+        outputs="delivery.result,delivery.pr_url"
+    ]
+
+    // Legibility: the PR is the review gate, so the delivery artifact must NAME
+    // it. Runs on BOTH the promote and blocked branches; runs_on="always" so a
+    // missing delivery.pr_url substitutes to empty instead of skipping the node.
+    // This rewrites /project/.resolve/data/delivery.md last, so the PR URL (or
+    // the reason none opened) is what the user sees.
+    PromoteReport [
+        shape=parallelogram,
+        label="Report PR outcome",
+        runs_on="always",
+        tool_env="promote_state,promote_reason,promote_target",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os, sys
+nl = chr(10)
+def ctx(tok):
+    tok = (tok or '').strip()
+    return '' if tok.startswith('$') else tok
+pr_url = ctx('${delivery.pr_url}')
+result = ctx('${delivery.result}') or 'not_attempted'
+state = (os.environ.get('PROMOTE_STATE') or '').strip()
+reason = (os.environ.get('PROMOTE_REASON') or '').strip()
+target = (os.environ.get('PROMOTE_TARGET') or '').strip()
+iid = ''
+try:
+    iid = json.load(open('/project/.resolve/config.json')).get('instance_id', '')
+except Exception:
+    pass
+summary = open('.ai/delivery_summary.md').read().rstrip() if os.path.exists('.ai/delivery_summary.md') else '# Delivery'
+parts = [summary, '', '## Review the pull request', '']
+if pr_url:
+    parts += ['The build is open as a pull request against ' + (target or 'your repo') + ':', '', '    ' + pr_url, '', 'Review and merge it there -- nothing was merged for you.']
+elif state == 'blocked':
+    parts += ['No pull request was opened: ' + (reason or 'the promote target could not be resolved') + '.']
+else:
+    parts += ['The pull request could NOT be opened (' + result + ') against ' + (target or 'the target repo') + '. The build is in the instance workspace and on a branch in the gitea sidecar.']
+parts += ['', 'Workspace on your machine:', '', '    ~/.amplifier/resolve/instances/' + (iid or '<instance-id>') + '/workspace/']
+os.makedirs('/project/.resolve/data', exist_ok=True)
+open('/project/.resolve/data/delivery.md', 'w').write(nl.join(parts) + nl)
+sys.stderr.write('[promote-report] state=' + state + ' result=' + result + ' pr=' + (pr_url or '<none>') + nl)
+print(('PR: ' + pr_url) if pr_url else ('No PR opened (' + (reason or result) + ')'))
+PYEOF"
+    ]
+
+    // =====================================================================
+    // Exhaustion terminal. Five paths reach the end because a counter ran out,
+    // not because a check passed: CheckImpl on stalled/max_iter, CheckVal on
+    // blocked/exhausted, CheckRC on rc_exhausted. Routing those straight to
+    // `done` terminates the run green with an empty data dir, so the terminal
+    // cannot distinguish convergence from exhaustion.
+    //
+    // Every one of them lands here instead, and ships evidence: which counter
+    // expired, at what value, and what was actually attempted. Same contract as
+    // AdmissionHalt -- a non-success exit explains itself.
+    // =====================================================================
+
+    ExhaustHalt [
+        shape=parallelogram,
+        label="Report exhaustion",
+        tool_env="impl_state,val_state,rc_state",
+        tool_command="/opt/uv-tools/amplifier/bin/python3 - <<'PYEOF'
+import json, os, sys
+nl = chr(10)
+
+def _load(path):
+    try:
+        return json.load(open(path))
+    except Exception:
+        return {}
+
+impl = os.environ.get('IMPL_STATE') or ''
+val = os.environ.get('VAL_STATE') or ''
+rc = os.environ.get('RC_STATE') or ''
+
+reasons = {
+    'stalled': 'The implement loop stopped making progress: the remaining-task count did not drop across consecutive rounds.',
+    'max_iter': 'The implement loop hit its per-round iteration ceiling with tasks still outstanding.',
+    'blocked': 'Validation reported the build could not be exercised (fault: harness).',
+    'exhausted': 'Validation kept failing and its fix-round budget ran out.',
+    'rc_exhausted': 'The independent reality check kept failing and its fix-round budget ran out.',
+    'total_exhausted': 'The run-wide implement ceiling (total_impl_max) was reached across all fix loops combined.',
+}
+terminal = rc if rc in reasons else (val if val in reasons else (impl if impl in reasons else ''))
+label = terminal or 'unknown'
+
+parts = ['# Not delivered -- run ended on exhaustion', '',
+         'This run stopped because a budget ran out, NOT because the build passed its',
+         'acceptance criteria. Nothing here has been validated against what you asked for.', '',
+         '## What ran out', '',
+         '- Terminal state: ' + label,
+         '- ' + reasons.get(terminal, 'The run reached a bounded exit without a passing check.'), '']
+
+sd = _load('.ai/impl_state.json')
+if sd:
+    parts += ['## Implement loop', '',
+              '- iterations: ' + str(sd.get('iter', '?')) + ' of ' + str(sd.get('max_iter', '?')),
+              '- stall count: ' + str(sd.get('stall_count', '?')),
+              '- total implement invocations this run: ' + str(sd.get('total_impl', '?')), '']
+vd = _load('.ai/validation/state.json')
+if vd:
+    parts += ['## Validation rounds', '', '- round ' + str(vd.get('round', '?')) + ' of ' + str(vd.get('max_rounds', '?')), '']
+rd = _load('.ai/rc_fix_state.json')
+if rd:
+    parts += ['## Reality-check rounds', '', '- round ' + str(rd.get('rc_rounds', '?')) + ' of ' + str(rd.get('max_rounds', '?')), '']
+
+for path, heading in (('.ai/plan/INDEX.md', 'The plan it was working from'),
+                      ('.ai/plan/PROGRESS.md', 'What actually got done'),
+                      ('.ai/validation/verdict.json', 'Last validation verdict'),
+                      ('.ai/admission.yaml', 'The acceptance criteria it was building against')):
+    if os.path.exists(path):
+        body = open(path).read().rstrip()
+        if len(body) > 4000:
+            body = body[:4000] + nl + '... (truncated)'
+        parts += ['## ' + heading, '', body, '']
+
+parts += ['The workspace is preserved -- partial work is on disk and in the gitea repo if',
+          'delivery had already run. Re-running will start a fresh admission pass.']
+
+os.makedirs('/project/.resolve/data', exist_ok=True)
+open('/project/.resolve/data/delivery.md', 'w').write(nl.join(parts) + nl)
+sys.stderr.write('[exhaust] wrote exhaustion report: ' + label + nl)
+print('exhausted:' + label)
+PYEOF"
+    ]
+
+    // ---- Step 1 wiring ----
+    //
+    // RepoGate sits between the input binding and the gate itself: admission
+    // must never run against a repo it was told about but does not have. Its
+    // escalate edge lands on AdmissionHalt, which is already the "explain a
+    // non-admission" terminal -- RepoGate emits the same admission_verdict /
+    // admission_stage keys AdmissionHalt reads via tool_env, and writes the
+    // same .ai/escalation.md AdmissionHalt embeds. No new terminal is needed.
+    start             -> AdmissionInit
+    AdmissionInit     -> RepoGate
+    RepoGate          -> CheckRepo
+    CheckRepo         -> Admission     [label="staged",     condition="context.repo_state=ok"]
+    CheckRepo         -> AdmissionHalt [label="not staged", condition="context.repo_state=unstaged"]
+    Admission         -> AdmissionClassify
+    AdmissionClassify -> CheckAdmission
+    CheckAdmission    -> Decompose     [label="admit", condition="context.admission_state=admit"]
+    CheckAdmission    -> AdmissionHalt [label="halt",  condition="context.admission_state=halt"]
+    AdmissionHalt     -> done
+
+    // ---- Step 2 wiring ----
+    Decompose   -> ExploreFork
+    ExploreFork -> Explore_1
+    ExploreFork -> Explore_2
+    Explore_1   -> ExploreJoin
+    Explore_2   -> ExploreJoin
+    ExploreJoin -> Synthesize
+
+    // ---- Step 3 wiring ----
+    Synthesize -> Plan
+    Plan       -> VerifyPlan
+    VerifyPlan -> CheckPlan
+    CheckPlan  -> ImplementInit [label="ok",      condition="context.plan_state=plan_ok"]
+    CheckPlan  -> Plan          [label="missing", condition="context.plan_state=plan_missing"]
+
+    // ---- Step 4 wiring (implement loop) ----
+    //
+    // On loop_restart on the `continue` edge: KEPT, deliberately, with a known
+    // cost. This edge is a WORKLIST DRAIN -- it advances to the next plan task --
+    // not a corrective retry, so marking it loop_restart inflates the engine's
+    // iteration_count with non-corrective advances. That makes a per-iteration
+    // descent measurement over trace.jsonl read as noise on this graph, and it
+    // is a real cost, not a cosmetic one.
+    //
+    // It is kept because engine.py step 6 does two things on loop_restart, and
+    // the second is load-bearing here: it clears completed_nodes/node_outcomes
+    // (not needed -- the completed_nodes skip at engine.py:230 is guarded by
+    // `resumed` and does not block re-entry in normal flow), AND it resets
+    // goal_gate_retries and failure_routing_retries to 0. Implement carries
+    // goal_gate="true". Without the reset those retry budgets accumulate across
+    // every task in the plan, so a long plan would exhaust the goal-gate budget
+    // on task N for reasons belonging to tasks 1..N-1. Each task is a fresh unit
+    // of work and deserves a fresh gate budget.
+    //
+    // Retires when: the engine offers a way to reset gate retries without
+    // incrementing the iteration counter, or trace analysis learns to filter
+    // non-corrective advances by edge label.
+    ImplementInit   -> Implement
+    Implement       -> ImplementVerify
+    ImplementVerify -> CheckImpl
+    CheckImpl       -> Implement [label="continue", condition="context.impl_state=continue", loop_restart="true"]
+    CheckImpl       -> UserRun   [label="done",     condition="context.impl_state=all_done"]
+    CheckImpl       -> ExhaustHalt [label="stalled",  condition="context.impl_state=stalled"]
+    CheckImpl       -> ExhaustHalt [label="max_iter", condition="context.impl_state=max_iter"]
+    CheckImpl       -> ExhaustHalt [label="total_exhausted", condition="context.impl_state=total_exhausted"]
+
+    // ---- Step 5 wiring (validate by using the build; fix loop back to implement) ----
+    UserRun     -> ReadVerdict
+    ReadVerdict -> CheckVal
+    CheckVal    -> PrepareRC [label="pass",   condition="context.val_state=pass"]
+    CheckVal    -> ExhaustHalt [label="blocked",   condition="context.val_state=blocked"]
+    CheckVal    -> ExhaustHalt [label="exhausted", condition="context.val_state=exhausted"]
+    CheckVal    -> Reopen [label="fix",       condition="context.val_state=fix"]
+    Reopen      -> Implement [label="re-implement", loop_restart="true"]
+
+    // ---- Step 6 wiring (independent reality-check; fix loop back to implement) ----
+    PrepareRC    -> DeliverGitea
+    DeliverGitea -> RealityCheck
+    RealityCheck -> RCClassify
+    RCClassify   -> CheckRC
+    CheckRC      -> Deliver    [label="rc_pass",      condition="context.rc_state=rc_pass"]
+    CheckRC      -> ExhaustHalt [label="rc_exhausted", condition="context.rc_state=rc_exhausted"]
+    CheckRC      -> BuildRCFix [label="rc_fix",       condition="context.rc_state=rc_fix"]
+    BuildRCFix   -> Implement  [label="rc-reimplement", loop_restart="true"]
+
+    // ---- Step 7 wiring (final output -> conditional GitHub promote -> done) ----
+    Deliver         -> DeliverFinalize
+    DeliverFinalize -> PromoteCheck
+    PromoteCheck    -> CheckPromote
+    CheckPromote    -> Promote       [label="promote", condition="context.promote_state=promote"]
+    CheckPromote    -> PromoteReport [label="blocked", condition="context.promote_state=blocked"]
+    Promote         -> PromoteReport
+    PromoteReport   -> done
+
+    // ---- exhaustion terminal ----
+    ExhaustHalt     -> done
+}

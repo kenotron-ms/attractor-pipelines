@@ -1,0 +1,34 @@
+digraph expert_builder_explorer {
+    graph [goal="Explore one hard part: spike candidate approaches, package pros/cons"]
+
+    start [shape=Mdiamond, label="Start"]
+    done  [shape=Msquare,  label="Done"]
+
+    // One hard part. $slot is injected by the parent folder node (context.slot).
+    Explore [
+        shape=box,
+        label="Spike approaches and package",
+        goal_gate="true",
+        max_retries="1",
+        fidelity="full",
+        llm_provider="anthropic",
+        llm_model="claude-opus-4-8",
+        max_agent_turns="90",
+        prompt="You are exploring ONE hard part of a build task. Your job is to try several real options and find an approach that is ROBUST across the inputs the user actually expects, not just a trivial happy-path demo.\n\nFirst read .ai/hard_parts/slot_$slot.md (this hard part and what a good solution must achieve) AND .ai/admission.yaml (the admitted request, the acceptance criteria that define 'done', and the declared assumptions -- so you understand the real inputs and constraints this part must satisfy).\n\nThen:\n1. Write .ai/hard_parts/slot_$slot/EDGE_CASES.md: an explicit list of the concrete edge cases, boundary conditions, and full input range this part must handle -- for example unusual, historical, large, empty, or malformed inputs, and external services that rate-limit, require auth or specific headers, paginate, or return errors. A solution that only works on one easy input is NOT acceptable.\n2. Propose THREE distinct candidate approaches.\n3. SPIKE each approach: write a real, runnable proof-of-concept under .ai/hard_parts/slot_$slot/approach_1/ , approach_2/ , and approach_3/ (real code plus a short NOTES.md in each). Where you can, ACTUALLY RUN each spike with the shell tool against BOTH a normal input AND at least one edge case from EDGE_CASES.md, and record the real command, output, and exit code in NOTES.md. Note which approaches survive the edge cases and which break.\n4. Write .ai/hard_parts/slot_$slot/SOLUTION.md: start with a one-line RECOMMENDATION, then a pros/cons comparison that EXPLICITLY covers how each approach handles the edge cases, an 'Edge cases and robustness' section describing what the recommended approach does for each edge case (and any it cannot yet handle), and a short justification for the one you recommend.\n\nCreate any directories you need. Prefer an approach proven to handle the edge cases, even if it is more work. Write SOLUTION.md last so it reflects what you learned from running the spikes.\n\nWhen you are done, your FINAL message must END with a JSON verdict object and NOTHING after it -- no closing remarks, no summary, no code fence, and no other braces after it. Emit it exactly in this shape:\n\n{\"status\": \"success\", \"notes\": \"<one line on the recommended approach>\"}\n\nIf you could not produce SOLUTION.md, use status fail.\n\nValid status values for this node: \"success\" or \"fail\". Use lowercase exactly as shown. The notes value must be plain prose with NO braces in it. The object must be the last thing in your reply."
+    ]
+
+    // Verify the package actually exists (a box can report success having done nothing).
+    Verify [
+        shape=parallelogram,
+        label="Verify SOLUTION.md",
+        tool_command="test -s .ai/hard_parts/slot_$slot/SOLUTION.md && echo solution_ok || echo solution_missing"
+    ]
+
+    Check [shape=diamond, label="Packaged?"]
+
+    start   -> Explore
+    Explore -> Verify
+    Verify  -> Check
+    Check   -> done    [label="ok",      condition="context.tool.last_line=solution_ok"]
+    Check   -> Explore [label="missing", condition="context.tool.last_line=solution_missing"]
+}

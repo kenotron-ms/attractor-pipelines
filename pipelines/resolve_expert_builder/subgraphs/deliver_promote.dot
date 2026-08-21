@@ -1,0 +1,101 @@
+// deliver_promote.dot -- Deliver: Promote to GitHub PR Subgraph
+//
+// Pushes the current workspace to a named branch in the Gitea sidecar,
+// then calls the platform promote/pr endpoint to open a real GitHub PR.
+//
+// The branch name is derived from the git remote origin repo name using
+// the same cred-stripping extraction as deliver_pr.dot CreatePR.
+// Platform credentials are read from /project/.resolve/config.json.
+//
+// Flow:
+//   Start -> PushPromoteBranch -> CallPromotePR -> Exit
+//   PushPromoteBranch -> SetResultFail  [condition="outcome=fail"]
+//   CallPromotePR     -> SetResultFail  [condition="outcome=fail"]
+//   SetResultFail     -> Exit
+//
+// 5 nodes, 6 edges.
+// Context inputs:  (reads platform_url, instance_id, required sub_container_token
+//                   from /project/.resolve/config.json)
+// dev_machine acceptance hand-off (optional, backward compatible): if
+//                   .resolve/delivery/pr_title.txt / pr_body.md exist, the curated title
+//                   is preferred and the curated body is merged in as an
+//                   'Acceptance hand-off' section alongside the implement-pipeline
+//                   summary / critic / security sections.
+// Context outputs: delivery.result ('pr_created' or 'promote_failed'), delivery.pr_url
+
+digraph DeliverPromote {
+    graph [
+        label="Deliver: Promote to GitHub PR",
+        rankdir=LR,
+        default_fidelity="truncate",
+        default_max_retry="1"
+    ]
+
+    // -----------------------------------------------------------------------
+    // Terminal nodes
+    // -----------------------------------------------------------------------
+
+    Start [shape=Mdiamond, label="Start"]
+    Exit  [shape=Msquare,  label="Exit"]
+
+    // -----------------------------------------------------------------------
+    // PushPromoteBranch -- creates a branch named after the repo and
+    // force-pushes it to the Gitea sidecar origin.
+    //
+    // Branch name is derived from origin URL with the same cred-stripping
+    // logic as deliver_pr.dot CreatePR (strip credentials between :// and @).
+    // All git output goes to stderr; the final stdout line is parse_json JSON.
+    // Outputs delivery.promote_branch for observability.
+    // -----------------------------------------------------------------------
+
+    PushPromoteBranch [
+        shape=parallelogram,
+        label="Push Promote Branch",
+        parse_json="true",
+        tool_env="branch_name",
+        tool_command="#!/bin/sh\nset -e\ncat > /tmp/push_promote_branch.py <<'PYEOF'\nimport json, os, subprocess, sys\nwork_dir = '/project/workspace'\nraw_url = subprocess.run(['git', '-C', work_dir, 'remote', 'get-url', 'origin'], check=True, capture_output=True, text=True).stdout.strip()\nurl = raw_url\nif '://' in url and '@' in url:\n    scheme_end = url.index('://') + 3\n    at_pos = url.index('@', scheme_end)\n    url = url[:scheme_end] + url[at_pos + 1:]\nif url.endswith('.git'):\n    url = url[:-4]\nrepo_name = url.rstrip('/').split('/')[-1]\nbranch_name_env = (os.environ.get('BRANCH_NAME') or '').strip()\nif branch_name_env:\n    promote_branch = branch_name_env\nelse:\n    instance_id = ''\n    try:\n        with open('/project/.resolve/config.json') as f:\n            instance_id = (json.load(f).get('instance_id') or '').strip()\n    except Exception:\n        instance_id = ''\n    if instance_id:\n        promote_branch = 'resolve/' + repo_name + '-' + instance_id[:8]\n    else:\n        promote_branch = repo_name\nprint('[push-promote] branch name: ' + promote_branch, file=sys.stderr)\nsubprocess.run(['git', '-C', work_dir, 'checkout', '-B', promote_branch], check=True, stdout=sys.stderr, stderr=sys.stderr)\nsubprocess.run(['git', '-C', work_dir, 'push', '-u', 'origin', promote_branch, '--force'], check=True, stdout=sys.stderr, stderr=sys.stderr)\nprint('[push-promote] pushed branch ' + promote_branch + ' to origin', file=sys.stderr)\nprint(json.dumps({'delivery.promote_branch': promote_branch}))\nPYEOF\n/opt/uv-tools/amplifier/bin/python /tmp/push_promote_branch.py"
+    ]
+
+    // -----------------------------------------------------------------------
+    // CallPromotePR -- reads platform_url and instance_id from
+    // /project/.resolve/config.json, then POSTs to
+    //   {platform_url}/internal/instances/{id}/repos/{repo}/promote/pr
+    // to trigger a real GitHub PR via the platform PromotionService.
+    //
+    // sub_container_token: required; always sent as Authorization: Bearer.
+    // On success: emits delivery.pr_url and delivery.result=pr_created.
+    // On error: prints to stderr and exits non-zero (routes to SetResultFail).
+    // -----------------------------------------------------------------------
+
+    CallPromotePR [
+        shape=parallelogram,
+        label="Call Promote PR",
+        parse_json="true",
+        tool_env="task,branch_name",
+        tool_command="#!/bin/sh\nset -e\ncat > /tmp/call_promote_pr.py <<'PYEOF'\nimport json, os, subprocess, sys, urllib.error, urllib.request\nwork_dir = '/project/workspace'\nwith open('/project/.resolve/config.json') as f:\n    cfg = json.load(f)\nplatform_url = cfg.get('platform_url', '').rstrip('/')\ninstance_id = cfg.get('instance_id', '')\nsub_container_token = cfg.get('sub_container_token', '')\nif not platform_url:\n    print('ERROR: platform_url not in config.json', file=sys.stderr)\n    sys.exit(1)\nif not instance_id:\n    print('ERROR: instance_id not in config.json', file=sys.stderr)\n    sys.exit(1)\nif not sub_container_token:\n    print('ERROR: sub_container_token missing or empty in config.json', file=sys.stderr)\n    sys.exit(1)\nraw_url = subprocess.run(['git', '-C', work_dir, 'remote', 'get-url', 'origin'], check=True, capture_output=True, text=True).stdout.strip()\nurl = raw_url\nif '://' in url and '@' in url:\n    scheme_end = url.index('://') + 3\n    at_pos = url.index('@', scheme_end)\n    url = url[:scheme_end] + url[at_pos + 1:]\nif url.endswith('.git'):\n    url = url[:-4]\nrepo_name = url.rstrip('/').split('/')[-1]\nbranch_name_env = (os.environ.get('BRANCH_NAME') or '').strip()\nif branch_name_env:\n    promote_branch = branch_name_env\nelse:\n    if instance_id:\n        promote_branch = 'resolve/' + repo_name + '-' + instance_id[:8]\n    else:\n        promote_branch = repo_name\ntask = (os.environ.get('task') or os.environ.get('TASK') or '').strip()\ntitle_src = next((ln for ln in task.splitlines() if ln.strip()), '')\npr_title = title_src[:72] if title_src else 'Automated implementation via the implement pipeline'\ntry:\n    with open('.ai/pr_title.txt') as _tf:\n        _t = next((ln for ln in _tf.read().splitlines() if ln.strip()), '')\n    if _t:\n        pr_title = _t.strip()[:72]\nexcept Exception:\n    pass\ntry:\n    _dtp = os.path.join(work_dir, '.resolve/delivery/pr_title.txt')\n    if os.path.exists(_dtp):\n        _dt = next((ln for ln in open(_dtp).read().splitlines() if ln.strip()), '')\n        if _dt:\n            pr_title = _dt.strip()[:72]\nexcept Exception:\n    pass\ntry:\n    with open('.ai/implementation_summary.md') as _f:\n        _body = _f.read().strip()\nexcept Exception:\n    _body = ''\n_nl = chr(10)\npr_body = _body if _body else ('Automated contribution via the implement pipeline.' + _nl * 2 + 'Task:' + _nl * 2 + task if task else 'Automated contribution via the implement pipeline.')\ntry:\n    with open('.ai/critic_verdict.json') as _vf:\n        _vd = json.loads(_vf.read())\n    _verdict = _vd.get('verdict', '')\n    _feedback = _vd.get('feedback', '')\n    if _verdict:\n        pr_body += _nl * 2 + '## Automated reviewer (advisory)' + _nl * 2 + '**Verdict: ' + _verdict + '**' + _nl * 2 + _feedback\nexcept Exception:\n    pass\ntry:\n    with open('.ai/full_suite_report.md') as _ff:\n        _fs = _ff.read().strip()\n    if _fs:\n        pr_body += _nl * 2 + _fs\nexcept Exception:\n    pass\ntry:\n    with open('.ai/security_verdict.json') as _sf:\n        _sd = json.loads(_sf.read())\n    _sv = _sd.get('verdict', '')\n    if _sv:\n        _ssev = _sd.get('severity', '')\n        _sec = _nl * 2 + '## Security review (advisory)' + _nl * 2 + '**Verdict: ' + str(_sv) + '** (max severity: ' + str(_ssev) + ')'\n        _sfind = _sd.get('findings') or []\n        if _sfind:\n            _sec += _nl * 2 + '**Findings:**'\n            for _fi in _sfind:\n                if not isinstance(_fi, dict):\n                    continue\n                _sec += _nl + '- [' + str(_fi.get('severity', '')) + '] ' + str(_fi.get('id', '')) + ' (' + str(_fi.get('location', '')) + '): ' + str(_fi.get('description', '')) + ' Fix: ' + str(_fi.get('remediation', ''))\n        _ssum = _sd.get('summary', '')\n        if _ssum:\n            _sec += _nl * 2 + str(_ssum)\n        _scav = _sd.get('reviewer_caveats') or []\n        if _scav:\n            _sec += _nl * 2 + '_Reviewer caveats: ' + ' '.join(str(_c) for _c in _scav) + '_'\n        pr_body += _sec\nexcept Exception:\n    pass\ntry:\n    _dbp = os.path.join(work_dir, '.resolve/delivery/pr_body.md')\n    if os.path.exists(_dbp):\n        _dm = open(_dbp).read().strip()\n        if _dm:\n            pr_body += _nl * 2 + '## Acceptance hand-off (dev-machine)' + _nl * 2 + _dm\nexcept Exception:\n    pass\npr_body += _nl * 2 + '---' + _nl + 'Generated by the implement pipeline.'\napi_url = platform_url + '/internal/instances/' + instance_id + '/repos/' + repo_name + '/promote/pr'\nprint('[promote-pr] POST ' + api_url, file=sys.stderr)\npayload = json.dumps({'pr_title': pr_title, 'pr_body': pr_body, 'branch': promote_branch, 'target_branch': 'main'}).encode()\nheaders = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + sub_container_token}\nreq = urllib.request.Request(api_url, data=payload, headers=headers, method='POST')\nclass _NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):\n        return None\ntry:\n    opener = urllib.request.build_opener(_NoRedirect())\n    with opener.open(req) as resp:\n        result = json.loads(resp.read())\n    pr_url = result.get('pr_url') or ''\n    if not result.get('success', False) or not pr_url:\n        print('ERROR: promote/pr did not create a PR', file=sys.stderr)\n        sys.exit(1)\n    print('[promote-pr] created: ' + pr_url, file=sys.stderr)\n    print(json.dumps({'delivery.pr_url': pr_url, 'delivery.result': 'pr_created'}))\nexcept urllib.error.HTTPError as e:\n    print('ERROR: promote/pr API returned ' + str(e.code), file=sys.stderr)\n    sys.exit(1)\nexcept Exception:\n    print('ERROR: promote/pr failed', file=sys.stderr)\n    sys.exit(1)\nPYEOF\n/opt/uv-tools/amplifier/bin/python /tmp/call_promote_pr.py"
+    ]
+
+    // -----------------------------------------------------------------------
+    // SetResultFail -- injects delivery.result=promote_failed into context
+    // parse_json=true causes the JSON output to be injected into pipeline context.
+    // -----------------------------------------------------------------------
+
+    SetResultFail [
+        shape=parallelogram,
+        label="Set Result Fail",
+        parse_json="true",
+        tool_command="echo '{\"delivery.result\": \"promote_failed\"}'"
+    ]
+
+    // -----------------------------------------------------------------------
+    // Edges (6 total) -- outcome=fail fallbacks prevent silent crashes on
+    // push failure or API error; forward edges are unconditional on success.
+    // -----------------------------------------------------------------------
+
+    Start             -> PushPromoteBranch
+    PushPromoteBranch -> CallPromotePR
+    PushPromoteBranch -> SetResultFail    [condition="outcome=fail"]
+    CallPromotePR     -> Exit
+    CallPromotePR     -> SetResultFail    [condition="outcome=fail"]
+    SetResultFail     -> Exit
+}

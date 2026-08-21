@@ -1,0 +1,89 @@
+// reality_check.dot -- Reality Check Pipeline
+//
+// A 3-node pipeline for running the platform's reality-check capability against
+// any GitHub repo with user-provided acceptance criteria.
+//
+// Pipeline shape:
+//   Start -> BuildArtifact -> RealityCheck -> RenderVerdict -> Exit
+//
+// BuildArtifact  -- resolves the SUT path from the workspace_repo form field
+// RealityCheck   -- calls Resolver.start_reality_check + wait_for_reality_check
+// RenderVerdict  -- formats the verdict envelope as a markdown artifact
+//
+// See handlers/reality_check.py for the Python SDK calls that map to
+// each pipeline node.  Copy-paste that module into your own resolver's run()
+// method and adapt as needed.
+
+digraph reality_check {
+  graph [
+    label="reality_check — Reality Check",
+    goal="Run the reality-check capability against a user-specified GitHub repo with user-provided acceptance criteria.",
+    rankdir=LR,
+    default_max_retry=1,
+    default_fidelity="truncate"
+  ];
+
+  // Terminals
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // ── Node 1: Resolve the artifact path ────────────────────────────────────
+  //
+  // Reads the workspace_repo from the instance params (set via the launch form).
+  // Normalises owner/repo shorthand to a full GitHub URL and writes the
+  // artifact.json consumed by the RealityCheck node.
+  //
+  // Python SDK equivalent (handlers/reality_check.py):
+  //   build_artifact_node(resolver, instance) -> {"software_path": url}
+  //
+  // Context variable $workspace_repo is seeded from the form param of the
+  // same name by DotGraphResolver._extra_context_from_params().
+
+  BuildArtifact [
+    shape=parallelogram,
+    label="Build Artifact",
+    tool_command="#!/bin/sh\\nset -e\\n# Resolve the SUT path from the workspace_repo form field.\\n# $workspace_repo is a context variable seeded from instance params.\\nmkdir -p .resolve/reality_check\\nWS_REPO=\"$workspace_repo\"\\nif [ -z \"$WS_REPO\" ]; then\\n  echo 'Error: workspace_repo not set. Fill in the Workspace GitHub repo field.' >&2\\n  exit 1\\nfi\\ncase \"$WS_REPO\" in\\n  http*) SOFTWARE_PATH=\"$WS_REPO\" ;;\\n  *)     SOFTWARE_PATH=\"https://github.com/$WS_REPO\" ;;\\nesac\\nprintf '{\\n  \"software_path\": \"%s\"\\n}' \"$SOFTWARE_PATH\" > .resolve/reality_check/artifact.json\\nprintf 'artifact_ready'"
+  ];
+
+  // ── Node 2: Submit to reality-check, poll until verdict ───────────────────
+  //
+  // In a real resolver this node is implemented by calling the SDK methods
+  // directly inside DotGraphResolver.run() (or your own Resolver subclass):
+  //
+  //   handle = await self.start_reality_check(
+  //       software_path=software_path,
+  //       acceptance_criteria={"spec": acceptance_criteria},
+  //       dtu_lifecycle="destroy",
+  //       timeout_seconds=1800,
+  //   )
+  //   result = await self.wait_for_reality_check(handle)
+  //
+  // See handlers/reality_check.py -> reality_check_node() for the full
+  // async implementation that resolver developers can copy-paste.
+  //
+  // This tool_command produces a synthetic verdict envelope so the pipeline
+  // can be exercised end-to-end without the live resolve backend.
+
+  RealityCheck [
+    shape=parallelogram,
+    label="Reality Check",
+    tool_command="#!/bin/sh\nset -e\n# Live SDK invocation. See handlers/reality_check_invoke.py for the\n# real implementation; this just dispatches to it via the SDK-enabled\n# Python interpreter (system python3 lacks aiohttp + amplifier-resolver-sdk).\n#\n# Requires AMPLIFIER_RESOLVE_ENABLE_REALITY_CHECK=true on the resolve\n# backend. If that flag is unset (or any other infrastructure precondition\n# fails -- SDK missing, broker unreachable, runner image missing, etc.)\n# the invoker exits non-zero and this node fails. NO synthetic fallback.\nmkdir -p .resolve/reality_check\n/opt/uv-tools/amplifier/bin/python -m amplifier_resolver_dot_graph.handlers.reality_check_invoke\nprintf 'reality_check_complete'"
+  ];
+
+  // ── Node 3: Format the verdict as a markdown artifact ─────────────────────
+  //
+  // Python SDK equivalent (handlers/reality_check.py):
+  //   render_verdict_node(**state) -> {"verdict_markdown": summary, ...state}
+
+  RenderVerdict [
+    shape=parallelogram,
+    label="Render Verdict",
+    tool_command="#!/bin/sh\\nset -e\\nmkdir -p .resolve/reality_check\\n/opt/uv-tools/amplifier/bin/python - << 'PYEOF'\\nimport json, pathlib, sys\\nv = json.loads(pathlib.Path('.resolve/reality_check/verdict.json').read_text())\\nsession_id = v.get('session_id') or 'unknown'\\nreport_yaml_path = v.get('report_yaml_path') or 'n/a'\\nprefix = '.reality-check/' + session_id + '/'\\nif report_yaml_path.startswith(prefix):\\n    report_link = './' + report_yaml_path[len(prefix):]\\nelse:\\n    report_link = report_yaml_path\\nout_dir = pathlib.Path('.reality-check') / session_id\\nout_dir.mkdir(parents=True, exist_ok=True)\\nlines = [\\n    '# Reality-check verdict',\\n    '',\\n    '- **Session**: `{}`'.format(session_id),\\n    '- **Verdict**: `{}`'.format(v.get('verdict') or 'unknown'),\\n    '- **Failure mode**: `{}`'.format(v.get('failure_mode') or 'null'),\\n    '- **Report**: [`{rp}`]({rl})'.format(rp=report_yaml_path, rl=report_link),\\n    '',\\n    'Full report: see [`{rp}`]({rl}) inside the runner session directory.'.format(\\n        rp=report_yaml_path, rl=report_link),\\n]\\n(out_dir / 'verdict.md').write_text(chr(10).join(lines) + chr(10))\\nprint('verdict.md written', file=sys.stderr)\\nPYEOF\\nprintf 'verdict_rendered'"
+  ];
+
+  // ── Edges ──────────────────────────────────────────────────────────────────
+  Start -> BuildArtifact;
+  BuildArtifact -> RealityCheck;
+  RealityCheck  -> RenderVerdict;
+  RenderVerdict -> Exit;
+}

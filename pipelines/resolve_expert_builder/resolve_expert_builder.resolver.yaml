@@ -1,0 +1,67 @@
+name: Expert Builder
+description: |
+  Build software from a high-level spec. Decides autonomously whether the request
+  can proceed, decomposes the hard parts and spikes solutions in parallel, then
+  plans, implements, validates, reality-checks, and delivers the result to Gitea.
+
+  Runs unattended: it is never interactive, and it stops with a stated reason
+  rather than asking a question mid-run.
+
+  Pipeline stages:
+    1. Admission    - autonomous gate (composes admission.dot); writes the
+                      acceptance criteria the request implies to
+                      .ai/admission.yaml, or halts with a stated reason
+    2. Decompose    - identifies the hard parts and spikes each in parallel
+                      (composes expert_builder_explorer.dot), packaging pros/cons
+    3. Plan         - fans in the packaged parts into a detailed, ordered
+                      implementation plan under .ai/plan/
+    4. Implement    - walks the plan task files one at a time, with stall and
+                      max-iteration exits
+    5. Validate     - exercises the build as a new user would, attributes faults,
+                      and loops on fixes
+    6. RealityCheck - independent reality-check against the original spec
+                      (composes reality_check.dot), with a fix loop on failure
+    7. Deliver      - writes the README and pushes the final build to Gitea
+
+  Composition:
+    - admission.dot               - autonomous admission gate (requires `request`
+      and `repo` in context; bound from `spec` by the AdmissionInit node)
+    - expert_builder_explorer.dot - parallel per-part spiking (one folder node per
+      hard part; requires context.slot injection from the parent)
+    - reality_check.dot           - independent reality-check validation
+pipeline: expert_builder.dot
+# The single `repo_url` field below is the ONE repo input: it drives the
+# workspace clone (via workspace_repo_from), admission's lint target, AND the
+# promote PR target. The key is `repo_url` because the platform's worker
+# promote endpoint reads the submitted param keyed exactly `repo_url`
+# (amplifier-resolve routes/internal.py:153) and accepts the `owner/repo`
+# shorthand -- so the KEY is fixed by the platform contract while the value
+# stays owner/repo. Declaring workspace_repo_from also suppresses the
+# framework's auto-injected "Workspace GitHub repo" field (the ghost
+# `workspace_repo` that reached admission's lint empty -- the false-decline
+# bug). The repo must ALREADY EXIST (RepoGate escalates otherwise); an empty
+# existing repo is a valid greenfield start.
+workspace_repo_from: repo_url
+params:
+  spec:
+    input: longText
+    label: Specification (high level - what to build, not how)
+    required: true
+  repo_url:
+    input: text
+    label: Target repo (owner/repo)
+    description: >-
+      owner/repo on GitHub. It must already exist. The build is delivered as a
+      pull request against this repo for review -- nothing is merged for you.
+    required: true
+  delivery_mode:
+    input: choice
+    label: Delivery
+    description: >-
+      Always 'promote': the build is delivered as a GitHub pull request (the
+      review gate). The platform requires this value in the submitted params,
+      so API/CLI callers must send delivery_mode=promote.
+    required: true
+    default: promote
+    options:
+      - { value: promote, label: "Open GitHub PR (review gate)" }
