@@ -166,7 +166,7 @@ directory in the target repository:
 pipelines/PLAN_SLUG/
   PLAN_SLUG.dot
   plan.json
-  PLAN_SLUG.md                 # optional human-readable companion
+  PLAN_SLUG.md                 # optional; required by history_anchor mode
   subgraphs/
     goal_lane.dot
     deliver_pr.dot             # present only when delivery_mode is pr
@@ -185,7 +185,7 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `schema_version` | String with exact value `goal-plan.plan/v1`. |
 | `plan_id` | Slug string equal to `PLAN_SLUG`; stable across runs of the same compiled plan. |
 | `source_request` | Non-empty string containing the originating request or its durable reference. |
-| `target_repo` | Object with `vcs: "git"`, stable `repository_id` string, and `expected_remote` string or `null`. |
+| `target_repo` | Object with `vcs: "git"`, `identity_mode: "remote"` or `"history_anchor"`, and the mode-specific fields defined below. |
 | `base_ref_policy` | Object with `mode: "fixed"` and non-empty `ref`, or `mode: "runtime"` and `ref: null`. |
 | `lanes` | Non-empty array of lane objects described below. |
 | `waves` | Non-empty ordered array of objects with unique `id` and non-empty `lane_ids`; every lane appears in exactly one wave. |
@@ -195,6 +195,72 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `global_budgets` | Object with positive integer `max_total_attempts`, positive integer `max_integration_corrections`, and positive integer `max_pipeline_seconds`. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
 | `delivery_mode` | Enum string `none` or `pr`. |
+
+#### Target-repository identity policy
+
+Git does not provide a global repository ID. `target_repo` therefore uses one
+of two machine-observable identity modes; a vague author-assigned
+`repository_id` is not part of the schema.
+
+**Remote-backed repositories** use:
+
+| Field | Type and invariant |
+|---|---|
+| `identity_mode` | Exact string `remote`. |
+| `expected_fetch_remote` | Required canonical string in normalized `host[:port]/path` form. |
+| `remote_name` | Optional Git remote-name string, or `null`. |
+
+Composition accepts HTTPS, `ssh://`, and scp-like SSH source forms and
+normalizes the expected fetch URL as follows:
+
+1. Parse the accepted form and discard the URL scheme.
+2. Remove HTTPS credentials/userinfo and SSH user names.
+3. Lowercase the host.
+4. Remove the default port (`443` for HTTPS, `22` for SSH); retain any
+   non-default port.
+5. Strip leading and trailing slashes from the repository path.
+6. Strip one exact trailing `.git` suffix.
+7. Preserve the remaining repository-path case.
+8. Emit exactly `host[:port]/path`.
+
+At runtime, admission enumerates configured Git fetch URLs. When `remote_name`
+is non-null it examines every fetch URL for that remote; otherwise it examines
+every fetch URL for every configured remote. It applies the same normalization
+and requires at least one exact match with `expected_fetch_remote`. Push URLs
+do not establish identity.
+
+**Local-only repositories** use:
+
+| Field | Type and invariant |
+|---|---|
+| `identity_mode` | Exact string `history_anchor`. |
+| `plan_commit_sha` | Full commit SHA anchoring the compiled plan. |
+| `plan_path` | Repository-relative path of the identity-stable `PLAN_SLUG.md` plan artifact. |
+| `plan_blob_sha256` | SHA-256 of the exact committed blob bytes at `plan_path`. |
+| `pinned_base_sha` | Full base commit SHA approved for the plan. |
+
+`PLAN_SLUG.md` is required in `history_anchor` mode and must not contain the
+anchor fields themselves. This avoids a content-addressing cycle: composition
+first commits that identity-stable plan artifact, records its commit and blob
+hash in `plan.json`, materializes the final DOT, and commits the complete
+compiled pipeline directory. Runtime requires every immutable file in
+`pipelines/PLAN_SLUG/` to be tracked and byte-clean against runtime `HEAD`.
+
+Admission then proves:
+
+1. the target Git object database contains `plan_commit_sha` as a commit;
+2. `plan_commit_sha:plan_path` resolves to a blob;
+3. the blob's exact bytes hash to `plan_blob_sha256`;
+4. those bytes match the working plan artifact at `plan_path`;
+5. the target object database contains `pinned_base_sha`; and
+6. `pinned_base_sha` is an ancestor of `plan_commit_sha`;
+7. `plan_commit_sha` is an ancestor of runtime `HEAD`; and
+8. the complete compiled pipeline directory is tracked and byte-clean at
+   runtime `HEAD`.
+
+The committed plan/blob/base relationship is the identity proof for a
+local-only repository. The design does not claim that Git supplies a globally
+unique repository identifier.
 
 Each `lanes` entry contains:
 
@@ -206,7 +272,7 @@ Each `lanes` entry contains:
 | `scope_outs` | String array. |
 | `owned_paths` | Non-empty array of repository-relative path patterns. |
 | `dependencies` | Array of lane IDs; references must exist and form an acyclic graph. |
-| `verifier` | Object with exactly one of non-empty `command` or checked-in `script_path`, plus positive integer `timeout_seconds` and `definition_sha256`. |
+| `verifier` | Object with exactly one of non-empty `command`, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; evidence schema version `goal-plan.lane-verifier/v1`; exit/token mapping; and `definition_sha256`. |
 | `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
 | `budgets` | Object with positive integer `max_attempts`. |
 
@@ -232,8 +298,9 @@ Admission runs before approval and before any mutation. It deterministically:
 1. locates the adjacent `plan.json`;
 2. recomputes its SHA-256 and requires equality with embedded
    `plan_sha256`;
-3. schema-validates `plan.json`; and
-4. parses the static DOT to require exact correspondence for lane IDs, waves,
+3. schema-validates `plan.json`;
+4. proves the selected target-repository identity mode; and
+5. parses the static DOT to require exact correspondence for lane IDs, waves,
    dependency edges, integration order, budget values, aggregate-verifier hash,
    approval mode, and delivery mode.
 
@@ -247,17 +314,17 @@ Each compiled family member accepts only these runtime inputs:
 
 | Input | Type and rule |
 |---|---|
-| `target_repo` | Required absolute path to the Git working repository. Its identity must match `plan.json.target_repo`. |
-| `base_ref` | Required Git ref. Preflight resolves it once to a full commit SHA and persists that pinned SHA. Under `base_ref_policy.mode: "fixed"`, it must resolve to the configured fixed ref; under `"runtime"`, the caller-selected ref is allowed. |
+| `target_repo` | Required absolute path to the Git working repository. Admission must prove its `remote` or `history_anchor` identity policy from `plan.json.target_repo`. |
+| `base_ref` | Required Git ref. Preflight resolves it once to a full commit SHA and persists that pinned SHA. Under `base_ref_policy.mode: "fixed"`, it must resolve to the configured fixed ref; under `"runtime"`, the caller-selected ref is allowed. In `history_anchor` identity mode it must also equal `target_repo.pinned_base_sha`. |
 | `run_id` | Required slug unique within the plan's run directory. |
 | `state_root` | Absolute path. If omitted, preflight resolves the absolute default `TARGET_REPO/.amplifier/runs/goal-plan/PLAN_ID/RUN_ID`; it must be ignored by Git before runtime writes it. |
 | `approval_mode` | Required enum `required` or `preapproved`; must equal the compiled plan value. |
 | `delivery_mode` | Required enum `none` or `pr`; must equal the compiled plan value. |
 | `github_repo` | `owner/repo` string required only when `delivery_mode` is `pr`; forbidden otherwise. |
 
-Preflight rejects relative `target_repo` or `state_root` values, mode mismatches,
-repository-identity mismatches, reused `run_id` with incompatible state, or a
-base ref that cannot be resolved and pinned.
+Preflight rejects relative `target_repo` or `state_root` values, mode
+mismatches, failed remote/history-anchor identity proofs, reused `run_id` with
+incompatible state, or a base ref that cannot be resolved and pinned.
 
 Composition owns the immutable files under `pipelines/PLAN_SLUG/`. Runtime
 reads but never rewrites them. All runtime-created filesystem state and
@@ -284,7 +351,7 @@ The runtime graph is responsible for:
 Start
   -> Reconcile durable state
   -> Bind typed runtime inputs
-  -> Admission: validate plan.json hash + static graph correspondence
+  -> Admission: validate plan hash + graph correspondence + repo identity
   -> Resolve and pin base_ref; establish ignored state_root
   -> Plan approval (or verify explicit preapproval)
   -> Prepare worktrees for Wave 1
@@ -363,27 +430,64 @@ The lane result must bind evidence to:
 The lane's prose summary is informational. The bound artifacts above determine
 its disposition.
 
+### Lane verifier cwd and hash contract
+
+Lane-verifier definitions are immutable across runs and worktree locations.
+Their `definition_sha256` covers a canonical serialization of:
+
+- the exact command string, or the checked-in script's content SHA-256;
+- the symbolic cwd policies `lane_worktree` and `integration_worktree`;
+- the configured timeout;
+- lane-verifier evidence schema version `goal-plan.lane-verifier/v1`; and
+- the exact exit/verdict/token mapping.
+
+No resolved absolute path is part of the immutable hash. A lane attempt selects
+`lane_worktree`; parent verification, affected-closure verification, and the
+final sweep select `integration_worktree`.
+
+At runtime, `lane_worktree` resolves from `target_repo`, `state_root`, `run_id`,
+and lane ID; `integration_worktree` resolves from `target_repo`, `state_root`,
+and `run_id`. The wrapper canonicalizes the selected path with `realpath`,
+requires equality with the corresponding worktree realpath in the durable run
+record, and confirms the worktree uses the target repository's Git common
+object database. Each lane-verifier evidence record stores the selected
+`cwd_policy` token and resolved absolute `cwd` separately from
+`definition_sha256`.
+
 ### Aggregate verifier contract
 
 The approved plan also contains one immutable aggregate-verifier contract. It
 declares:
 
 - either the exact non-interactive command string or the repository-relative
-  path of a checked-in executable script;
-- the absolute path of the integration worktree as its working directory;
+  path and content SHA-256 of a checked-in executable script;
+- the symbolic cwd policy token `integration_worktree`;
 - a configured timeout in seconds;
 - a SHA-256 verifier-definition hash;
 - the stdout/stderr log location; and
 - the JSON evidence-record location.
 
-The verifier-definition hash covers the canonical command or script invocation,
-the checked-in script bytes when a script is used, the absolute working
-directory, and the configured timeout. Before every aggregate run, the wrapper
-recomputes that definition hash and compares it with the approved value. A
-mismatch is infrastructure failure; the changed verifier is not run as though
-it were the approved definition of done.
+The immutable verifier-definition hash covers a canonical serialization of:
 
-Every invocation runs from the declared absolute integration-worktree path.
+- the exact command string, or the checked-in script's content SHA-256;
+- exact symbolic cwd policy token `integration_worktree`;
+- the configured timeout;
+- evidence schema version `goal-plan.aggregate-verifier/v1`; and
+- the exact exit/verdict/last-line-token mapping below.
+
+The canonical hash input never contains a resolved absolute worktree path, so
+the same approved verifier contract has the same hash across runs. Before every
+aggregate run, the wrapper recomputes the immutable definition hash and
+compares it with the approved value. A mismatch is infrastructure failure; the
+changed verifier is not run as though it were the approved definition of done.
+
+At runtime, the wrapper resolves `integration_worktree` from `target_repo`,
+`state_root`, and `run_id`, canonicalizes it with `realpath`, requires equality
+with the integration-worktree realpath in the durable run record, and confirms
+that it uses the target repository's Git common object database. That resolved
+absolute path is runtime evidence, not immutable contract input.
+
+Every invocation runs from that verified absolute integration-worktree path.
 Combined stdout and stderr are written to an `attempt-N.log` file under the
 run's integration evidence directory. An adjacent `attempt-N.json` evidence
 record is written atomically with these required fields:
@@ -394,6 +498,8 @@ record is written atomically with these required fields:
 | `attempt` | Positive integer for this aggregate-verifier invocation. |
 | `head_sha` | Full SHA returned by `git rev-parse HEAD` immediately before the run. |
 | `verifier_hash` | Recomputed SHA-256 verifier-definition hash. |
+| `cwd_policy` | Exact value `integration_worktree`. |
+| `cwd` | Absolute, `realpath`-canonicalized integration-worktree path verified for this run. |
 | `exit_code` | Child exit code; a timeout records wrapper exit code `124`. |
 | `timed_out` | Boolean that is `true` only when the configured timeout fired. |
 | `verdict` | Exact value `PASS`, `FAIL`, or `INFRA`. |
@@ -802,9 +908,11 @@ The run persists:
 
 - approved plan snapshot/hash and preapproval/approval evidence;
 - compiled-pipeline path, embedded `plan_sha256`, typed runtime inputs,
-  repository identity, and pinned base HEAD;
+  selected target-repository identity mode and its remote-match or
+  history-anchor proof, and pinned base HEAD;
 - run-wide and per-lane counters;
-- worktree/branch/base/head mapping;
+- worktree/branch/base/head mapping, including recorded `realpath` values for
+  every lane worktree and the integration worktree;
 - lane contracts, evidence, and dispositions;
 - parent-verification records;
 - integration journal with pre-merge and post-merge HEADs;
@@ -827,9 +935,12 @@ On restart, the graph compares state with reality:
 
 1. Rerun admission against the immutable adjacent `plan.json` and embedded
    `plan_sha256`, including graph/plan correspondence.
-2. Confirm `plan_id`, typed runtime inputs, `state_root`, repository identity,
+2. Re-prove the selected `remote` or `history_anchor` target-repository
+   identity policy, then confirm `plan_id`, typed runtime inputs, `state_root`,
    and pinned base SHA match the durable run record.
-3. Enumerate actual worktrees and branches beneath `state_root`.
+3. Enumerate actual worktrees and branches beneath `state_root`; canonicalize
+   each with `realpath` and require equality with its recorded path and Git
+   common object database.
 4. Resolve recorded commits directly from Git.
 5. Reclassify a purported completed lane whose artifact or commit is missing
    as `CRASHED` or `INFRA_FAILURE`, depending on whether lane work or the
@@ -1018,10 +1129,14 @@ orchestration behavior, not a library-only change.
    verifier-hash guard, shared fresh-review schema, finalizer token map, and
    two-attempt delivery ledger against the contracts above.
 8. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
-   graph/plan correspondence, and typed runtime-input rejection cases.
+   graph/plan correspondence, both target-repository identity modes, and typed
+   runtime-input rejection cases.
 9. Prove the graph contains no manifest-driven scheduler: lane, wave,
    dependency, integration-order, and budget dispatch all remain explicit DOT
    nodes, edges, and constants.
+10. Prove lane and aggregate verifier-definition hashes use symbolic cwd policy
+    tokens rather than absolute paths, while every invocation records and
+    validates its resolved `realpath` separately.
 
 ### Primary live smoke scenario
 
@@ -1045,8 +1160,9 @@ fixture lanes:
 
 The live smoke passes only if direct observation proves:
 
-1. The adjacent `plan.json` hash equals embedded `plan_sha256`, and admission
-   proves graph/plan correspondence before mutation.
+1. The adjacent `plan.json` hash equals embedded `plan_sha256`; admission
+   proves graph/plan correspondence and an exact normalized fetch-remote
+   identity match before mutation.
 2. Typed runtime inputs are bound, `base_ref` is pinned, `state_root` is
    ignored, and no mutation occurs before approval/preapproval validation.
 3. Wave 1 lanes use distinct worktrees and actually overlap in execution.
@@ -1056,7 +1172,9 @@ The live smoke passes only if direct observation proves:
 6. Ownership checks pass and would have rejected an out-of-scope write.
 7. Integration occurs in stable order, with an aggregate-verifier record after
    each merge that names the exact HEAD and verifier hash and whose last-line
-   token agrees with its JSON verdict.
+   token agrees with its JSON verdict. The immutable hash contains
+   `integration_worktree`, while the evidence separately records the verified
+   absolute cwd.
 8. `lane_c` starts only after both dependencies are integrated and green.
 9. Cross-lane `ITERATE` invokes one `IntegrationCorrection` on the integration
    branch, never the old lane branches; its write set is limited to the
@@ -1086,8 +1204,18 @@ The implementation is not ready until live probes also demonstrate:
 - a `plan.json` byte change, DOT/plan lane mismatch, relative runtime path,
   incompatible reused `run_id`, or mode mismatch fails admission before
   mutation;
+- HTTPS, `ssh://`, and scp-like forms for the same fetch remote normalize to
+  the same `host[:port]/path`, while a host, non-default-port, path-case, or
+  repository-path mismatch fails remote identity admission;
+- `history_anchor` admission fails when the plan commit or pinned base object is
+  missing, the committed blob hash differs, the working plan artifact differs,
+  or the pinned base is not an ancestor of the plan commit;
 - changing the aggregate verifier definition after approval yields
   `AGGREGATE_VERIFY:INFRA` before the changed verifier runs;
+- the same aggregate/lane verifier contract retains one
+  `definition_sha256` across different run directories, while a missing,
+  replaced, or incorrectly resolved recorded worktree `realpath` yields
+  infrastructure failure before verification;
 - a missing, malformed, or stale fresh-review artifact is rejected and never
   advances as `PASS`;
 - a multi-owner coherence `ITERATE` creates one integration-branch correction,
