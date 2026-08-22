@@ -1,0 +1,18 @@
+{
+  "node_id": "prepare_attempt",
+  "iteration": 0,
+  "outcome": "success",
+  "status": "success",
+  "preferred_next_label": null,
+  "suggested_next_ids": null,
+  "context_updates": {
+    "tool.output": "CORRECTION:READY\n",
+    "tool.last_line": "CORRECTION:READY"
+  },
+  "duration_ms": 40.87001795414835,
+  "notes": "Tool completed: python3 scripts/prepare_attempt.py",
+  "failure_reason": null,
+  "session_id": null,
+  "is_explicit": true,
+  "failed_step": null
+}

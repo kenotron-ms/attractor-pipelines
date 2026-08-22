@@ -1,0 +1,59 @@
+{
+  "records": [
+    {
+      "attempt": 1,
+      "candidate_sha256": "ec8e3303784f6c8d9382da6e0bd631f3474992648116bae3d5bde46afac07f20",
+      "child_argv": [
+        "/usr/bin/python3",
+        "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/scripts/verify_candidate.py",
+        "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/candidate.txt",
+        "--attempt",
+        "1",
+        "--phase",
+        "candidate"
+      ],
+      "child_exit_code": 1,
+      "child_stderr": "",
+      "child_stdout": "{\"attempt\": 1, \"candidate_sha256\": \"ec8e3303784f6c8d9382da6e0bd631f3474992648116bae3d5bde46afac07f20\", \"feedback\": {\"code\": \"EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS\", \"message\": \"Set status=valid and acknowledge this verifier feedback with feedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS.\", \"required_candidate_utf8\": \"status=valid\\nfeedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS\\n\"}, \"phase\": \"candidate\", \"reason\": \"candidate bytes do not satisfy the exact predicate\", \"schema_version\": \"goal-plan.convergence-candidate-verifier/v1\", \"verdict\": \"FAIL\"}\n",
+      "external_verifier_process": true,
+      "feedback": {
+        "code": "EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS",
+        "message": "Set status=valid and acknowledge this verifier feedback with feedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS.",
+        "required_candidate_utf8": "status=valid\nfeedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS\n"
+      },
+      "raw_log_path": "artifacts/verifier/attempt-1.log",
+      "reason": "candidate bytes do not satisfy the exact predicate",
+      "schema_version": "goal-plan.convergence-verifier-invocation/v1",
+      "verdict": "FAIL",
+      "verifier_sha256_before": "7848c2d27fffd8614e024d4577cf79c5b186ef6933048c6872aed5f5a2f8a655",
+      "verifier_sha256_initial": "7848c2d27fffd8614e024d4577cf79c5b186ef6933048c6872aed5f5a2f8a655",
+      "verifier_sha256_matches_initial": true
+    },
+    {
+      "attempt": 2,
+      "candidate_sha256": "493c744836774df08bc8a2476132cf5303f250e828e6f194a55e8c58dd73ab9c",
+      "child_argv": [
+        "/usr/bin/python3",
+        "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/scripts/verify_candidate.py",
+        "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/candidate.txt",
+        "--attempt",
+        "2",
+        "--phase",
+        "candidate"
+      ],
+      "child_exit_code": 0,
+      "child_stderr": "",
+      "child_stdout": "{\"attempt\": 2, \"candidate_sha256\": \"493c744836774df08bc8a2476132cf5303f250e828e6f194a55e8c58dd73ab9c\", \"feedback\": null, \"phase\": \"candidate\", \"reason\": \"candidate bytes satisfy the exact predicate\", \"schema_version\": \"goal-plan.convergence-candidate-verifier/v1\", \"verdict\": \"PASS\"}\n",
+      "external_verifier_process": true,
+      "feedback": null,
+      "raw_log_path": "artifacts/verifier/attempt-2.log",
+      "reason": "candidate bytes satisfy the exact predicate",
+      "schema_version": "goal-plan.convergence-verifier-invocation/v1",
+      "verdict": "PASS",
+      "verifier_sha256_before": "7848c2d27fffd8614e024d4577cf79c5b186ef6933048c6872aed5f5a2f8a655",
+      "verifier_sha256_initial": "7848c2d27fffd8614e024d4577cf79c5b186ef6933048c6872aed5f5a2f8a655",
+      "verifier_sha256_matches_initial": true
+    }
+  ],
+  "schema_version": "goal-plan.convergence-verifier-history/v1"
+}

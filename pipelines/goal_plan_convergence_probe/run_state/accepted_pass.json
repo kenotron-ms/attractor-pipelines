@@ -1,0 +1,7 @@
+{
+  "attempt": 2,
+  "candidate_sha256": "493c744836774df08bc8a2476132cf5303f250e828e6f194a55e8c58dd73ab9c",
+  "schema_version": "goal-plan.convergence-accepted-pass/v1",
+  "verification_record": 1,
+  "verifier_sha256": "7848c2d27fffd8614e024d4577cf79c5b186ef6933048c6872aed5f5a2f8a655"
+}

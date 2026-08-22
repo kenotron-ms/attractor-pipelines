@@ -1,0 +1,27 @@
+{
+  "attempt_count": 2,
+  "attempts": [
+    {
+      "attempt": 1,
+      "candidate_sha256_after_worker": "ec8e3303784f6c8d9382da6e0bd631f3474992648116bae3d5bde46afac07f20",
+      "candidate_sha256_before_verification": "ec8e3303784f6c8d9382da6e0bd631f3474992648116bae3d5bde46afac07f20",
+      "external_verifier_exit_code": 1,
+      "origin": "deterministic_invalid_seed",
+      "verifier_verdict": "FAIL"
+    },
+    {
+      "attempt": 2,
+      "candidate_sha256_after_worker": "493c744836774df08bc8a2476132cf5303f250e828e6f194a55e8c58dd73ab9c",
+      "external_verifier_exit_code": 0,
+      "feedback_path": "run_state/current_feedback.json",
+      "feedback_source_attempt": 1,
+      "origin": "adaptive_box_correction",
+      "verifier_verdict": "PASS"
+    }
+  ],
+  "initial_candidate_sha256": "ec8e3303784f6c8d9382da6e0bd631f3474992648116bae3d5bde46afac07f20",
+  "max_attempts": 3,
+  "schema_version": "goal-plan.convergence-attempt-state/v1",
+  "verifier_path": "scripts/verify_candidate.py",
+  "verifier_sha256_initial": "7848c2d27fffd8614e024d4577cf79c5b186ef6933048c6872aed5f5a2f8a655"
+}

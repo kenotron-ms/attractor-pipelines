@@ -1,0 +1,12 @@
+{
+  "graph_name": "goal_plan_convergence_probe",
+  "goal": "Converge a deterministically invalid candidate only through external verification, bounded feedback, adaptive correction, and independent parent re-verification",
+  "start_time": "2026-08-22T22:46:09.956143+00:00",
+  "node_count": 11,
+  "edge_count": 23,
+  "engine_version": "0.1.0",
+  "engine_commit": "unknown",
+  "runner_version": "unknown",
+  "runner_commit": "unknown",
+  "provider": "anthropic"
+}

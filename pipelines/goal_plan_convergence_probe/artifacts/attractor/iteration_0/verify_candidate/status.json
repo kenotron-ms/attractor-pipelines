@@ -1,0 +1,18 @@
+{
+  "node_id": "verify_candidate",
+  "iteration": 0,
+  "outcome": "success",
+  "status": "success",
+  "preferred_next_label": null,
+  "suggested_next_ids": null,
+  "context_updates": {
+    "tool.output": "FEEDBACK: Set status=valid and acknowledge this verifier feedback with feedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS.\nCANDIDATE_VERIFY:FAIL\n",
+    "tool.last_line": "CANDIDATE_VERIFY:FAIL"
+  },
+  "duration_ms": 101.00354289170355,
+  "notes": "Tool completed: python3 scripts/run_candidate_verifier.py",
+  "failure_reason": null,
+  "session_id": null,
+  "is_explicit": true,
+  "failed_step": null
+}

@@ -1,0 +1,15 @@
+{
+  "node_id": "start",
+  "iteration": 0,
+  "outcome": "success",
+  "status": "success",
+  "preferred_next_label": null,
+  "suggested_next_ids": null,
+  "context_updates": null,
+  "duration_ms": 0.02150493673980236,
+  "notes": "Start node: start",
+  "failure_reason": null,
+  "session_id": null,
+  "is_explicit": true,
+  "failed_step": null
+}
