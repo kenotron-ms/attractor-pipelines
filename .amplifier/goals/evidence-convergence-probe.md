@@ -38,9 +38,3 @@ KNOWN — speed aid only; these facts do not replace completion criteria
 - Doctor confirms Anthropic and OpenAI credentials are present.
 - Base SHA is `1de2ee50df012ff6c1fbc80c644658de306a0f5`.
 - The approved design is `docs/plans/2026-08-22-goal-plan-attractor-design.md`.
-
-RESUME 1 — prior bounded run checkpoint
-- Prior lane session: `2f9e20b6-7075-49a6-a5c5-05eb7d583bfc`.
-- Treat commits `21f504b920f0002f2ffc292388d6f9882e15bf5e` and `71ba5682ad9e685da1844bf830ee67090e00635d` as your own completed prior work. Do not rebuild or rerun the convergence cycle unless existing committed evidence no longer verifies.
-- Independent orchestrator checks confirmed PROBE_GRAPH, INITIAL_FAILURE, FEEDBACK_AND_CORRECTION, PARENT_REVERIFY, and DURABLE_EVIDENCE all PASS; all recorded hashes match.
-- Remaining work: verify branch HEAD and cleanliness, push if possible, then write matching-session DONE.json as the final act with the already-proven item results.
