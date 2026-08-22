@@ -90,11 +90,14 @@ validate by using the build like a new user would -> an INDEPENDENT
 reality-check against the original spec -> deliver as a GitHub PR. Like
 `resolve_hello_world.dot`, this pipeline is deliberately **not portable**
 -- it leans on Amplifier Resolve platform mechanism (a live Gitea sidecar,
-the platform's reality-check and promote/pr endpoints,
-`/opt/uv-tools/amplifier/bin/python`) as heavily as the source pipeline
-always did. Only the four `dot_file=` sub-pipeline paths changed in this
-port; every node, edge, and prompt is otherwise byte-for-byte identical to
-the source.
+the platform's reality-check and promote/pr endpoints, and the worker Python
+environment) as heavily as the source pipeline always did. The original port
+changed only the four `dot_file=` sub-pipeline paths for this repository's
+layout. It now also carries the finalized upstream graph-level `ResumeGate`
+from commit `c36ab0f`: on every engine start, the gate inspects durable `.ai/`
+artifacts and resumes at admission, decomposition, synthesis, or plan
+verification. All existing work nodes, prompts, validation loops,
+reality-check behavior, and delivery behavior remain unchanged.
 
 ```
 pipelines/resolve_expert_builder/
