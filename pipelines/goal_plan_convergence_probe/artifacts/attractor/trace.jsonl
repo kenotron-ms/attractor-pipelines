@@ -1,7 +1,0 @@
-{"iteration": 0, "node_id": "start", "status": "success", "preferred_label": null, "is_explicit": true, "duration_ms": 0.02150493673980236, "ts": "2026-08-22T22:46:09.959905+00:00"}
-{"iteration": 0, "node_id": "reset", "status": "success", "preferred_label": null, "is_explicit": true, "duration_ms": 61.48395698983222, "ts": "2026-08-22T22:46:10.024204+00:00"}
-{"iteration": 0, "node_id": "verify_candidate", "status": "success", "preferred_label": null, "is_explicit": true, "duration_ms": 101.00354289170355, "ts": "2026-08-22T22:46:10.128330+00:00"}
-{"iteration": 0, "node_id": "prepare_attempt", "status": "success", "preferred_label": null, "is_explicit": true, "duration_ms": 40.87001795414835, "ts": "2026-08-22T22:46:10.172275+00:00"}
-{"iteration": 1, "node_id": "correct_candidate", "status": "success", "preferred_label": null, "is_explicit": true, "duration_ms": 20330.103926942684, "ts": "2026-08-22T22:46:30.506083+00:00"}
-{"iteration": 1, "node_id": "verify_candidate", "status": "success", "preferred_label": null, "is_explicit": true, "duration_ms": 105.27151892893016, "ts": "2026-08-22T22:46:30.615107+00:00"}
-{"iteration": 1, "node_id": "parent_verify", "status": "success", "preferred_label": null, "is_explicit": true, "duration_ms": 83.16740801092237, "ts": "2026-08-22T22:46:30.701164+00:00"}

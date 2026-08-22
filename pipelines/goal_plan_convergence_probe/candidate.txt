@@ -1,2 +1,0 @@
-status=valid
-feedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS
