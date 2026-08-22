@@ -4,6 +4,37 @@ digraph expert_builder {
     start [shape=Mdiamond, label="Start"]
     done  [shape=Msquare,  label="Done"]
 
+    // Resume the expensive pre-delivery pipeline from its most advanced
+    // durable marker. The engine deliberately starts every graph at `start`,
+    // including after a platform restart, so this node owns graph-level resume
+    // routing. The final stdout line is the only routing sentinel.
+    ResumeGate [
+        shape=parallelogram,
+        label="Resume completed phase",
+        tool_command="PYTHON=$( [ -x /opt/uv-tools/amplifier/bin/python ] && echo /opt/uv-tools/amplifier/bin/python || echo python3 ); $PYTHON <<'PYEOF'
+import os
+
+if os.path.exists('.ai/plan/INDEX.md'):
+    destination = 'VerifyPlan'
+elif os.path.exists('.ai/pieces/INDEX.md'):
+    destination = 'Synthesize'
+elif (
+    os.path.exists('.ai/hard_parts/slot_1/SOLUTION.md')
+    and os.path.exists('.ai/hard_parts/slot_2/SOLUTION.md')
+):
+    destination = 'Synthesize'
+else:
+    verdict, stage = 'reject', 'missing'
+    if os.path.exists('.ai/outcome.txt'):
+        raw = open('.ai/outcome.txt').read().strip()
+        parts = raw.split('|')
+        verdict = parts[0].strip() or 'reject'
+        stage = (parts[1].strip() if len(parts) > 1 else '') or 'unknown'
+    destination = 'Decompose' if verdict == 'admit' else 'AdmissionInit'
+print(destination)
+PYEOF"
+    ]
+
     // =====================================================================
     // STEP 1 - Autonomous admission gate. Decides whether this request should
     // proceed at all, WITHOUT asking the user anything. Runs admission.dot as
@@ -1040,7 +1071,11 @@ PYEOF"
     // non-admission" terminal -- RepoGate emits the same admission_verdict /
     // admission_stage keys AdmissionHalt reads via tool_env, and writes the
     // same .ai/escalation.md AdmissionHalt embeds. No new terminal is needed.
-    start             -> AdmissionInit
+    start             -> ResumeGate
+    ResumeGate        -> VerifyPlan     [condition="context.tool.last_line=VerifyPlan"]
+    ResumeGate        -> Synthesize     [condition="context.tool.last_line=Synthesize"]
+    ResumeGate        -> Decompose      [condition="context.tool.last_line=Decompose"]
+    ResumeGate        -> AdmissionInit  [condition="context.tool.last_line=AdmissionInit"]
     AdmissionInit     -> RepoGate
     RepoGate          -> CheckRepo
     CheckRepo         -> Admission     [label="staged",     condition="context.repo_state=ok"]

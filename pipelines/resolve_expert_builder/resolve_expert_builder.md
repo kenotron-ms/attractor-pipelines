@@ -3,10 +3,11 @@
 This pipeline is a sibling of `resolve_hello_world.dot` in spirit -- it is
 **deliberately not portable** across engines. It leans on Amplifier Resolve
 platform mechanism as heavily as `expert_builder.dot` (the pipeline it was
-ported from, in `microsoft/amplifier-resolver-dot-graph`) always did. Nothing
-about the pipeline's *logic* changed in this port -- only the file layout
-needed to fit this repo's `pipelines/[name]/` convention. See "What was
-ported, and what changed" below.
+ported from, in `microsoft/amplifier-resolver-dot-graph`) always did. The
+original port changed only the file layout needed for this repo's
+`pipelines/[name]/` convention. It now also includes the finalized upstream
+`ResumeGate` from commit `c36ab0f`; see "Restart and resume behavior" and
+"What was ported, and what changed" below.
 
 ## What this pipeline does
 
@@ -45,6 +46,24 @@ Every non-passing exit (admission halt, exhausted fix budget) writes a
 plain-language explanation to `/project/.resolve/data/delivery.md` --
 this pipeline never silently stops.
 
+## Restart and resume behavior
+
+The attractor engine begins at `start` on every invocation; engine checkpoints
+do not resume this graph. `start` therefore enters a deterministic,
+read-only `ResumeGate` that inspects the existing `.ai/` artifacts and routes
+to the most advanced trustworthy boundary:
+
+1. `.ai/plan/INDEX.md` -> `VerifyPlan`
+2. `.ai/pieces/INDEX.md`, or both exploration `SOLUTION.md` files -> `Synthesize`
+3. an `admit` verdict in `.ai/outcome.txt` -> `Decompose`
+4. anything else -> `AdmissionInit`
+
+Later-stage evidence wins when multiple markers exist. The gate never infers
+admission from `.ai/admission.yaml`, and it re-enters existing verification or
+synthesis nodes rather than skipping their deterministic checks. The resume
+logic is embedded in the DOT node; no production resume helper script was
+added. The existing `python/` files remain reference-only as documented below.
+
 ## This is NOT portable -- Resolve-platform-specific by design
 
 Unlike most pipelines in this repo, `resolve_expert_builder.dot` cannot be
@@ -75,10 +94,12 @@ worker container, for the same reasons `resolve_hello_world.dot` is:
   {platform_url}/internal/instances/{id}/repos/{repo}/promote/pr`,
   authenticated with the `sub_container_token` from `config.json`. This
   endpoint does not exist outside the platform.
-- **Every `tool_command` invokes `/opt/uv-tools/amplifier/bin/python3`**
-  explicitly, the SDK-enabled interpreter baked into the Resolve worker
-  image (plain `python3` on a generic engine's PATH lacks `aiohttp` and
-  `amplifier-resolver-sdk`).
+- **Platform-dependent work nodes invoke `/opt/uv-tools/amplifier/bin/python3`**
+  explicitly, the SDK-enabled interpreter baked into the Resolve worker image
+  (plain `python3` on a generic engine's PATH lacks `aiohttp` and
+  `amplifier-resolver-sdk`). The deterministic `ResumeGate` uses the finalized
+  upstream worker-first shim: `/opt/uv-tools/amplifier/bin/python` when present,
+  with local `python3` only as the fallback needed by the verbatim engine test.
 
 If you need a spec-to-PR pipeline that runs outside a Resolve worker
 container, this is not that pipeline -- adapt the shape but replace every
@@ -160,14 +181,16 @@ Ported from `microsoft/amplifier-resolver-dot-graph`'s
 - `handlers/reality_check_invoke.py` -> `python/reality_check_invoke.py`
 - `handlers/reality_check.py` -> `python/reality_check.py`
 
-**The only changes made are the four `dot_file=` path references** inside
-`resolve_expert_builder.dot`, updated to point at the new `subgraphs/`
-layout (`admission.dot`, `expert_builder_explorer.dot` x2, and
-`reality_check.dot`). Every node, edge, condition, prompt, comment, and
-tool_command is byte-for-byte identical to the source -- this is a
-structural port, not a rewrite. The comment blocks throughout the `.dot`
-files ARE the design documentation for this pipeline; there is no separate
-design doc, so they were preserved in full rather than summarized.
+The original structural port changed only the four `dot_file=` path references
+inside `resolve_expert_builder.dot`, updated to point at this repository's
+`subgraphs/` layout (`admission.dot`, `expert_builder_explorer.dot` x2, and
+`reality_check.dot`). This follow-up also ports the finalized upstream
+`ResumeGate` declaration and entry wiring from commit `c36ab0f`. The gate is an
+inline standard-library Python heredoc; no production Python helper, subgraph,
+manifest, work node, prompt, validation loop, reality-check path, or delivery
+path was added or changed. The comment blocks throughout the `.dot` files
+remain the design documentation for the pipeline and are preserved rather
+than summarized.
 
 ## Pipeline shape
 
