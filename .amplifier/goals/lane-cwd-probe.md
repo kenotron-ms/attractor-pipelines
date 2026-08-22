@@ -36,9 +36,3 @@ KNOWN — speed aid only; these facts do not replace completion criteria
   `BASE=/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules; PYTHONPATH="$BASE/pipeline-runner:$BASE/loop-pipeline:$BASE/unified-llm-client:$BASE/remote-source" /home/ken/.local/share/uv/tools/amplifier/bin/python -m amplifier_module_pipeline_runner.cli`
 - Base SHA is `1de2ee50df012ff6c1fbc80c644658de306a0f5`.
 - The approved design is `docs/plans/2026-08-22-goal-plan-attractor-design.md`.
-
-RESUME 1 — prior bounded run checkpoint
-- Prior lane session: `3357d673-8494-440e-bd99-e612e982f1c8`.
-- Treat commits `449068135103438e80fd687cfe5a3acbffcc57ab` and `0854feda39a9aefdcd8ea2f9967f576632200f1b` as your own completed prior work. Do not redo the probe.
-- Existing `pipelines/goal_plan_cwd_probe/evidence.json` was independently parsed and hash-checked by the orchestrator. It records PROBE_GRAPH PASS, DISTINCT_TARGETS PASS, PARENT_EVIDENCE PASS, and BOX_SESSION_CWD BLOCKED-engine-session-cwd.
-- Remaining work: inspect the existing evidence and git state, preserve the named blocker, push the committed branch if possible, then write a matching-session DONE.json as the final act. Do not rerun the expensive Attractor probe unless the existing evidence is missing or no longer verifies.
