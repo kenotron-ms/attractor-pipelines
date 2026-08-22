@@ -249,6 +249,55 @@ The lane result must bind evidence to:
 The lane's prose summary is informational. The bound artifacts above determine
 its disposition.
 
+### Aggregate verifier contract
+
+The approved plan also contains one immutable aggregate-verifier contract. It
+declares:
+
+- either the exact non-interactive command string or the repository-relative
+  path of a checked-in executable script;
+- the absolute path of the integration worktree as its working directory;
+- a configured timeout in seconds;
+- a SHA-256 verifier-definition hash;
+- the stdout/stderr log location; and
+- the JSON evidence-record location.
+
+The verifier-definition hash covers the canonical command or script invocation,
+the checked-in script bytes when a script is used, the absolute working
+directory, and the configured timeout. Before every aggregate run, the wrapper
+recomputes that definition hash and compares it with the approved value. A
+mismatch is infrastructure failure; the changed verifier is not run as though
+it were the approved definition of done.
+
+Every invocation runs from the declared absolute integration-worktree path.
+Combined stdout and stderr are written to an `attempt-N.log` file under the
+run's integration evidence directory. An adjacent `attempt-N.json` evidence
+record is written atomically with these required fields:
+
+| Field | Contract |
+|---|---|
+| `schema_version` | Exact value `goal-plan.aggregate-verifier/v1`. |
+| `attempt` | Positive integer for this aggregate-verifier invocation. |
+| `head_sha` | Full SHA returned by `git rev-parse HEAD` immediately before the run. |
+| `verifier_hash` | Recomputed SHA-256 verifier-definition hash. |
+| `exit_code` | Child exit code; a timeout records wrapper exit code `124`. |
+| `timed_out` | Boolean that is `true` only when the configured timeout fired. |
+| `verdict` | Exact value `PASS`, `FAIL`, or `INFRA`. |
+
+The deterministic wrapper captures the child result, writes the log and JSON
+record, and emits exactly one of these tokens as its last non-empty stdout line:
+
+| Observed result | JSON verdict | Last-line token |
+|---|---|---|
+| Exit `0` before timeout | `PASS` | `AGGREGATE_VERIFY:PASS` |
+| Exit `1` before timeout | `FAIL` | `AGGREGATE_VERIFY:FAIL` |
+| Exit `2` or greater, timeout, definition-hash mismatch, or inability to execute the verifier | `INFRA` | `AGGREGATE_VERIFY:INFRA` |
+
+Graph edges route on `tool.last_line`. Only `AGGREGATE_VERIFY:PASS` may advance
+to another dependency wave, final coherence review, delivery eligibility, or
+completion. `FAIL` enters the responsible correction loop; `INFRA` leaves
+product-correction loops and routes toward `INFRA_FAILURE`.
+
 ## Lane Convergence Subgraph
 
 `goal_lane.dot` adapts the proven task-runner shape:
@@ -286,10 +335,10 @@ evidence. Parent verification assigns the final `PASS` disposition.
 | Running lane and aggregate verifier commands | Deterministic nodes | Exit status and captured output are the primary machine evidence. |
 | Failure-signature comparison and budget accounting | Deterministic nodes | Loop control must not depend on model judgment. |
 | Root-cause diagnosis after repeated failure | Fresh or gate-class LLM context | Classification may require semantic judgment, but its proposed correction is tested by the deterministic verifier. |
-| Optional qualitative lane critique | Independent LLM gate | Some acceptance criteria cannot be reduced to a command; the reviewer must be outside the worker context and tied to the exact commit. |
+| Optional qualitative lane critique | Independent LLM gate plus deterministic artifact classifier | Some acceptance criteria cannot be reduced to a command; the reviewer must be outside the worker context, and its versioned artifact must be schema-valid and tied to the exact commit. |
 | Ownership diff, commit existence, ancestry, clean-state checks | Deterministic nodes | A worker cannot attest its own git side effects. |
 | Merge/cherry-pick, rollback of a failed candidate, merge journal | Deterministic nodes | Integration is state mutation with exact success criteria. |
-| Cross-lane coherence review | Fresh independent LLM gate | Semantic conflicts can survive lane-local mechanical checks. The report is tied to final HEAD and any correction must subsequently pass machine gates. |
+| Cross-lane coherence review | Fresh independent LLM gate plus the same deterministic artifact classifier | Semantic conflicts can survive lane-local mechanical checks. The shared review interface ties the verdict to final HEAD and routes correction to named lane IDs. |
 | PR existence and exact-head verification | Deterministic remote query | `OpenPR` cannot certify its own external side effect. |
 
 No LLM node is used merely to translate formats, increment counters, select the
@@ -329,6 +378,45 @@ state must include:
 The fan-in collector treats a missing required result artifact as `CRASHED`.
 It must not substitute an empty result, `PASS`, or "(none found)." This directly
 applies `docs/RUBRIC.md`'s parallel-branch coverage rule.
+
+### Fresh-review artifact contract
+
+Optional lane qualitative review and final cross-lane coherence review use one
+machine-readable interface. In both cases a reviewer with fresh context writes
+a JSON artifact; it does not certify the artifact itself. The artifact has this
+required schema:
+
+| Field | Contract |
+|---|---|
+| `schema_version` | Exact value `goal-plan.fresh-review/v1`. |
+| `review_kind` | Exact value `lane` or `cross_lane`. |
+| `reviewed_head` | Full commit SHA reviewed from actual repository state. |
+| `verdict` | Exact value `PASS`, `ITERATE`, or `BLOCKED`; no other verdict is valid. |
+| `findings` | JSON array of objects with required `id`, `summary`, `evidence` string array, and `disposition_detail` string fields. |
+| `responsible_lane_ids` | Non-empty JSON array containing only lane IDs from the approved plan. |
+
+For `review_kind: "lane"`, `responsible_lane_ids` must be the singleton array
+containing the current lane ID. For `review_kind: "cross_lane"`, it contains one
+or more approved lane IDs: all integrated lanes covered by a `PASS` review, or
+the specific correction owners for `ITERATE` and `BLOCKED`.
+
+A deterministic classifier schema-validates the artifact, resolves current
+HEAD directly from Git, and requires `reviewed_head == current HEAD`. It then
+routes:
+
+- `PASS` onward only when the relevant mechanical verifier is already green:
+  the lane verifier for lane review, or `AGGREGATE_VERIFY:PASS` for cross-lane
+  review;
+- `ITERATE` to curated feedback and the correction surface for every
+  `responsible_lane_ids` entry; and
+- `BLOCKED` to `BLOCKED(review:lane:LANE_ID)` for lane review or
+  `BLOCKED(review:cross_lane:SORTED_LANE_IDS)` for cross-lane review, recording
+  the responsible lane IDs, findings, and artifact path.
+
+A missing, malformed, schema-invalid, or stale artifact is a deterministic
+review failure and can never be normalized to `PASS`. It remains subject to the
+existing bounded retry, crash, infrastructure, and residual-classification
+rules.
 
 ### Lane dispositions
 
@@ -422,14 +510,20 @@ After all runnable waves finish:
 3. The reviewer checks cross-lane coherence: compatible interfaces, preserved
    assumptions, no duplicated or contradictory implementations, and complete
    satisfaction of qualitative criteria.
-4. A deterministic classifier binds the coherence report to final HEAD and
-   routes its verdict.
+4. The reviewer writes the versioned fresh-review artifact.
+5. The shared deterministic classifier schema-validates it, requires
+   `reviewed_head` to equal final integrated HEAD, and routes only the exact
+   `PASS`, `ITERATE`, or `BLOCKED` verdicts.
 
 Actionable coherence findings route to the explicitly responsible lane's
 correction edge and must survive that lane's verifier, parent verification,
 reintegration, aggregate verification, and a fresh coherence review. If
 responsibility is ambiguous or correction budget is exhausted, the finding
 becomes an evidence-backed residual rather than an invented pass.
+
+Final coherence review is unreachable until the aggregate wrapper emitted
+`AGGREGATE_VERIFY:PASS` for the same HEAD. A coherence `PASS` therefore cannot
+mask a red or stale mechanical result.
 
 ## Budgets and Exhaustion
 
@@ -529,9 +623,11 @@ The run persists:
 - parent-verification records;
 - integration journal with pre-merge and post-merge HEADs;
 - aggregate-verifier records after each merge;
-- final aggregate and coherence records;
-- terminal classification; and
-- delivery branch, PR URL, remote head, and verification result.
+- final aggregate and versioned fresh-review records;
+- terminal classification;
+- versioned `result.json`; and
+- the versioned delivery-attempt ledger, branch, expected head, PR URL, observed
+  remote head, and verification result.
 
 State writes must be atomic. Human-readable reports are derived from structured
 state; they are not the source of truth.
@@ -552,7 +648,10 @@ On restart, the graph compares state with reality:
    Git ancestry before attempting another merge.
 7. Rerun the aggregate verifier if the actual HEAD lacks a bound passing
    record.
-8. Query remote PR state if delivery may already have occurred; never open a
+8. Reject a fresh-review artifact whose `reviewed_head` does not equal actual
+   HEAD.
+9. Reconcile the delivery ledger, then query remote PR state at the ledger's
+   exact expected head if delivery may already have occurred; never open a
    duplicate merely because local state is incomplete.
 
 Reconciliation is idempotent. It skips work only when durable evidence and real
@@ -567,6 +666,41 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, or final aggregate/coherence criteria remain unsatisfied. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
 | `INFRA_FAILURE` | Git/worktree state, verifier execution substrate, credentials, remote API, or recovery state cannot be trusted enough to classify product work honestly. | No delivery. |
 | `ABORTED` | The plan was rejected/cancelled before mutation, or the operator explicitly stopped the run at an allowed gate. | No delivery. |
+
+### Finalizer machine contract
+
+Every terminal route passes through one deterministic finalizer. It atomically
+writes the run root's versioned `result.json` with, at minimum:
+
+- `schema_version` with exact value `goal-plan.result/v1`;
+- `status` with exact value `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or
+  `ABORTED`;
+- `plan_hash`;
+- `integrated_head_sha`, or `null` when no integration HEAD exists;
+- `lane_dispositions`;
+- `aggregate_evidence_path`;
+- `fresh_review_evidence_paths`;
+- `residual_evidence_paths`;
+- `delivery_ledger_path`; and
+- `delivery_pr_url` and `delivery_verified_head_sha` when delivery was
+  requested, otherwise `null`.
+
+The finalizer sets `goal_plan.status` to the same exact `status` value and emits
+exactly one of these strings as its last non-empty stdout line, with no prose
+after it:
+
+| `goal_plan.status` | Last-line token |
+|---|---|
+| `COMPLETE` | `GOAL_PLAN:COMPLETE` |
+| `RESIDUALS_READY` | `GOAL_PLAN:RESIDUALS_READY` |
+| `INFRA_FAILURE` | `GOAL_PLAN:INFRA_FAILURE` |
+| `ABORTED` | `GOAL_PLAN:ABORTED` |
+
+The finalizer completes its write successfully so the graph can route on
+`tool.last_line`; the explicit terminal carrier then preserves the intended
+pipeline outcome. `COMPLETE` is the only successful and deliverable outcome.
+The other three remain distinct non-success, evidence-bearing outcomes rather
+than aliases for a generic failure.
 
 Terminal nodes must route explicitly to the graph exit with the intended machine
 status. They must not dead-end and become `no_matching_edge` authoring errors.
@@ -593,9 +727,38 @@ Delivery must not mutate that verified HEAD. If the delivery subgraph changes
 local HEAD, the exact-head assertion fails; the run cannot claim `COMPLETE`
 without re-establishing the aggregate and coherence evidence for the new HEAD.
 
-Delivery retry has its own bounded infrastructure handling and cannot consume
-or reset lane-convergence budget. An unverifiable remote state ends as
-`INFRA_FAILURE`, not `COMPLETE`.
+Delivery has a hard limit of two attempts total for the run, including across
+crash recovery. Before any network mutation, each attempt appends a durable
+`started` entry to the run root's `delivery/attempts.jsonl`. Every ledger entry
+uses schema version `goal-plan.delivery-attempt/v1` and records:
+
+- `schema_version` with exact value `goal-plan.delivery-attempt/v1`;
+- `attempt` as integer `1` or `2`;
+- `branch` as the delivery branch;
+- `expected_head_sha` as the exact expected head SHA;
+- `phase` as `started` or `completed`;
+- `existing_pr_query` as the remote query result;
+- `action` as the action taken;
+- `pr_url`, if any;
+- `observed_remote_head_sha` from independent verification;
+- `verified` as a boolean; and
+- `failure_reason`, if any.
+
+Before each attempt, delivery queries the remote for an existing PR whose head
+is the recorded branch at the exact expected head SHA. If one exists, the
+attempt does not create another PR; it proceeds directly to independent
+verification. If none exists, the proven delivery subgraph may push/open the
+PR. In both cases, the attempt succeeds only after a separate remote query
+confirms that the PR exists and that its head SHA exactly equals the ledger's
+expected head SHA. The delivery actor's own report is never sufficient.
+
+An incomplete ledger entry discovered during recovery counts as an attempt and
+is reconciled against remote state before another attempt can start. No third
+attempt is possible. If neither attempt obtains independent exact-head
+verification, the integrated branch, verifier/review evidence, and ledger are
+preserved, and the finalizer emits `GOAL_PLAN:INFRA_FAILURE`; the pipeline does
+not claim `COMPLETE`. Delivery attempts cannot consume or reset lane-convergence
+budget.
 
 ## Reusable Precedent
 
@@ -636,6 +799,9 @@ orchestration behavior, not a library-only change.
    edges; no LLM judgment gate uses `shape=diamond`.
 5. Confirm every terminal is reachable and routes explicitly to the exit.
 6. Confirm the README and companion guide describe the actual graph.
+7. Validate the aggregate-verifier evidence schema, exit/token normalization,
+   verifier-hash guard, shared fresh-review schema, finalizer token map, and
+   two-attempt delivery ledger against the contracts above.
 
 ### Primary live smoke scenario
 
@@ -661,11 +827,15 @@ The live smoke passes only if direct observation proves:
 5. Parent verifier logs are produced for the exact candidate commits.
 6. Ownership checks pass and would have rejected an out-of-scope write.
 7. Integration occurs in stable order, with an aggregate-verifier record after
-   each merge.
+   each merge that names the exact HEAD and verifier hash and whose last-line
+   token agrees with its JSON verdict.
 8. `lane_c` starts only after both dependencies are integrated and green.
-9. Final aggregate and fresh coherence records name the same final HEAD.
-10. The remote PR exists and its head SHA equals that final verified HEAD.
-11. The terminal is `COMPLETE` only after all ten observations hold.
+9. Final aggregate and fresh-review records are schema-valid and name the same
+   final HEAD.
+10. The delivery ledger records no more than two attempts, and the remote PR
+    exists with a head SHA equal to its exact expected head.
+11. `result.json`, `goal_plan.status`, and last-line token agree on `COMPLETE`
+    only after all ten observations hold.
 
 ### Fault and recovery probes
 
@@ -679,10 +849,16 @@ The implementation is not ready until live probes also demonstrate:
 - an out-of-ownership write is rejected even when the lane verifier passes;
 - an aggregate failure after a candidate merge restores the pre-merge HEAD and
   routes evidence back to the responsible lane;
+- changing the aggregate verifier definition after approval yields
+  `AGGREGATE_VERIFY:INFRA` before the changed verifier runs;
+- a missing, malformed, or stale fresh-review artifact is rejected and never
+  advances as `PASS`;
 - restarting after a lane commit but before integration reconciles the commit
   without duplicate work or duplicate merge;
 - restarting after remote PR creation discovers the existing PR and verifies
-  its head instead of opening another; and
+  its head instead of opening another;
+- two unverifiable delivery attempts preserve the integrated branch and end
+  with `GOAL_PLAN:INFRA_FAILURE`, with no third attempt; and
 - an unavailable or untrustworthy verifier/git/remote substrate reaches
   `INFRA_FAILURE` rather than consuming model-correction budget.
 
