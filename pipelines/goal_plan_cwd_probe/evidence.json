@@ -1,7 +1,677 @@
 {
-  "blocker": null,
-  "generated_at": null,
-  "note": "Pending the fresh source-backed Attractor CLI run.",
+  "artifact_scan": {
+    "lane-a": {
+      "pwd_artifact": {
+        "expected_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a/box_pwd_lane_a.txt",
+        "expected_scope": "lane-a",
+        "filename": "box_pwd_lane_a.txt",
+        "locations": [
+          {
+            "bytes": 39,
+            "content": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root\n",
+            "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_a.txt",
+            "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_a.txt",
+            "scope": "root",
+            "sha256": "9e9af3a6fea80a2bb2a8e4648c4d935e1eebafd8650899290132e303a55eb9d3"
+          }
+        ]
+      },
+      "sentinel_artifact": {
+        "expected_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a/sentinel_lane_a.txt",
+        "expected_scope": "lane-a",
+        "filename": "sentinel_lane_a.txt",
+        "locations": [
+          {
+            "bytes": 17,
+            "content": "cwd-probe:lane-a\n",
+            "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_a.txt",
+            "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_a.txt",
+            "scope": "root",
+            "sha256": "9fdff420b97f6236a9046f520def5c770caf1492bd205bc92feced076a905401"
+          }
+        ]
+      }
+    },
+    "lane-b": {
+      "pwd_artifact": {
+        "expected_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b/box_pwd_lane_b.txt",
+        "expected_scope": "lane-b",
+        "filename": "box_pwd_lane_b.txt",
+        "locations": [
+          {
+            "bytes": 39,
+            "content": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root\n",
+            "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_b.txt",
+            "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_b.txt",
+            "scope": "root",
+            "sha256": "9e9af3a6fea80a2bb2a8e4648c4d935e1eebafd8650899290132e303a55eb9d3"
+          }
+        ]
+      },
+      "sentinel_artifact": {
+        "expected_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b/sentinel_lane_b.txt",
+        "expected_scope": "lane-b",
+        "filename": "sentinel_lane_b.txt",
+        "locations": [
+          {
+            "bytes": 17,
+            "content": "cwd-probe:lane-b\n",
+            "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_b.txt",
+            "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_b.txt",
+            "scope": "root",
+            "sha256": "e0072579f3bc296e3343f9dfabd1222a4833a44fcf6eec7784315f36bb6af60f"
+          }
+        ]
+      }
+    }
+  },
+  "blocker": {
+    "detail": "Both independent box sessions ran at the runner-global CLI root while deterministic tool controls ran at their assigned lane targets.",
+    "name": "BLOCKED-engine-session-cwd"
+  },
+  "cleanup": {
+    "performed": false,
+    "preserved_run_root": "/tmp/goal-plan-cwd-probe-0gxuhcz9",
+    "reason": "Preserved for independent inspection of committed evidence paths."
+  },
+  "concurrency": {
+    "distinct_session_ids": true,
+    "intervals": {
+      "lane-a": {
+        "end": "2026-08-22T22:41:25.424001+00:00",
+        "start": "2026-08-22T22:41:22.685018+00:00"
+      },
+      "lane-b": {
+        "end": "2026-08-22T22:41:25.448389+00:00",
+        "start": "2026-08-22T22:41:22.648182+00:00"
+      }
+    },
+    "intervals_overlap": true,
+    "pass": true,
+    "session_ids": [
+      "aefa8adc-34a2-4dcf-b10d-39c977a15444",
+      "1535e2d9-92ff-4f1e-8ce8-b3f474ef9cb3"
+    ],
+    "structural_fan_out": {
+      "folder_nodes": [
+        "LaneA",
+        "LaneB"
+      ],
+      "join_shape": "tripleoctagon",
+      "max_parallel": 2,
+      "shape": "component"
+    }
+  },
+  "expected_paths": {
+    "cli_root": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+    "lanes": {
+      "lane-a": {
+        "pwd_artifact": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a/box_pwd_lane_a.txt",
+        "sentinel_artifact": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a/sentinel_lane_a.txt",
+        "target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a"
+      },
+      "lane-b": {
+        "pwd_artifact": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b/box_pwd_lane_b.txt",
+        "sentinel_artifact": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b/sentinel_lane_b.txt",
+        "target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b"
+      }
+    }
+  },
+  "generated_at": "2026-08-22T22:41:25.813133+00:00",
+  "invocation": {
+    "argv": [
+      "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py",
+      "verify"
+    ],
+    "cwd": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd"
+  },
+  "items": {
+    "BOX_SESSION_CWD": "BLOCKED-engine-session-cwd",
+    "DISTINCT_TARGETS": "PASS",
+    "DURABILITY": "PENDING-orchestrator-DONE.json",
+    "PARENT_EVIDENCE": "PASS",
+    "PROBE_GRAPH": "PASS"
+  },
+  "mutation_scans": {
+    "lane-a": {
+      "argv": [
+        "git",
+        "-C",
+        "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all"
+      ],
+      "clean": true,
+      "command": "git -C /tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a status --porcelain=v1 --untracked-files=all",
+      "cwd": null,
+      "entries": [],
+      "exit_code": 0,
+      "paths": [],
+      "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+      "stderr": "",
+      "stdout": "",
+      "timed_out": false
+    },
+    "lane-b": {
+      "argv": [
+        "git",
+        "-C",
+        "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all"
+      ],
+      "clean": true,
+      "command": "git -C /tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b status --porcelain=v1 --untracked-files=all",
+      "cwd": null,
+      "entries": [],
+      "exit_code": 0,
+      "paths": [],
+      "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+      "stderr": "",
+      "stdout": "",
+      "timed_out": false
+    },
+    "root": {
+      "argv": [
+        "git",
+        "-C",
+        "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all"
+      ],
+      "clean": false,
+      "command": "git -C /tmp/goal-plan-cwd-probe-0gxuhcz9/root status --porcelain=v1 --untracked-files=all",
+      "cwd": null,
+      "entries": [
+        "?? box_pwd_lane_a.txt",
+        "?? box_pwd_lane_b.txt",
+        "?? sentinel_lane_a.txt",
+        "?? sentinel_lane_b.txt"
+      ],
+      "exit_code": 0,
+      "paths": [
+        "box_pwd_lane_a.txt",
+        "box_pwd_lane_b.txt",
+        "sentinel_lane_a.txt",
+        "sentinel_lane_b.txt"
+      ],
+      "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+      "stderr": "",
+      "stdout": "?? box_pwd_lane_a.txt\n?? box_pwd_lane_b.txt\n?? sentinel_lane_a.txt\n?? sentinel_lane_b.txt\n",
+      "timed_out": false
+    }
+  },
+  "observed_paths": {
+    "lane-a": {
+      "pwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+      "pwd_artifact_locations": [
+        {
+          "bytes": 39,
+          "content": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root\n",
+          "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_a.txt",
+          "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_a.txt",
+          "scope": "root",
+          "sha256": "9e9af3a6fea80a2bb2a8e4648c4d935e1eebafd8650899290132e303a55eb9d3"
+        }
+      ],
+      "sentinel_locations": [
+        {
+          "bytes": 17,
+          "content": "cwd-probe:lane-a\n",
+          "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_a.txt",
+          "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_a.txt",
+          "scope": "root",
+          "sha256": "9fdff420b97f6236a9046f520def5c770caf1492bd205bc92feced076a905401"
+        }
+      ]
+    },
+    "lane-b": {
+      "pwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+      "pwd_artifact_locations": [
+        {
+          "bytes": 39,
+          "content": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root\n",
+          "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_b.txt",
+          "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/box_pwd_lane_b.txt",
+          "scope": "root",
+          "sha256": "9e9af3a6fea80a2bb2a8e4648c4d935e1eebafd8650899290132e303a55eb9d3"
+        }
+      ],
+      "sentinel_locations": [
+        {
+          "bytes": 17,
+          "content": "cwd-probe:lane-b\n",
+          "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_b.txt",
+          "realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/sentinel_lane_b.txt",
+          "scope": "root",
+          "sha256": "e0072579f3bc296e3343f9dfabd1222a4833a44fcf6eec7784315f36bb6af60f"
+        }
+      ]
+    }
+  },
+  "prepared": {
+    "base_commit": "e2797c37bf25d5ae34c8538fba22bd86380af7d2",
+    "distinct_targets": true,
+    "initial_mutation_scans": {
+      "lane-a": "",
+      "lane-b": "",
+      "root": ""
+    },
+    "lanes": {
+      "lane-a": {
+        "branch": "probe/lane-a",
+        "git_common_dir": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/.git",
+        "pwd_artifact": "box_pwd_lane_a.txt",
+        "sentinel_artifact": "sentinel_lane_a.txt",
+        "sentinel_payload": "cwd-probe:lane-a",
+        "target_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a"
+      },
+      "lane-b": {
+        "branch": "probe/lane-b",
+        "git_common_dir": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/.git",
+        "pwd_artifact": "box_pwd_lane_b.txt",
+        "sentinel_artifact": "sentinel_lane_b.txt",
+        "sentinel_payload": "cwd-probe:lane-b",
+        "target_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b"
+      }
+    },
+    "prepare_commands": [
+      {
+        "argv": [
+          "git",
+          "init",
+          "--initial-branch=main",
+          "."
+        ],
+        "command": "git init --initial-branch=main .",
+        "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "Initialized empty Git repository in /tmp/goal-plan-cwd-probe-0gxuhcz9/root/.git/\n",
+        "timed_out": false
+      },
+      {
+        "argv": [
+          "git",
+          "config",
+          "user.name",
+          "CWD Probe"
+        ],
+        "command": "git config user.name 'CWD Probe'",
+        "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "",
+        "timed_out": false
+      },
+      {
+        "argv": [
+          "git",
+          "config",
+          "user.email",
+          "cwd-probe@example.invalid"
+        ],
+        "command": "git config user.email cwd-probe@example.invalid",
+        "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "",
+        "timed_out": false
+      },
+      {
+        "argv": [
+          "git",
+          "add",
+          "baseline.txt"
+        ],
+        "command": "git add baseline.txt",
+        "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "",
+        "timed_out": false
+      },
+      {
+        "argv": [
+          "git",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "-m",
+          "test: initialize cwd probe"
+        ],
+        "command": "git -c commit.gpgsign=false commit -m 'test: initialize cwd probe'",
+        "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "[main (root-commit) e2797c3] test: initialize cwd probe\n 1 file changed, 1 insertion(+)\n create mode 100644 baseline.txt\n",
+        "timed_out": false
+      },
+      {
+        "argv": [
+          "git",
+          "worktree",
+          "add",
+          "-b",
+          "probe/lane-a",
+          "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+          "e2797c37bf25d5ae34c8538fba22bd86380af7d2"
+        ],
+        "command": "git worktree add -b probe/lane-a /tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a e2797c37bf25d5ae34c8538fba22bd86380af7d2",
+        "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "exit_code": 0,
+        "stderr": "Preparing worktree (new branch 'probe/lane-a')\n",
+        "stdout": "HEAD is now at e2797c3 test: initialize cwd probe\n",
+        "timed_out": false
+      },
+      {
+        "argv": [
+          "git",
+          "worktree",
+          "add",
+          "-b",
+          "probe/lane-b",
+          "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+          "e2797c37bf25d5ae34c8538fba22bd86380af7d2"
+        ],
+        "command": "git worktree add -b probe/lane-b /tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b e2797c37bf25d5ae34c8538fba22bd86380af7d2",
+        "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "exit_code": 0,
+        "stderr": "Preparing worktree (new branch 'probe/lane-b')\n",
+        "stdout": "HEAD is now at e2797c3 test: initialize cwd probe\n",
+        "timed_out": false
+      }
+    ],
+    "prepare_process_cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+    "prepared_at": "2026-08-22T22:41:22.202592+00:00",
+    "prepared_at_ns": 1787438482202599936,
+    "prepared_phase": "before-component-fan-out",
+    "root_git_common_dir": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root/.git",
+    "root_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+    "run_root_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9",
+    "schema_version": "goal-plan.cwd-probe-state/v1",
+    "worktree_list_porcelain": "worktree /tmp/goal-plan-cwd-probe-0gxuhcz9/root\nHEAD e2797c37bf25d5ae34c8538fba22bd86380af7d2\nbranch refs/heads/main\n\nworktree /tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a\nHEAD e2797c37bf25d5ae34c8538fba22bd86380af7d2\nbranch refs/heads/probe/lane-a\n\nworktree /tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b\nHEAD e2797c37bf25d5ae34c8538fba22bd86380af7d2\nbranch refs/heads/probe/lane-b"
+  },
+  "prepared_before_sessions": {
+    "comparisons": {
+      "lane-a": {
+        "prepared_before_status": true,
+        "session_status_mtime_ns": 1787438485419629429,
+        "state_mtime_ns": 1787438482207629354
+      },
+      "lane-b": {
+        "prepared_before_status": true,
+        "session_status_mtime_ns": 1787438485443629429,
+        "state_mtime_ns": 1787438482207629354
+      }
+    },
+    "method": "state-file mtime is strictly earlier than each box status.json mtime",
+    "pass": true
+  },
+  "probe_files": {
+    "entry_dot": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/goal_plan_cwd_probe.dot",
+    "evidence": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/evidence.json",
+    "lane_dot": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/subgraphs/lane_probe.dot",
+    "verifier": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py"
+  },
   "schema_version": "goal-plan.cwd-probe/v1",
-  "verdict": "PENDING-live-run"
+  "sessions": {
+    "lane-a": {
+      "assigned_target_in_prompt": false,
+      "bash_commands": [
+        "pwd -P > box_pwd_lane_a.txt && echo \"cwd-probe:lane-a\" > sentinel_lane_a.txt && echo \"Observed pwd: $(cat box_pwd_lane_a.txt)\""
+      ],
+      "directory_change_observed": false,
+      "event_count": 5,
+      "events_exist": true,
+      "events_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneA/BoxProbe/sessions/aefa8adc-34a2-4dcf-b10d-39c977a15444/events.jsonl",
+      "first_event_at": "2026-08-22T22:41:22.685018+00:00",
+      "invalid_event_lines": [],
+      "lane": "lane-a",
+      "last_event_at": "2026-08-22T22:41:25.424001+00:00",
+      "prompt_exists": true,
+      "prompt_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneA/BoxProbe/prompt.md",
+      "prompt_sha256": "255a03fa1054b6cf7f23dedfea48b34f774df2e697e5b2998d367ce0afb458f6",
+      "pwd_command_observed": true,
+      "relative_artifact_write_observed": true,
+      "session_id": "aefa8adc-34a2-4dcf-b10d-39c977a15444",
+      "stage_dir": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneA/BoxProbe",
+      "status": "success",
+      "status_exists": true,
+      "status_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneA/BoxProbe/status.json"
+    },
+    "lane-b": {
+      "assigned_target_in_prompt": false,
+      "bash_commands": [
+        "pwd_output=$(pwd -P) && echo \"$pwd_output\" > box_pwd_lane_b.txt && echo \"cwd-probe:lane-b\" > sentinel_lane_b.txt && echo \"$pwd_output\""
+      ],
+      "directory_change_observed": false,
+      "event_count": 5,
+      "events_exist": true,
+      "events_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneB/BoxProbe/sessions/1535e2d9-92ff-4f1e-8ce8-b3f474ef9cb3/events.jsonl",
+      "first_event_at": "2026-08-22T22:41:22.648182+00:00",
+      "invalid_event_lines": [],
+      "lane": "lane-b",
+      "last_event_at": "2026-08-22T22:41:25.448389+00:00",
+      "prompt_exists": true,
+      "prompt_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneB/BoxProbe/prompt.md",
+      "prompt_sha256": "0aa78946f70d2fde0026981661dfe81bf6819ee5e236cd4cef7efc1ca5b543b4",
+      "pwd_command_observed": true,
+      "relative_artifact_write_observed": true,
+      "session_id": "1535e2d9-92ff-4f1e-8ce8-b3f474ef9cb3",
+      "stage_dir": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneB/BoxProbe",
+      "status": "success",
+      "status_exists": true,
+      "status_path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs/subgraph_LaneB/BoxProbe/status.json"
+    }
+  },
+  "source_backed_cli": {
+    "BASE": "/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules",
+    "PYTHONPATH": "/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/pipeline-runner:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/loop-pipeline:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/unified-llm-client:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/remote-source",
+    "command": "cd /tmp/goal-plan-cwd-probe-0gxuhcz9/root && BASE=/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules; PYTHONPATH=/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/pipeline-runner:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/loop-pipeline:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/unified-llm-client:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/remote-source /home/ken/.local/share/uv/tools/amplifier/bin/python -m amplifier_module_pipeline_runner.cli run /home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/goal_plan_cwd_probe.dot --provider anthropic --cwd /tmp/goal-plan-cwd-probe-0gxuhcz9/root --logs-root /tmp/goal-plan-cwd-probe-0gxuhcz9/logs --param probe_python=/home/ken/.local/share/uv/tools/amplifier/bin/python --param probe_script=/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py --param probe_root=/tmp/goal-plan-cwd-probe-0gxuhcz9 --param probe_state=/tmp/goal-plan-cwd-probe-0gxuhcz9/state.json",
+    "command_argv": [
+      "/home/ken/.local/share/uv/tools/amplifier/bin/python",
+      "-m",
+      "amplifier_module_pipeline_runner.cli",
+      "run",
+      "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/goal_plan_cwd_probe.dot",
+      "--provider",
+      "anthropic",
+      "--cwd",
+      "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+      "--logs-root",
+      "/tmp/goal-plan-cwd-probe-0gxuhcz9/logs",
+      "--param",
+      "probe_python=/home/ken/.local/share/uv/tools/amplifier/bin/python",
+      "--param",
+      "probe_script=/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py",
+      "--param",
+      "probe_root=/tmp/goal-plan-cwd-probe-0gxuhcz9",
+      "--param",
+      "probe_state=/tmp/goal-plan-cwd-probe-0gxuhcz9/state.json"
+    ],
+    "credential_presence": {
+      "ANTHROPIC_API_KEY": true
+    },
+    "cwd": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+    "exit_code": 0,
+    "module": "amplifier_module_pipeline_runner.cli",
+    "provider": "anthropic",
+    "python": "/home/ken/.local/share/uv/tools/amplifier/bin/python",
+    "stderr": {
+      "bytes": 1768,
+      "inline": "Skill source(s) '@attractor:skills' could not be resolved: no mention_resolver capability is registered in this session. These skills will not be available.\nvisibility.placement='prefix' (the default) but the context module offers no system-prompt factory surface (set_system_prompt_factory). Falling back to per-request injection \u2014 the skills index will not ride the stable cached prefix. Set visibility.placement='request' to silence this warning.\nSkill source(s) '@attractor:skills' could not be resolved: no mention_resolver capability is registered in this session. These skills will not be available.\nvisibility.placement='prefix' (the default) but the context module offers no system-prompt factory surface (set_system_prompt_factory). Falling back to per-request injection \u2014 the skills index will not ride the stable cached prefix. Set visibility.placement='request' to silence this warning.\n[PROVIDER] Prompt caching: no message in this request carries a `metadata` dict, so ephemeral (regenerated-per-turn) messages cannot be distinguished from stable history. Skipping the conversation-region cache breakpoint(s) rather than risking a breakpoint on unstable content -- the orchestrator/context manager must stamp metadata={'ephemeral': True} on ephemeral injections for conversation-region prompt caching to take effect.\n[PROVIDER] Prompt caching: no message in this request carries a `metadata` dict, so ephemeral (regenerated-per-turn) messages cannot be distinguished from stable history. Skipping the conversation-region cache breakpoint(s) rather than risking a breakpoint on unstable content -- the orchestrator/context manager must stamp metadata={'ephemeral': True} on ephemeral injections for conversation-region prompt caching to take effect.\n",
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/cli.stderr.log",
+      "sha256": "da69acd105bd58ff527f58419bf111ffc4160cfde47cfaadd63d63687e512a98",
+      "truncated": false
+    },
+    "stdout": {
+      "bytes": 904,
+      "inline": "attractor: running pipeline cwd=/tmp/goal-plan-cwd-probe-0gxuhcz9/root logs=/tmp/goal-plan-cwd-probe-0gxuhcz9/logs\nattractor: status=success\nattractor: logs=/tmp/goal-plan-cwd-probe-0gxuhcz9/logs\nattractor: notes:\nTool completed: \"/home/ken/.local/share/uv/tools/amplifier/bin/python\" \"/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py\" record-control --state \"/tmp/goal-plan-cwd-probe-0gxuhcz9/state.json\" --scope parent --phase after-fan-in\n{\"status\": \"success\", \"notes\": \"Tool completed: \\\"/home/ken/.local/share/uv/tools/amplifier/bin/python\\\" \\\"/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py\\\" record-control --state \\\"/tmp/goal-plan-cwd-probe-0gxuhcz9/state.json\\\" --scope parent --phase after-fan-in\", \"logs_dir\": \"/tmp/goal-plan-cwd-probe-0gxuhcz9/logs\"}\n",
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/cli.stdout.log",
+      "sha256": "04ac0e16d832562e2de373ef7ea22196c1d52d0d42a5d85e88e306cf88603f4e",
+      "truncated": false
+    }
+  },
+  "static_analysis": {
+    "lint": [
+      {
+        "argv": [
+          "/home/ken/.local/share/uv/tools/amplifier/bin/python",
+          "-m",
+          "amplifier_module_pipeline_runner.cli",
+          "lint",
+          "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/goal_plan_cwd_probe.dot"
+        ],
+        "command": "/home/ken/.local/share/uv/tools/amplifier/bin/python -m amplifier_module_pipeline_runner.cli lint /home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/goal_plan_cwd_probe.dot",
+        "cwd": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd",
+        "exit_code": 0,
+        "source_prefix": {
+          "BASE": "/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules",
+          "PYTHONPATH": "/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/pipeline-runner:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/loop-pipeline:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/unified-llm-client:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/remote-source"
+        },
+        "stderr": "",
+        "stdout": "WARNING: [acyclic_graph] This graph has no cycle (no back-edge): it is a linear, one-pass pipeline.  An attractor should have at least one corrective loop that allows it to retry, self-correct, or converge.  If this is intentional (a deliberate single-pass analysis), this warning can be ignored \u2014 but consider whether this pipeline should be a recipe instead.\n  fix: Add a corrective back-edge from a validation/gate node back to an earlier work node so the pipeline can retry on failure.  Use evidence-based conditions (context.tool.last_line or context.preferred_label) on the exit edge to gate convergence.  If this is a deliberate one-pass pipeline, no change is needed \u2014 this is a WARNING, not an error.\n\nattractor lint: /home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/goal_plan_cwd_probe.dot: 1 warning(s)\n",
+        "timed_out": false
+      },
+      {
+        "argv": [
+          "/home/ken/.local/share/uv/tools/amplifier/bin/python",
+          "-m",
+          "amplifier_module_pipeline_runner.cli",
+          "lint",
+          "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/subgraphs/lane_probe.dot"
+        ],
+        "command": "/home/ken/.local/share/uv/tools/amplifier/bin/python -m amplifier_module_pipeline_runner.cli lint /home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/subgraphs/lane_probe.dot",
+        "cwd": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd",
+        "exit_code": 0,
+        "source_prefix": {
+          "BASE": "/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules",
+          "PYTHONPATH": "/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/pipeline-runner:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/loop-pipeline:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/unified-llm-client:/home/ken/.amplifier/cache/amplifier-bundle-attractor-10534381a6383d20/modules/remote-source"
+        },
+        "stderr": "",
+        "stdout": "WARNING: [acyclic_graph] This graph has no cycle (no back-edge): it is a linear, one-pass pipeline.  An attractor should have at least one corrective loop that allows it to retry, self-correct, or converge.  If this is intentional (a deliberate single-pass analysis), this warning can be ignored \u2014 but consider whether this pipeline should be a recipe instead.\n  fix: Add a corrective back-edge from a validation/gate node back to an earlier work node so the pipeline can retry on failure.  Use evidence-based conditions (context.tool.last_line or context.preferred_label) on the exit edge to gate convergence.  If this is a deliberate one-pass pipeline, no change is needed \u2014 this is a WARNING, not an error.\n\nattractor lint: /home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/subgraphs/lane_probe.dot: 1 warning(s)\n",
+        "timed_out": false
+      }
+    ],
+    "parse": [
+      {
+        "diagnostic_count": 0,
+        "diagnostics": [],
+        "error_count": 0,
+        "file": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/goal_plan_cwd_probe.dot"
+      },
+      {
+        "diagnostic_count": 0,
+        "diagnostics": [],
+        "error_count": 0,
+        "file": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/subgraphs/lane_probe.dot"
+      }
+    ],
+    "pass": true,
+    "python_compile": {
+      "argv": [
+        "/home/ken/.local/share/uv/tools/amplifier/bin/python",
+        "-m",
+        "py_compile",
+        "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py"
+      ],
+      "command": "/home/ken/.local/share/uv/tools/amplifier/bin/python -m py_compile /home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd/pipelines/goal_plan_cwd_probe/probe.py",
+      "cwd": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-cwd",
+      "exit_code": 0,
+      "stderr": "",
+      "stdout": "",
+      "timed_out": false
+    }
+  },
+  "tool_cwd_controls": {
+    "lane-a:after-box": {
+      "exists": true,
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/controls/lane-a-after-box.json",
+      "record": {
+        "assigned_target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+        "cwd_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+        "phase": "after-box",
+        "recorded_at": "2026-08-22T22:41:25.479489+00:00",
+        "schema_version": "goal-plan.cwd-probe-state/v1",
+        "scope": "lane-a"
+      }
+    },
+    "lane-a:before-box": {
+      "exists": true,
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/controls/lane-a-before-box.json",
+      "record": {
+        "assigned_target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+        "cwd_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+        "phase": "before-box",
+        "recorded_at": "2026-08-22T22:41:22.365367+00:00",
+        "schema_version": "goal-plan.cwd-probe-state/v1",
+        "scope": "lane-a"
+      }
+    },
+    "lane-a:bind": {
+      "exists": true,
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/controls/lane-a-bind.json",
+      "record": {
+        "assigned_target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-a",
+        "cwd_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "phase": "bind",
+        "recorded_at": "2026-08-22T22:41:22.293821+00:00",
+        "schema_version": "goal-plan.cwd-probe-state/v1",
+        "scope": "lane-a"
+      }
+    },
+    "lane-b:after-box": {
+      "exists": true,
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/controls/lane-b-after-box.json",
+      "record": {
+        "assigned_target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+        "cwd_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+        "phase": "after-box",
+        "recorded_at": "2026-08-22T22:41:25.527318+00:00",
+        "schema_version": "goal-plan.cwd-probe-state/v1",
+        "scope": "lane-b"
+      }
+    },
+    "lane-b:before-box": {
+      "exists": true,
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/controls/lane-b-before-box.json",
+      "record": {
+        "assigned_target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+        "cwd_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+        "phase": "before-box",
+        "recorded_at": "2026-08-22T22:41:22.363843+00:00",
+        "schema_version": "goal-plan.cwd-probe-state/v1",
+        "scope": "lane-b"
+      }
+    },
+    "lane-b:bind": {
+      "exists": true,
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/controls/lane-b-bind.json",
+      "record": {
+        "assigned_target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/lane-b",
+        "cwd_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "phase": "bind",
+        "recorded_at": "2026-08-22T22:41:22.300620+00:00",
+        "schema_version": "goal-plan.cwd-probe-state/v1",
+        "scope": "lane-b"
+      }
+    },
+    "parent:after-fan-in": {
+      "exists": true,
+      "path": "/tmp/goal-plan-cwd-probe-0gxuhcz9/controls/parent-after-fan-in.json",
+      "record": {
+        "assigned_target": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "cwd_realpath": "/tmp/goal-plan-cwd-probe-0gxuhcz9/root",
+        "phase": "after-fan-in",
+        "recorded_at": "2026-08-22T22:41:25.601268+00:00",
+        "schema_version": "goal-plan.cwd-probe-state/v1",
+        "scope": "parent"
+      }
+    }
+  },
+  "verdict": "BLOCKED-engine-session-cwd"
 }
