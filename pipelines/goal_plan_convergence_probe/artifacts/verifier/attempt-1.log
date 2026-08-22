@@ -1,0 +1,5 @@
+argv=["/usr/bin/python3", "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/scripts/verify_candidate.py", "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/candidate.txt", "--attempt", "1", "--phase", "candidate"]
+exit_code=1
+--- stdout ---
+{"attempt": 1, "candidate_sha256": "ec8e3303784f6c8d9382da6e0bd631f3474992648116bae3d5bde46afac07f20", "feedback": {"code": "EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS", "message": "Set status=valid and acknowledge this verifier feedback with feedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS.", "required_candidate_utf8": "status=valid\nfeedback_ack=EXTERNAL_VERIFIER_REQUIRES_VALID_STATUS\n"}, "phase": "candidate", "reason": "candidate bytes do not satisfy the exact predicate", "schema_version": "goal-plan.convergence-candidate-verifier/v1", "verdict": "FAIL"}
+--- stderr ---

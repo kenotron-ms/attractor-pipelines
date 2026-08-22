@@ -1,0 +1,6 @@
+attractor: running pipeline cwd=/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe logs=/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/artifacts/attractor
+attractor: status=success
+attractor: logs=/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/artifacts/attractor
+attractor: notes:
+Tool completed: python3 scripts/parent_verify.py
+{"status": "success", "notes": "Tool completed: python3 scripts/parent_verify.py", "logs_dir": "/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-attractor-smoke-convergence/pipelines/goal_plan_convergence_probe/artifacts/attractor"}
