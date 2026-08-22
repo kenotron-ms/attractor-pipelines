@@ -1,0 +1,7 @@
+{
+  "blocker": null,
+  "generated_at": null,
+  "note": "Pending the fresh source-backed Attractor CLI run.",
+  "schema_version": "goal-plan.cwd-probe/v1",
+  "verdict": "PENDING-live-run"
+}
