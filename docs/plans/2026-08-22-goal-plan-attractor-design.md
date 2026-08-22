@@ -68,21 +68,25 @@ verifier against the durable commit before integration.
 
 ## Decision
 
-Implement `goal_plan` as a **statically compiled goal-plan attractor**.
+Implement `goal_plan` as a **statically compiled goal-plan pipeline family**,
+not as one generic dynamic root graph.
 
 `goalify`/goal-batch-style decomposition remains the composition layer. It
 produces a human-approved set of lane goals, owned paths, dependencies,
-verifiers, qualitative criteria, and budgets. Before runtime, that plan is
-materialized as a fixed DOT graph with explicit dependency waves and lane
-subgraphs. Changing lane count, dependencies, ownership, or verifier contracts
-requires changing and reviewing the graph.
+verifiers, qualitative criteria, and budgets. The already-existing
+`goaltractor` composition behavior is the normal front end for arbitrary real
+plans; a human author may materialize the same artifact contract directly.
+Before runtime, either path writes a fixed, self-contained pipeline directory
+whose DOT graph contains the approved dependency waves and lane subgraphs.
+Changing lane count, dependencies, ownership, or verifier contracts requires
+materializing and reviewing a changed static artifact.
 
 Runtime does not compile another graph and does not discover or schedule work
 from a queue. It executes the reviewed graph that is already present.
 
-This is a narrow executor for an approved goal plan, not another generic
-goaltractor and not a replacement for the composition mechanisms that create
-the plan.
+This repository supplies the reusable execution contract and a canonical fixed
+smoke exemplar. It does not reimplement `goaltractor`, add another compiler, or
+replace the composition mechanisms that create arbitrary plans.
 
 ## Goals
 
@@ -97,6 +101,10 @@ the plan.
 - Integrate passing lane commits sequentially.
 - Run the aggregate verifier after every integration and again at final HEAD.
 - Run a fresh cross-lane coherence review against the fully integrated result.
+- Route late multi-owner findings through one bounded integration-branch
+  correction loop.
+- Rerun every lane verifier against exact final integration HEAD before
+  completion.
 - Optionally deliver one PR through the proven `deliver_pr.dot` pattern and
   independently verify that the remote PR points at the exact integrated HEAD.
 - Recover by reconciling durable state with real git, worktree, verifier,
@@ -117,6 +125,7 @@ the plan.
 - Automatically delivering partial or residual work.
 - Merging or deploying the PR after delivery.
 - Replacing `goalify` or goal-batch-style composition.
+- Reimplementing or wrapping the already-existing `goaltractor` compiler.
 
 ## Rejected Alternatives
 
@@ -149,17 +158,114 @@ portable.
 
 ### Composition/runtime boundary
 
-The composition layer produces the approved plan. It is responsible for:
+The composition layer produces one immutable member of the `goal_plan` pipeline
+family. For a plan slug `PLAN_SLUG`, it materializes this self-contained
+directory in the target repository:
 
-- decomposing the objective into bounded goals;
-- defining scope-outs and ownership;
-- identifying dependencies and collision risks;
-- selecting exact lane and aggregate verifiers;
-- defining optional qualitative criteria;
-- assigning per-lane and run-wide budgets; and
-- obtaining plan approval, unless the invocation carries explicit preapproval.
+```text
+pipelines/PLAN_SLUG/
+  PLAN_SLUG.dot
+  plan.json
+  PLAN_SLUG.md                 # optional human-readable companion
+  subgraphs/
+    goal_lane.dot
+    deliver_pr.dot             # present only when delivery_mode is pr
+```
 
-The runtime attractor receives only that fixed plan. It is responsible for:
+`plan.json` is versioned design-time and audit data. It is not a runtime
+scheduling manifest: runtime must not iterate its `lanes` or `waves` to decide
+what runs next. The generated DOT owns dispatch and contains the actual program.
+
+#### `plan.json` contract
+
+`plan.json` has these required typed fields:
+
+| Field | Type and invariant |
+|---|---|
+| `schema_version` | String with exact value `goal-plan.plan/v1`. |
+| `plan_id` | Slug string equal to `PLAN_SLUG`; stable across runs of the same compiled plan. |
+| `source_request` | Non-empty string containing the originating request or its durable reference. |
+| `target_repo` | Object with `vcs: "git"`, stable `repository_id` string, and `expected_remote` string or `null`. |
+| `base_ref_policy` | Object with `mode: "fixed"` and non-empty `ref`, or `mode: "runtime"` and `ref: null`. |
+| `lanes` | Non-empty array of lane objects described below. |
+| `waves` | Non-empty ordered array of objects with unique `id` and non-empty `lane_ids`; every lane appears in exactly one wave. |
+| `integration_order` | Array containing every lane ID exactly once in deterministic integration order, with every dependency before its dependents. |
+| `integration_seams` | Array of repository-relative path patterns explicitly writable by late integration correction. |
+| `aggregate_verifier` | Aggregate-verifier contract defined below. |
+| `global_budgets` | Object with positive integer `max_total_attempts`, positive integer `max_integration_corrections`, and positive integer `max_pipeline_seconds`. |
+| `approval_mode` | Enum string `required` or `preapproved`. |
+| `delivery_mode` | Enum string `none` or `pr`. |
+
+Each `lanes` entry contains:
+
+| Field | Type and invariant |
+|---|---|
+| `id` | Unique lane-ID slug. |
+| `origins` | Non-empty array of requirement identifiers or text. |
+| `goal` | Non-empty, checkable end-state string. |
+| `scope_outs` | String array. |
+| `owned_paths` | Non-empty array of repository-relative path patterns. |
+| `dependencies` | Array of lane IDs; references must exist and form an acyclic graph. |
+| `verifier` | Object with exactly one of non-empty `command` or checked-in `script_path`, plus positive integer `timeout_seconds` and `definition_sha256`. |
+| `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
+| `budgets` | Object with positive integer `max_attempts`. |
+
+The composition layer owns decomposition, collision analysis, all typed values
+above, and plan approval or explicit preapproval. It writes `plan.json`
+canonically and computes `plan_sha256` over the exact UTF-8 bytes of that file.
+
+#### Generated DOT correspondence
+
+`PLAN_SLUG.dot` embeds `plan_sha256` as a graph attribute and directly encodes:
+
+- one explicit lane subgraph invocation per lane;
+- explicit component/tripleoctagon nodes for each wave;
+- every dependency edge;
+- the full integration-order chain;
+- every lane, integration-correction, run-wide, and duration budget;
+- the aggregate-verifier definition hash;
+- approval and delivery modes; and
+- all terminal and correction routes.
+
+Admission runs before approval and before any mutation. It deterministically:
+
+1. locates the adjacent `plan.json`;
+2. recomputes its SHA-256 and requires equality with embedded
+   `plan_sha256`;
+3. schema-validates `plan.json`; and
+4. parses the static DOT to require exact correspondence for lane IDs, waves,
+   dependency edges, integration order, budget values, aggregate-verifier hash,
+   approval mode, and delivery mode.
+
+A missing file, hash mismatch, schema failure, or graph/plan mismatch aborts
+admission loudly. Admission reads `plan.json` only to audit the already-static
+program; it never dispatches work from the JSON.
+
+#### Runtime invocation interface
+
+Each compiled family member accepts only these runtime inputs:
+
+| Input | Type and rule |
+|---|---|
+| `target_repo` | Required absolute path to the Git working repository. Its identity must match `plan.json.target_repo`. |
+| `base_ref` | Required Git ref. Preflight resolves it once to a full commit SHA and persists that pinned SHA. Under `base_ref_policy.mode: "fixed"`, it must resolve to the configured fixed ref; under `"runtime"`, the caller-selected ref is allowed. |
+| `run_id` | Required slug unique within the plan's run directory. |
+| `state_root` | Absolute path. If omitted, preflight resolves the absolute default `TARGET_REPO/.amplifier/runs/goal-plan/PLAN_ID/RUN_ID`; it must be ignored by Git before runtime writes it. |
+| `approval_mode` | Required enum `required` or `preapproved`; must equal the compiled plan value. |
+| `delivery_mode` | Required enum `none` or `pr`; must equal the compiled plan value. |
+| `github_repo` | `owner/repo` string required only when `delivery_mode` is `pr`; forbidden otherwise. |
+
+Preflight rejects relative `target_repo` or `state_root` values, mode mismatches,
+repository-identity mismatches, reused `run_id` with incompatible state, or a
+base ref that cannot be resolved and pinned.
+
+Composition owns the immutable files under `pipelines/PLAN_SLUG/`. Runtime
+reads but never rewrites them. All runtime-created filesystem state and
+evidence, including its lane and integration worktree directories, live beneath
+`state_root`; product changes leave those worktrees only as explicit Git commits
+and integrations.
+
+The runtime graph is responsible for:
 
 - deterministic preflight;
 - isolated worktree preparation;
@@ -177,7 +283,9 @@ The runtime attractor receives only that fixed plan. It is responsible for:
 ```text
 Start
   -> Reconcile durable state
-  -> Validate/render plan and preflight
+  -> Bind typed runtime inputs
+  -> Admission: validate plan.json hash + static graph correspondence
+  -> Resolve and pin base_ref; establish ignored state_root
   -> Plan approval (or verify explicit preapproval)
   -> Prepare worktrees for Wave 1
   -> component fan-out
@@ -194,8 +302,14 @@ Start
   -> ...
   -> Aggregate verifier at final HEAD
   -> Fresh cross-lane coherence review at final HEAD
-       -> correction edge to the explicit responsible lane when actionable
+       -> ITERATE: one IntegrationCorrection on integration branch
+            -> affected-closure lane verifiers at current integration HEAD
+            -> aggregate verifier
+            -> fresh coherence review
        -> residual classification when no bounded correction remains
+       -> PASS: final sweep of every lane verifier at exact final HEAD
+            -> red: IntegrationCorrection within integration budget
+            -> all green: completion-eligible
   -> Classify convergence result
        -> all gates green
             -> delivery disabled -> COMPLETE
@@ -225,7 +339,7 @@ Every lane has the following approved, immutable contract:
 | Scope-outs | Explicit work the lane must not perform. |
 | Owned paths | Allowed write set. Concurrent lanes must not have conflicting ownership. |
 | Dependencies | Lane IDs that must be `PASS` and integrated before this lane starts. |
-| Verifier | Exact, non-interactive command with a defined working directory and timeout. Exit zero means the mechanical condition passed; any other result is evidence to classify. |
+| Verifier | Exact, non-interactive command with a defined working-directory policy and timeout. It must run both in the lane worktree and against current integration HEAD in the integration worktree. Exit zero means the mechanical condition passed; any other result is evidence to classify. |
 | Qualitative criteria | Optional criteria that require an independent judgment gate after the mechanical verifier passes. |
 | Attempt budget | Maximum verification-bearing attempts available to the lane. |
 
@@ -500,6 +614,67 @@ result from poisoning the shared branch.
 After every wave, the parent records the integrated HEAD and aggregate result
 before the next dependency wave is prepared.
 
+### Late multi-owner integration correction
+
+Late correction begins only after work has been integrated. A cross-lane
+`ITERATE` never fans work back into several old lane branches, because those
+branches no longer share the current integrated base and cannot jointly prove a
+coherent result.
+
+Instead, every cross-lane `ITERATE` routes to one bounded
+`IntegrationCorrection` worker operating directly on the integration branch.
+Its input contains the complete fresh-review artifact, all findings, and the
+full `responsible_lane_ids` array.
+
+For each correction round, deterministic setup computes:
+
+1. the **responsible set** from `responsible_lane_ids`;
+2. the **affected closure** as that responsible set plus every transitive
+   dependent in the static lane DAG; and
+3. the allowed write set as the union of every responsible lane's
+   `owned_paths` plus `plan.json.integration_seams`.
+
+Only the responsible set contributes owned paths; transitive dependents are
+included for proof invalidation and re-verification, not to widen correction
+ownership. A deterministic diff check rejects any write outside the computed
+allowed set.
+
+Before the worker acts, the graph appends invalidation records for every
+affected lane's prior verifier and review evidence. The old artifacts remain
+available for audit, but they are marked superseded and cannot satisfy any
+later gate.
+
+After `IntegrationCorrection` writes and commits a correction, the graph:
+
+1. reruns every affected-closure lane verifier against the current integration
+   HEAD, in static integration order restricted to that closure;
+2. rejects any verifier evidence whose `head_sha` is not that current HEAD;
+3. reruns the aggregate verifier;
+4. reruns fresh cross-lane coherence review; and
+5. repeats only through the one `IntegrationCorrection` loop when evidence is
+   red.
+
+An affected-closure lane-verifier failure adds that lane ID to the next
+responsible set and routes back to `IntegrationCorrection`. Each worker entry
+consumes one `global_budgets.max_integration_corrections` unit and also counts
+toward `max_total_attempts`. Exhaustion writes named
+`BUDGET_EXHAUSTED(integration_correction:SORTED_LANE_IDS)` residuals with the
+last findings, closure, ownership check, verifier logs, and integration HEAD.
+
+### Final lane-verifier sweep
+
+After coherence returns `PASS`, and before delivery eligibility or
+`COMPLETE`, the graph runs every lane verifier once more against the exact
+current integration HEAD in full static integration order. Each final-sweep
+record is bound to that one SHA.
+
+If any final-sweep lane verifier is red, its lane ID becomes the responsible
+set for `IntegrationCorrection`; the graph computes its transitive-dependent
+closure and re-enters the same bounded correction loop. After correction it
+must again pass closure verification, aggregate verification, coherence review,
+and the complete final sweep. No pre-merge, lane-branch, or pre-correction
+verifier evidence can satisfy completion.
+
 ## Final Aggregate and Coherence Gates
 
 After all runnable waves finish:
@@ -515,11 +690,12 @@ After all runnable waves finish:
    `reviewed_head` to equal final integrated HEAD, and routes only the exact
    `PASS`, `ITERATE`, or `BLOCKED` verdicts.
 
-Actionable coherence findings route to the explicitly responsible lane's
-correction edge and must survive that lane's verifier, parent verification,
-reintegration, aggregate verification, and a fresh coherence review. If
-responsibility is ambiguous or correction budget is exhausted, the finding
-becomes an evidence-backed residual rather than an invented pass.
+Actionable coherence findings route only to `IntegrationCorrection`, carrying
+all responsible lane IDs. They must survive affected-closure lane verification,
+aggregate verification, a fresh coherence review, and the final all-lane
+verifier sweep. If responsibility is ambiguous or correction budget is
+exhausted, the finding becomes an evidence-backed residual rather than an
+invented pass.
 
 Final coherence review is unreachable until the aggregate wrapper emitted
 `AGGREGATE_VERIFY:PASS` for the same HEAD. A coherence `PASS` therefore cannot
@@ -551,6 +727,11 @@ The run-wide ceiling prevents nested per-lane, aggregate, and coherence loops
 from multiplying into an unbounded run, following the
 `resolve_expert_builder` precedent.
 
+`global_budgets.max_integration_corrections` separately bounds entries into the
+single late `IntegrationCorrection` worker. It is a sub-budget of
+`max_total_attempts`, not a renewable pool. Red affected-closure or final-sweep
+lane verifiers consume this same correction budget.
+
 Engine wall-clock and step limits remain safety fuses, not completion
 conditions. The graph's own budget walls must fire first and produce usable
 evidence.
@@ -569,6 +750,10 @@ Exhaustion writes a postmortem that names:
 The exhausted lane becomes `BUDGET_EXHAUSTED`. The run continues only far
 enough to classify unaffected durable work and assemble `RESIDUALS_READY`;
 exhaustion never routes directly to `COMPLETE`.
+
+Integration-correction exhaustion preserves the integration branch and records
+named residuals for the responsible set and affected closure. It never restores
+or resumes old lane branches.
 
 ## Human Gates
 
@@ -616,14 +801,18 @@ run begins with deterministic reconciliation.
 The run persists:
 
 - approved plan snapshot/hash and preapproval/approval evidence;
-- repository identity and original base HEAD;
+- compiled-pipeline path, embedded `plan_sha256`, typed runtime inputs,
+  repository identity, and pinned base HEAD;
 - run-wide and per-lane counters;
 - worktree/branch/base/head mapping;
 - lane contracts, evidence, and dispositions;
 - parent-verification records;
 - integration journal with pre-merge and post-merge HEADs;
+- integration-correction journal with each round's responsible set, affected
+  closure, allowed write set, evidence invalidations, commit, and budget count;
 - aggregate-verifier records after each merge;
 - final aggregate and versioned fresh-review records;
+- final-sweep lane-verifier records bound to final integration HEAD;
 - terminal classification;
 - versioned `result.json`; and
 - the versioned delivery-attempt ledger, branch, expected head, PR URL, observed
@@ -636,21 +825,32 @@ state; they are not the source of truth.
 
 On restart, the graph compares state with reality:
 
-1. Confirm the plan hash, repository identity, and original base still match.
-2. Enumerate actual worktrees and branches.
-3. Resolve recorded commits directly from Git.
-4. Reclassify a purported completed lane whose artifact or commit is missing
+1. Rerun admission against the immutable adjacent `plan.json` and embedded
+   `plan_sha256`, including graph/plan correspondence.
+2. Confirm `plan_id`, typed runtime inputs, `state_root`, repository identity,
+   and pinned base SHA match the durable run record.
+3. Enumerate actual worktrees and branches beneath `state_root`.
+4. Resolve recorded commits directly from Git.
+5. Reclassify a purported completed lane whose artifact or commit is missing
    as `CRASHED` or `INFRA_FAILURE`, depending on whether lane work or the
    substrate is untrustworthy.
-5. Rerun a verifier when the recorded result is absent, stale, or not bound to
+6. Rerun a verifier when the recorded result is absent, stale, or not bound to
    the recorded commit.
-6. Reconcile the integration journal against the actual integration HEAD and
+7. Reconcile the integration journal against the actual integration HEAD and
    Git ancestry before attempting another merge.
-7. Rerun the aggregate verifier if the actual HEAD lacks a bound passing
+8. Recompute every recorded integration-correction affected closure from the
+   static DAG and require it to match the durable journal. Preserve prior
+   artifacts but enforce all recorded invalidations.
+9. If an integration-correction commit exists but its proof sequence is
+   incomplete, resume at affected-closure verification against current
+   integration HEAD rather than rerunning the worker.
+10. Rerun the aggregate verifier if the actual HEAD lacks a bound passing
    record.
-8. Reject a fresh-review artifact whose `reviewed_head` does not equal actual
+11. Reject a fresh-review artifact whose `reviewed_head` does not equal actual
    HEAD.
-9. Reconcile the delivery ledger, then query remote PR state at the ledger's
+12. Require a complete all-lane final sweep at actual integration HEAD before
+    restoring completion eligibility.
+13. Reconcile the delivery ledger, then query remote PR state at the ledger's
    exact expected head if delivery may already have occurred; never open a
    duplicate merely because local state is incomplete.
 
@@ -662,7 +862,7 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Every approved lane is `PASS`; all passing work is integrated; the aggregate verifier passes at final HEAD; fresh coherence review passes at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
+| `COMPLETE` | All work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; every lane verifier passes in the final sweep at exact final integration HEAD; the aggregate verifier and fresh coherence review pass at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, or final aggregate/coherence criteria remain unsatisfied. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
 | `INFRA_FAILURE` | Git/worktree state, verifier execution substrate, credentials, remote API, or recovery state cannot be trusted enough to classify product work honestly. | No delivery. |
 | `ABORTED` | The plan was rejected/cancelled before mutation, or the operator explicitly stopped the run at an allowed gate. | No delivery. |
@@ -678,8 +878,10 @@ writes the run root's versioned `result.json` with, at minimum:
 - `plan_hash`;
 - `integrated_head_sha`, or `null` when no integration HEAD exists;
 - `lane_dispositions`;
+- `integration_correction_records`;
 - `aggregate_evidence_path`;
 - `fresh_review_evidence_paths`;
+- `final_sweep_evidence_paths`;
 - `residual_evidence_paths`;
 - `delivery_ledger_path`; and
 - `delivery_pr_url` and `delivery_verified_head_sha` when delivery was
@@ -720,8 +922,9 @@ pipeline-local `subgraphs/` directory, as required by `AGENTS.md` and
 checks.
 
 `goal_plan` adds one final deterministic assertion: the remote PR head SHA must
-equal the exact final integrated HEAD that passed aggregate and coherence
-verification. A real PR at the wrong head is not successful delivery.
+equal the exact final integrated HEAD that passed the all-lane final sweep,
+aggregate verification, and coherence review. A real PR at the wrong head is
+not successful delivery.
 
 Delivery must not mutate that verified HEAD. If the delivery subgraph changes
 local HEAD, the exact-head assertion fails; the run cannot claim `COMPLETE`
@@ -770,20 +973,32 @@ Implementation should copy these proven shapes rather than inventing new ones:
 | `pipelines/pr_review/pr_review.dot` | `shape=component` fan-out, `shape=tripleoctagon` fan-in, file-backed cross-branch results, and explicit missing-artifact/crashed-lane detection. |
 | `pipelines/resolve_expert_builder/resolve_expert_builder.dot` | One run-wide corrective-work ceiling that cannot be replenished by entering another fix loop, and evidence-rich exhaustion reporting. |
 | Existing `subgraphs/deliver_pr.dot` | Commit/push/PR delivery with downstream checks of real remote state. Copy it unchanged first, then add exact-head verification in the parent pipeline rather than rebuilding delivery. |
+| Existing `goaltractor` composition behavior | Design-time materialization of arbitrary approved plans as static DOT. Reuse it as the composition front end; do not copy its intelligence into runtime. |
 
 ## Anticipated File Changes
 
-Implementation is expected to touch only:
+This repository implements one canonical, statically compiled member of the
+family and the reusable local subgraphs that `goaltractor` copies into
+arbitrary real plan directories. It does not add a generic root graph,
+compiler, or runtime scheduler. The expected footprint is:
 
 ```text
-pipelines/goal_plan/goal_plan.dot
-pipelines/goal_plan/goal_plan.md
-pipelines/goal_plan/subgraphs/goal_lane.dot
-pipelines/goal_plan/subgraphs/deliver_pr.dot
+pipelines/goal_plan_smoke/goal_plan_smoke.dot
+pipelines/goal_plan_smoke/plan.json
+pipelines/goal_plan_smoke/goal_plan_smoke.md
+pipelines/goal_plan_smoke/subgraphs/goal_lane.dot
+pipelines/goal_plan_smoke/subgraphs/deliver_pr.dot
 README.md
 ```
 
-This design document does not implement those changes.
+The smoke exemplar proves orchestration rather than product behavior. In a
+temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
+owned paths; one Wave 2 integration fixture lane depends on both and produces a
+third fixture file. Its graph is fixed and self-contained. The existing
+`goaltractor` remains the composition front end that materializes arbitrary
+real plans to the same directory and contract; it is not reimplemented here.
+
+This design-document revision does not implement those files.
 
 ## Verification Strategy
 
@@ -802,25 +1017,38 @@ orchestration behavior, not a library-only change.
 7. Validate the aggregate-verifier evidence schema, exit/token normalization,
    verifier-hash guard, shared fresh-review schema, finalizer token map, and
    two-attempt delivery ledger against the contracts above.
+8. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
+   graph/plan correspondence, and typed runtime-input rejection cases.
+9. Prove the graph contains no manifest-driven scheduler: lane, wave,
+   dependency, integration-order, and budget dispatch all remain explicit DOT
+   nodes, edges, and constants.
 
 ### Primary live smoke scenario
 
-Run the real pipeline against a disposable GitHub repository with a known
-aggregate verifier and three approved lanes:
+Run the canonical `goal_plan_smoke` pipeline against a temporary,
+GitHub-backed Git repository with a known aggregate verifier and three fixed
+fixture lanes:
 
-- `lane_a` and `lane_b` own disjoint files and run concurrently in Wave 1.
+- `lane_a` and `lane_b` each produce one fixture file in disjoint owned paths
+  and run concurrently in Wave 1.
 - `lane_b` is seeded so its first verifier run fails with a stable, actionable
   error; it must consume one attempt, preserve the log, use curated feedback,
   and pass on a later attempt.
-- `lane_c` depends on both Wave 1 lanes and cannot start until both commits are
+- `lane_c` is the integration fixture lane. It produces a third fixture file,
+  depends on both Wave 1 lanes, and cannot start until both commits are
   parent-verified, integrated sequentially, and followed by green aggregate
   checks.
+- A controlled first coherence review returns `ITERATE` with `lane_a` and
+  `lane_b` as responsible. The static DAG makes the affected closure
+  `lane_a`, `lane_b`, and transitive dependent `lane_c`.
 - Delivery is enabled, producing one real PR.
 
 The live smoke passes only if direct observation proves:
 
-1. The rendered graph and persisted plan match the approved three-lane plan.
-2. No mutation occurs before approval/preapproval validation.
+1. The adjacent `plan.json` hash equals embedded `plan_sha256`, and admission
+   proves graph/plan correspondence before mutation.
+2. Typed runtime inputs are bound, `base_ref` is pinned, `state_root` is
+   ignored, and no mutation occurs before approval/preapproval validation.
 3. Wave 1 lanes use distinct worktrees and actually overlap in execution.
 4. `lane_b`'s first failure is visible and causes a corrective cycle rather
    than a silent pass or blind restart.
@@ -830,12 +1058,18 @@ The live smoke passes only if direct observation proves:
    each merge that names the exact HEAD and verifier hash and whose last-line
    token agrees with its JSON verdict.
 8. `lane_c` starts only after both dependencies are integrated and green.
-9. Final aggregate and fresh-review records are schema-valid and name the same
-   final HEAD.
-10. The delivery ledger records no more than two attempts, and the remote PR
+9. Cross-lane `ITERATE` invokes one `IntegrationCorrection` on the integration
+   branch, never the old lane branches; its write set is limited to the
+   responsible lanes' ownership union plus declared integration seams.
+10. Correction invalidates prior proof for the affected closure, then reruns
+    all three closure lane verifiers at current integration HEAD before
+    aggregate and coherence gates pass.
+11. The final sweep reruns every lane verifier at one exact final integration
+    HEAD, and final aggregate and fresh-review records name that same SHA.
+12. The delivery ledger records no more than two attempts, and the remote PR
     exists with a head SHA equal to its exact expected head.
-11. `result.json`, `goal_plan.status`, and last-line token agree on `COMPLETE`
-    only after all ten observations hold.
+13. `result.json`, `goal_plan.status`, and last-line token agree on `COMPLETE`
+    only after all twelve observations hold.
 
 ### Fault and recovery probes
 
@@ -849,10 +1083,21 @@ The implementation is not ready until live probes also demonstrate:
 - an out-of-ownership write is rejected even when the lane verifier passes;
 - an aggregate failure after a candidate merge restores the pre-merge HEAD and
   routes evidence back to the responsible lane;
+- a `plan.json` byte change, DOT/plan lane mismatch, relative runtime path,
+  incompatible reused `run_id`, or mode mismatch fails admission before
+  mutation;
 - changing the aggregate verifier definition after approval yields
   `AGGREGATE_VERIFY:INFRA` before the changed verifier runs;
 - a missing, malformed, or stale fresh-review artifact is rejected and never
   advances as `PASS`;
+- a multi-owner coherence `ITERATE` creates one integration-branch correction,
+  rejects a write outside the ownership union plus integration seams, computes
+  the full transitive-dependent closure, and invalidates its old evidence;
+- a red affected-closure or final-sweep lane verifier routes back to
+  `IntegrationCorrection`, while correction-budget exhaustion records named
+  residuals and never resumes old lane branches;
+- restarting after an integration-correction commit resumes closure proof at
+  current integration HEAD rather than duplicating the correction;
 - restarting after a lane commit but before integration reconciles the commit
   without duplicate work or duplicate merge;
 - restarting after remote PR creation discovers the existing PR and verifies
