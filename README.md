@@ -323,3 +323,49 @@ Point the attractor bundle at it via:
 ```
 git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot
 ```
+
+## Pipeline: goal_plan_smoke (multi-lane parallel goal/plan attractor family)
+
+`pipelines/goal_plan_smoke/goal_plan_smoke.dot` — the canonical member of the
+Goal Plan Attractor family: a static, reviewed parent program that runs an
+explicit three-lane dependency plan (`lane_a` and `lane_b` concurrently in
+Wave 1, `lane_c` in Wave 2 once both are integrated) as visible DOT control
+flow, not a hidden runtime scheduler. Each lane runs in its own Git worktree
+and its own headless child Attractor process, reaped by a small
+Python-standard-library supervisor that owns raw `waitpid` truth — an
+artifact existing on disk is never treated as success without that
+supervisor's exit/signal evidence. Parent candidate verification runs in a
+clean, disposable, detached worktree at the exact candidate commit;
+passing commits integrate sequentially with an aggregate check after every
+merge; a bounded (one-round) cross-lane coherence correction and a
+final-HEAD lane sweep run before an optional exact-head-verified PR
+delivery, cleanup, and one of four explicit terminal states
+(`COMPLETE` / `RESIDUALS_READY` / `INFRA_FAILURE` / `ABORTED`).
+
+See `pipelines/goal_plan_smoke/goal_plan_smoke.md` for the stable
+identity-anchor guide (prerequisites, trusted-verification route, terminal
+states) and `docs/primer.md` + `docs/RUBRIC.md` for the attractor doctrine
+this family is authored against.
+
+```
+pipelines/goal_plan_smoke/
+  goal_plan_smoke.dot            # static parent: waves, integration, coherence, delivery, terminals
+  goal_plan_smoke.md              # identity-stable history-anchor guide
+  plan.json                       # immutable design-time/audit data (lanes, waves, budgets, terminals)
+  python/
+    goal_plan_bootstrap.py          # trusted external bootstrap (descriptor auth, sealed runtime materialization)
+    goal_plan_runtime.py            # admission, worktrees, budgets, verifier envelopes, integration, cleanup (library, no CLI)
+    goal_plan_supervisor.py         # per-child reaper: run/poll/terminate/reconcile, authoritative exit/signal truth
+    tests/                          # pytest coverage for all three modules
+  subgraphs/
+    goal_lane.dot                    # bounded per-lane attempt/verify/diagnose convergence loop
+    integration_correction.dot        # bounded (1-round) shared-branch coherence correction
+    deliver_pr.dot                    # exact-final-HEAD PR delivery, adapted from this repo's proven deliver_pr pattern
+```
+
+This pipeline is not meant to be fetched and run standalone the way the
+other pipelines in this repo are — it requires an externally installed
+trusted bootstrap, launch descriptor, and process-supervision prerequisites
+described in `goal_plan_smoke.md`. It is included here as the reference
+example for a multi-lane, worktree-isolated, supervisor-verified parallel
+goal/plan attractor.
