@@ -1,0 +1,112 @@
+// deliver_pr.dot (goal_plan_smoke family)
+//
+// Adapted from this repo's proven subgraphs/deliver_pr.dot pattern (see
+// pipelines/idea_to_shipped/subgraphs/deliver_pr.dot and RUBRIC.md \u00a75
+// reuse discipline: copy the nearest proven pipeline rather than invent a
+// bespoke commit/push/PR node). Differences from the proven pattern, all
+// required by design doc Task 9:
+//   - runs headless in a CLEAN, DISPOSABLE worktree checked out at the
+//     frozen final HEAD (the parent creates this worktree; this graph
+//     never creates its own);
+//   - all generated delivery state (push status, claimed PR url) is
+//     written OUTSIDE git under $delivery_state_root, never under a
+//     tracked .resolve/ path in the worktree;
+//   - the branch name and remote are compile-bound inputs from the parent
+//     ($delivery_branch, $repo), never invented by the LLM node;
+//   - push is explicitly non-force (CommitPush never passes --force /
+//     --force-with-lease);
+//   - independent verification (CheckPROpened) additionally confirms the
+//     PR's head SHA equals $final_head, not just that a PR exists.
+//
+// Required context ($param):
+//   $repo              - owner/name to open the PR against
+//   $delivery_branch    - compile-bound branch name (created from final HEAD)
+//   $final_head         - the exact frozen commit this branch must point to
+//   $delivery_state_root - external directory for all generated delivery state
+//
+// Context outputs: delivery.pr_url, delivery.result ("opened"|"failed")
+
+digraph deliver_pr {
+  graph [rankdir=LR, default_max_retry=2, default_fidelity="summary:high"];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // Deterministic: the branch and HEAD are parent-supplied, compile-bound
+  // facts, not something this graph is allowed to (re)decide. Reject a
+  // worktree that isn't actually sitting on $final_head before any network
+  // mutation (design doc Task 9 step 3: reject stale/unexplained state
+  // before pushing).
+  ConfirmHead [
+    shape=parallelogram, label="Confirm Final HEAD",
+    tool_command="#!/bin/sh\nset -e\ncur=$(git rev-parse HEAD)\nif [ \"$cur\" = \"$final_head\" ]; then printf 'head_ok'; else printf 'head_mismatch'; fi"
+  ];
+  Start -> ConfirmHead;
+  ConfirmHead -> CommitPush [condition="context.tool.last_line=head_ok", weight="2"];
+  ConfirmHead -> Failed     [condition="context.tool.last_line=head_mismatch"];
+
+  CommitPush [
+    shape=box, fidelity="full",
+    label="Push (no-force)",
+    prompt="This worktree is a clean checkout at the exact frozen final HEAD ($final_head), already committed -- do not create, amend, or commit anything. Push the current HEAD to origin as branch $delivery_branch WITHOUT force (never pass --force or --force-with-lease; if the remote branch already exists and diverges, that is a failure, not something to overwrite). After the push command completes, run: git rev-parse --abbrev-ref HEAD > $delivery_state_root/push_status.txt && echo pushed >> $delivery_state_root/push_status.txt. Print the single line: pushed"
+  ];
+
+  CommitPush -> CheckPush;
+
+  CheckPush [
+    shape=parallelogram, label="Check Push",
+    tool_command="#!/bin/sh\nset -e\nif [ -f \"$delivery_state_root/push_status.txt\" ] && tail -1 \"$delivery_state_root/push_status.txt\" | grep -q pushed; then\n  printf 'pushed'\nelse\n  printf 'push_failed'\nfi"
+  ];
+
+  CheckPush -> OpenPR  [condition="context.tool.last_line=pushed", weight="2"];
+  CheckPush -> Failed  [condition="context.tool.last_line=push_failed"];
+
+  OpenPR [
+    shape=box, fidelity="full",
+    label="Open PR",
+    prompt="Open a REAL pull request on GitHub (https://github.com/$repo) for branch $delivery_branch against $repo's default branch -- use the gh CLI (`gh pr create --repo $repo --head $delivery_branch ...`) or the GitHub REST API directly (POST https://api.github.com/repos/$repo/pulls with GH_TOKEN), NOT any other git host or a simulated/local PR. Write a PR description summarizing the goal_plan_smoke run (lanes integrated, verification evidence). Write the resulting real github.com PR URL to $delivery_state_root/pr_url.txt. Print the single line: {\"pr_url\": \"<url>\"} as JSON."
+  ];
+
+  OpenPR -> ExtractPRUrl;
+
+  // Extracts the URL OpenPR claims to have opened -- NOT yet trusted. See
+  // CheckPROpened below (RUBRIC.md \u00a72 -- a self-reported side effect is
+  // not evidence).
+  ExtractPRUrl [
+    shape=parallelogram, label="Extract PR URL (claimed)",
+    tool_command="#!/bin/sh\nset -e\nurl=$(cat \"$delivery_state_root/pr_url.txt\")\nprintf '{\"delivery.pr_url\": \"%s\"}' \"$url\"",
+    parse_json="true"
+  ];
+
+  ExtractPRUrl -> CheckPROpened;
+
+  // Independent verification: the claimed PR must exist AND its head SHA
+  // must equal $final_head -- exact-head proof (design doc Task 9), not
+  // merely "some PR exists". Deliberately gh/curl only (no
+  // platform-specific helper) -- same portability rationale as the proven
+  // pattern this is adapted from.
+  CheckPROpened [
+    shape=parallelogram, label="Verify PR Opened At Final HEAD",
+    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -z \"$num\" ]; then printf 'not_verified'; exit 0; fi\nhead_sha=$(gh pr view \"$num\" --repo \"$repo\" --json headRefOid --jq .headRefOid 2>/dev/null || true)\nif [ -z \"$head_sha\" ]; then\n  head_sha=$(curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" 2>/dev/null | python3 -c \"import sys,json;print(json.load(sys.stdin).get('head',{}).get('sha',''))\" 2>/dev/null || true)\nfi\nif [ \"$head_sha\" = \"$final_head\" ]; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+  ];
+
+  CheckPROpened -> MarkOpened  [condition="context.tool.last_line=verified && outcome=success", weight="2"];
+  CheckPROpened -> Failed      [condition="context.tool.last_line=not_verified && outcome=success"];
+  CheckPROpened -> Failed      [condition="outcome=fail", runs_on="failure"]; // safety net (RUBRIC.md 3.2)
+
+  // Only set delivery.result="opened" once CheckPROpened has independently
+  // confirmed the PR is real AND at the exact final HEAD.
+  MarkOpened [
+    shape=parallelogram, label="Mark Opened (verified)",
+    tool_command="printf '{\"delivery.result\": \"opened\"}'",
+    parse_json="true"
+  ];
+  MarkOpened -> Exit;
+
+  Failed [
+    shape=parallelogram, label="Mark Failed", runs_on="always",
+    tool_command="printf '{\"delivery.result\": \"failed\"}'",
+    parse_json="true"
+  ];
+  Failed -> Exit;
+}
