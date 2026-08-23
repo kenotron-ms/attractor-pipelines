@@ -109,13 +109,15 @@ This repository supplies the reusable execution contract and a canonical fixed
 smoke exemplar. It does not reimplement `goaltractor`, add another compiler, or
 replace the composition mechanisms that create arbitrary plans.
 
-Execution is intentionally hierarchical. The parent Attractor graph owns batch
-admission, static dependency waves, process supervision, parent verification,
-integration, aggregate/coherence gates, recovery, terminals, and delivery. One
-separate headless child Attractor process owns each lane's bounded correction
-cycle; the same supervised-child boundary owns integration-correction and
-delivery runs. This is parent/child Attractor composition, not nested app-cli
-`/goal` orchestration.
+Execution is intentionally hierarchical. The externally staged trusted
+bootstrap owns first admission, exact runtime rehydration, and parent exec
+handoff. After handoff, the parent Attractor graph owns admission revalidation,
+static dependency waves, process supervision, parent verification, integration,
+aggregate/coherence gates, recovery, terminals, and delivery. One separate
+headless child Attractor process owns each lane's bounded correction cycle; the
+same supervised-child boundary owns integration-correction and delivery runs.
+This is parent/child Attractor composition, not nested app-cli `/goal`
+orchestration.
 
 ## Goals
 
@@ -137,6 +139,11 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
   starts/restarts never stand in for attempt accounting.
 - Launch every lane, integration-correction, and delivery child from one
   immutable `attractor_runner_argv_prefix` with the exact compiled `provider`.
+- Require every initial start and recovery to enter through one immutable
+  externally installed `trusted_launcher_argv_prefix`. The launcher is a
+  byte-exact staged copy of the compiled `goal_plan_bootstrap.py` blob, lives
+  outside the target repository and every run-controlled root, and is validated
+  before every invocation without PATH lookup or a shell.
 - Launch the parent Attractor CLI only after the launching process has changed
   its OS CWD to the canonical `target_repo`; require the parent process CWD,
   literal `--cwd .` resolution, invoked parent DOT realpath, DOT bytes/hash,
@@ -145,11 +152,15 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
 - Execute every supervisor start and control operation from one separately
   immutable external `trusted_supervisor_argv_prefix`; no supervisor operation
   uses PATH, a shell command string, or a target-repository interpreter/script.
-- During the first green admission, before any repository mutation, prove the
-  checked-out `goal_plan_runtime.py` and `goal_plan_supervisor.py` bytes against
-  both `execution_source_sha` and the compiled-source manifest, then materialize
-  byte-exact, non-writable copies from those Git blobs beneath external
-  `state_root` and bind their exact Git/interpreter/executable identities.
+- During the first green admission, before any repository mutation, let only
+  the external trusted bootstrap prove its own installed identity and the
+  checked-out `goal_plan_bootstrap.py`, `goal_plan_runtime.py`, and
+  `goal_plan_supervisor.py` source identities against
+  `execution_source_sha` and the compiled-source manifest. It extracts only the
+  runtime/supervisor Git blobs, materializes their byte-exact non-writable
+  copies beneath external `state_root`, and binds the exact
+  launcher/Git/interpreter/executable identities before handing off to the
+  parent.
 - After that admission, execute every safety-critical gate, budget/process/
   worktree control, cleanup, finalizer, and recovery operation only through the
   external `trusted_runtime_argv_prefix` or
@@ -180,9 +191,10 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
   whose generated state is rooted only at external `delivery_state_root`, then
   independently verify that the remote PR points at the exact integrated HEAD.
 - Recover by reconciling durable state with real git, worktree, verifier,
-  merge, and remote PR state, but only after validating or deterministically
-  rehydrating the exact external trusted-runtime binding from Git blobs at
-  `execution_source_sha`.
+  merge, and remote PR state, but only after the validated external trusted
+  bootstrap runs `rehydrate-runtime` against exact Git blobs at
+  `execution_source_sha` and recovery enters through the externally pinned
+  runtime.
 - Record every post-approval lane, integration, candidate-verification, and
   delivery worktree in `run-owned-worktrees.json`; reject foreign paths and
   when current `FULL` authority permits Git cleanup, clean up only exact
@@ -274,6 +286,7 @@ pipelines/PLAN_SLUG/
     goal_lane.dot
     deliver_pr.dot             # present only when delivery_mode is pr
   python/
+    goal_plan_bootstrap.py
     goal_plan_runtime.py
     goal_plan_supervisor.py
 ```
@@ -288,12 +301,14 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 
 | Field | Type and invariant |
 |---|---|
-| `schema_version` | String with exact value `goal-plan.plan/v3`. |
+| `schema_version` | String with exact value `goal-plan.plan/v4`. |
 | `plan_id` | Slug string equal to `PLAN_SLUG`; stable across runs of the same compiled plan. |
 | `source_request` | Non-empty string containing the originating request or its durable reference. |
 | `target_repo` | Object with `vcs: "git"`, `identity_mode: "remote"` or `"history_anchor"`, and the mode-specific fields defined below. |
 | `product_base_sha` | Full immutable commit SHA of the approved product baseline used for requirement provenance and product-level delta reporting. It must be an ancestor of the admitted `execution_source_sha`. |
 | `execution_source` | Object with exact `mode: "containing_commit"`, required runtime binding name `execution_source_sha`, and no embedded SHA value. Admission resolves the exact containing commit as described below, avoiding a self-referential Git hash while still binding the exact SHA through the plan contract. |
+| `trusted_launcher_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/external/path/to/goal-plan-bootstrap"]` or `["/absolute/path/to/python", "/absolute/external/path/to/goal_plan_bootstrap.py"]`. The bootstrap executable/script must be the externally installed byte-exact copy bound below. PATH lookup, `/usr/bin/env`, relative paths, `-m`, shell strings, wrappers, and extra prefix tokens are forbidden. |
+| `trusted_launcher_binding` | Object with exact schema `goal-plan.trusted-launcher-binding/v1`; bootstrap CLI schema/version; exact absolute external launcher path; repository-relative source path `pipelines/PLAN_SLUG/python/goal_plan_bootstrap.py`; source Git blob ID/mode/length/SHA-256 at `execution_source_sha`; external byte length/SHA-256; executable or interpreter path/realpath/mode/hash; closed environment schema/hash; canonical `trusted_launcher_argv_prefix` hash; exact absolute Git/interpreter/system-call allowlist and identities; supported subcommands and closed suffix schemas; installation-evidence schema/path policy; per-invocation validation policy; and `binding_sha256`. The external launcher path must be outside `target_repo`, its Git common directory, `state_root`, `worktree_root`, every registered worktree, and conditional `delivery_state_root`. |
 | `lanes` | Non-empty array of lane objects described below. |
 | `waves` | Non-empty ordered array of objects with unique `id` and non-empty `lane_ids`; every lane appears in exactly one wave. |
 | `integration_order` | Array containing every lane ID exactly once in deterministic integration order, with every dependency before its dependents. |
@@ -302,9 +317,9 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `aggregate_verifier` | Aggregate-verifier contract defined below. |
 | `attractor_runner_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/path/to/attractor"]` or `["/absolute/path/to/python", "-m", "amplifier_module_pipeline_runner.cli"]`. PATH lookup, `/usr/bin/env`, relative executables, wrapper shell strings, and extra prefix tokens are forbidden. |
 | `attractor_runner_identity` | Object binding the prefix's canonical JSON SHA-256, executable realpath/hash, exact module name, module-source realpath/hash, expected `doctor` contract, and required `run` flags. |
-| `parent_runner_invocation` | Object with exact schema `goal-plan.parent-runner-invocation-definition/v2` binding the parent to the same runner prefix/identity and compiled `provider`; symbolic `os_cwd_policy: "target_repo"`; literal `runner_cwd_arg: "."`; exact parent DOT path `pipelines/PLAN_SLUG/PLAN_SLUG.dot`; `parent_dot_hash_policy: "execution_source_blob_and_compiled_manifest"`; exact parent logs-root policy `state_root/parent-attractor-run`; required runtime-bundle hash and trusted-runtime binding path/hash inputs; canonical Linux process-identity policy; immutable evidence schema `goal-plan.parent-runner-invocation/v2`; and `definition_sha256`. It embeds no parent-DOT digest, avoiding a `plan_sha256`/parent-DOT hash cycle; admission derives the expected digest from `execution_source_sha` and the compiled-source manifest. |
-| `trusted_runtime_definition` | Object with exact schema `goal-plan.trusted-runtime-definition/v1`; repository-relative runtime and supervisor source paths, Git blob IDs, modes, lengths, and SHA-256 values expected at `execution_source_sha`; canonical `runtime_bundle_hash` derivation; exact absolute `trusted_git_argv_prefix` and `trusted_interpreter_argv_prefix`; executable/interpreter realpaths, file hashes, and required permission policies; closed Git `rev-parse`/`cat-file blob` materialization suffixes; external directory/binding paths; atomic write/fsync/non-writable/reread rules; trusted binding schema; exact runtime and supervisor suffix schemas; and `definition_sha256`. PATH lookup, `/usr/bin/env`, relative executables/scripts, `-m`, shell strings, wrappers with unbound targets, and extra prefix tokens are forbidden. |
-| `trusted_runtime_binding_policy` | Object requiring exact external path `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`, binding schema `goal-plan.trusted-runtime-binding/v1`, immutable exact `trusted_runtime_argv_prefix` and `trusted_supervisor_argv_prefix`, per-invocation validation policy, no in-run replacement/rotation policy, deterministic prelaunch/recovery rehydration policy, safety-critical command allowlist, separately validated supervisor-only termination exception, and failure token/evidence mapping. |
+| `parent_runner_invocation` | Object with exact schema `goal-plan.parent-runner-invocation-definition/v3` binding the parent to the same runner prefix/identity and compiled `provider`; exact trusted-launcher prefix/binding/installation/self-check/materialization/`launch-parent` evidence hashes; symbolic `os_cwd_policy: "target_repo"`; literal `runner_cwd_arg: "."`; exact parent DOT path `pipelines/PLAN_SLUG/PLAN_SLUG.dot`; `parent_dot_hash_policy: "execution_source_blob_and_compiled_manifest"`; exact parent logs-root policy `state_root/parent-attractor-run`; required runtime-bundle hash and trusted-runtime binding path/hash inputs; canonical Linux process-identity policy; immutable evidence schema `goal-plan.parent-runner-invocation/v3`; and `definition_sha256`. It embeds no parent-DOT digest, avoiding a `plan_sha256`/parent-DOT hash cycle; the trusted bootstrap derives the expected digest from `execution_source_sha` and the compiled-source manifest. |
+| `trusted_runtime_definition` | Object with exact schema `goal-plan.trusted-runtime-definition/v2`; repository-relative runtime and supervisor source paths, Git blob IDs, modes, lengths, and SHA-256 values expected at `execution_source_sha`; canonical `runtime_bundle_hash` derivation; exact external directory/binding paths; atomic write/fsync/non-writable/reread rules executed only by the trusted bootstrap; trusted binding schema; exact runtime and supervisor suffix schemas; and `definition_sha256`. It contains no self-bootstrap entry point: `goal_plan_runtime.py` is materialized runtime only. |
+| `trusted_runtime_binding_policy` | Object requiring exact external path `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`, binding schema `goal-plan.trusted-runtime-binding/v2`, immutable exact `trusted_runtime_argv_prefix` and `trusted_supervisor_argv_prefix`, trusted-launcher binding/installation/materialization evidence, per-invocation validation policy, no in-run replacement/rotation policy, deterministic prelaunch/recovery rehydration only through `trusted_launcher_argv_prefix`, safety-critical command allowlist, separately validated supervisor-only termination exception, and failure token/evidence mapping. |
 | `provider` | Non-empty compiled provider ID. Every parent-spawned lane, correction, and delivery runner argv contains exact `--provider <provider>`; the value is immutable across restart/resume. |
 | `integration_correction_child` | Immutable child-pipeline path/hash, exact prefix/provider/argv contract, `integration_worktree` CWD policy, positive `max_child_seconds`, result schema, and process-supervision contract for bounded integration correction. |
 | `delivery_child` | Required only for `delivery_mode: "pr"`; immutable adapted `deliver_pr.dot` path/hash, exact prefix/provider/argv contract, `delivery_worktree` CWD policy, positive `max_child_seconds`, external-state policy, delivery-result schema, and process-supervision contract. Forbidden for `delivery_mode: "none"`. |
@@ -387,10 +402,13 @@ unique repository identifier.
 #### Parent runner target-repository binding
 
 The parent invocation is repository-bound before the parent CLI starts. The
-launcher canonicalizes the requested `target_repo`, requires it to be the
-target Git top-level, changes its own OS CWD to that realpath, and only then
-`execve`s the exact immutable `attractor_runner_argv_prefix` plus the closed
-parent argv. The resulting parent Attractor process therefore starts with:
+validated external trusted bootstrap's `launch-parent` subcommand canonicalizes
+the requested `target_repo`, requires it to be the target Git top-level,
+validates the trusted-runtime binding and closed parent argv JSON, changes its
+own OS CWD to that realpath, and only then calls `execve` with the exact
+immutable `attractor_runner_argv_prefix` plus the closed parent argv. It imports
+no target-repository module. The resulting parent Attractor process therefore
+starts with:
 
 ```text
 realpath(/proc/self/cwd) == canonical_target_repo
@@ -413,8 +431,12 @@ worktree mutation.
 
 Every initial start and resume writes a new immutable, atomically-created
 `state_root/admission/parent-runner-invocations/NNNN.json` record with schema
-`goal-plan.parent-runner-invocation/v2`. The record contains:
+`goal-plan.parent-runner-invocation/v3`. The record contains:
 
+- exact `trusted_launcher_argv_prefix`, binding hash, installation-evidence
+  hash, external launcher path/hash, interpreter/executable identity,
+  self-check/materialization-or-rehydration evidence hashes, and
+  `launch-parent` argv/environment/exec evidence;
 - the exact parent `attractor_runner_argv_prefix`, prefix hash, runner
   executable/module/source identity, and compiled provider;
 - the complete parent argv and its canonical hash;
@@ -576,9 +598,15 @@ fall back to writing generated state beside `goal_lane.dot`.
   execution-source/compiled-manifest hash policy, parent logs-root policy, and
   parent invocation evidence schema;
 - trusted-runtime definition/binding schema and hashes, runtime-bundle-hash
-  derivation, exact source path/blob/mode/length/hash pairs, compile-bound
-  Git/interpreter prefixes and identities, external path/permission/hash policy,
-  and first-admission/rehydration contract;
+  derivation, exact runtime/supervisor source and sealed external
+  path/blob/mode/length/hash identities, external permission policy, and exact
+  runtime/supervisor suffix schemas;
+- trusted-launcher definition/binding schema and hash, exact
+  `trusted_launcher_argv_prefix`, source and external bootstrap
+  path/blob/mode/length/hash identity, installation evidence, closed
+  environment, allowed absolute system/Git/interpreter calls, and exact
+  `self-check`/`materialize-runtime`/`rehydrate-runtime`/`launch-parent`
+  suffix schemas;
 - exact external `trusted_runtime_argv_prefix` and
   `trusted_supervisor_argv_prefix` hashes, executable/interpreter/script
   identities, CLI/schema versions, environment schema, self-check contract,
@@ -602,58 +630,73 @@ value in run context and durable state. Thus plan/DOT bind the derivation and
 every runtime/evidence artifact binds the resolved SHA without self-reference.
 
 Admission runs before approval and before any repository/process/worktree
-mutation. It has one launcher prelude followed by the parent graph, and the
-combined sequence is the first green admission:
+mutation. It has one externally staged trusted-bootstrap prelude followed by
+the parent graph, and the combined sequence is the first green admission:
 
-1. The launcher binds `canonical_target_repo`, canonical external `state_root`,
-   exact parent DOT path, adjacent `plan.json`, parent runner prefix/provider/
-   logs-root contract, and the caller-supplied full `execution_source_sha`.
-2. Without executing repository code, it recomputes `plan_sha256`,
-   schema-validates `plan.json`, proves the selected target-repository identity,
-   resolves the containing execution-source commit, walks its complete compiled
-   pipeline tree, and constructs/persists the canonical external
+1. Before starting the bootstrap process, the deployment/test harness validates
+   the exact external launcher path, bytes, permissions, interpreter/executable
+   identity, prefix hash, and closed environment against
+   `plan.json.trusted_launcher_binding`, then records immutable installation
+   evidence. A mismatch starts no bootstrap, parent, Git mutation, or repository
+   mutation.
+2. The harness invokes exact
+   `trusted_launcher_argv_prefix + self-check --plan ... --evidence ...`.
+   The external bootstrap revalidates its own binding and emits the immutable
+   self-check record; it does not import or execute target-repository Python.
+3. The harness invokes exact
+   `trusted_launcher_argv_prefix + materialize-runtime ...`. Without executing
+   repository code, the bootstrap binds `canonical_target_repo`, canonical
+   external `state_root`, exact parent DOT path, adjacent `plan.json`, parent
+   runner prefix/provider/logs-root contract, and the caller-supplied full
+   `execution_source_sha`. It recomputes `plan_sha256`, schema-validates
+   `plan.json`, proves target-repository/source identity, walks the exact
+   execution-source compiled tree, and persists
    `compiled-source-manifest.json`.
-3. It hashes the checked-out parent DOT and both checked-out runtime scripts,
-   requires exact execution-source blob and compiled-manifest equality, and
-   validates the compile-bound absolute Git/interpreter prefixes and
-   executable realpaths/hashes/permissions without PATH, `/usr/bin/env`, shell
-   lookup, or relative-path resolution.
-4. It extracts exact runtime/supervisor Git blobs, materializes/seals/rereads the
-   external trusted-runtime bundle, atomically writes the complete versioned
-   binding and command evidence, and derives exact `runtime_bundle_hash`,
-   `trusted_runtime_binding_path`, `trusted_runtime_argv_prefix`, and
-   `trusted_supervisor_argv_prefix`. No extracted code runs before this entire
-   step is green.
-5. The launcher changes its OS CWD to `canonical_target_repo` and `execve`s the
-   exact parent Attractor argv, including immutable runtime-bundle/binding
-   parameters. The first parent safety command uses only
+4. The bootstrap hashes the checked-out parent DOT, bootstrap source, runtime,
+   and supervisor; requires exact execution-source blob and compiled-manifest
+   equality; and validates every preflight-bound absolute
+   Git/interpreter/system-call identity without PATH, `/usr/bin/env`, shell
+   lookup, relative paths, or target-repository imports.
+5. The bootstrap extracts exact runtime/supervisor Git blobs,
+   materializes/seals/rereads the external trusted-runtime bundle, atomically
+   writes the complete versioned binding and command evidence, and derives exact
+   `runtime_bundle_hash`, `trusted_runtime_binding_path`,
+   `trusted_runtime_argv_prefix`, and `trusted_supervisor_argv_prefix`. No
+   extracted runtime executes before every source, external-byte, permission,
+   tool, and binding identity is green.
+6. The harness writes the exact parent argv as canonical JSON, revalidates the
+   external launcher again, and invokes exact
+   `trusted_launcher_argv_prefix + launch-parent --binding ... --target-repo ...
+   --parent-argv-json ...`. The bootstrap validates binding/argv/environment,
+   changes its OS CWD to `canonical_target_repo`, and `execve`s the exact parent
+   Attractor argv. The first parent safety command uses only
    `trusted_runtime_argv_prefix`, validates that external binding again, then
    requires `/proc/self/cwd`, literal runner `--cwd .`, canonical target repo,
    exact parent-DOT realpath, parent prefix/identity/provider/argv/process/logs
-   root, and launcher evidence to agree.
-6. The external trusted runtime independently recomputes the plan/DOT/
+   root, and all trusted-launcher evidence to agree.
+7. The external trusted runtime independently recomputes the plan/DOT/
    execution-source/compiled-manifest relationships and parses the static DOT
    for exact lane IDs, waves, dependency edges, integration order, budgets,
    verifier hashes, both source-SHA contracts, child launch/monitor nodes,
    ordered argv/params, correction expansion, approval transport, delivery
    policy, trusted-runtime definition/binding policy, and every safety-critical
    external prefix-plus-suffix tool command.
-7. It validates the child runner without PATH lookup: exact prefix form/hash,
+8. It validates the child runner without PATH lookup: exact prefix form/hash,
    executable/module/source realpaths/hashes, successful `<prefix> doctor`,
    required `run --help` flags, compiled provider support, and credential.
-8. It runs non-mutating external
+9. It runs non-mutating external
    `<trusted-runtime-prefix> self-check --format json` and
    `<trusted-supervisor-prefix> self-check --format json`; both report exact
    CLI, schema, suffix, permission, and binding support.
-9. It validates poll/branch/parent engine-step arithmetic, external roots,
+10. It validates poll/branch/parent engine-step arithmetic, external roots,
    approval mode/transport, environment schemas, and every no-mutation
    precondition.
-10. It atomically finalizes admission/render/tool/materialization evidence under
+11. It atomically finalizes admission/render/tool/materialization evidence under
     external `state_root` and writes the immutable parent-runner invocation
     record referencing the compiled-source manifest and exact trusted-runtime
     binding path/hash.
 
-No step in this sequence executes either target-repository Python script.
+No step in this sequence executes any target-repository Python script.
 
 For the Python-module prefix, the absolute interpreter runs a deterministic
 `importlib.util.find_spec("amplifier_module_pipeline_runner.cli")` probe and the
@@ -664,20 +707,23 @@ probe in that interpreter. The observed executable/module/source identities
 must equal `attractor_runner_identity`; a console wrapper whose target cannot be
 resolved deterministically is rejected.
 
-The target-repository runtime and supervisor files are source observations
-during this first admission; they are never executed by the parent. The
-external trusted-runtime copies are the only Python forms permitted to
-self-check or execute. Each self-check is read-only: it writes no file, launches
-no child, and emits one canonical JSON object on stdout. Any Git/interpreter
-prefix, executable identity, source blob, checked-out byte, materialized byte,
-permission, environment-schema, CLI-version, supported-schema, or
-subcommand-signature mismatch fails admission before approval or mutation.
+The target-repository bootstrap, runtime, and supervisor files are source
+observations during first admission and are never imported or executed. Only
+the preinstalled external bootstrap may run bootstrap subcommands; only the
+sealed external runtime/supervisor copies may run their later subcommands. Each
+self-check is read-only apart from its explicitly named external evidence file.
+Any launcher/Git/interpreter prefix, executable identity, source blob,
+checked-out byte, installed/materialized byte, permission, environment schema,
+CLI/schema version, or subcommand-signature mismatch fails before approval or
+mutation.
 
-A parent CWD/`--cwd`/DOT-realpath mismatch, parent DOT byte/hash mismatch,
-unbound parent prefix/provider/process/logs-root value, missing file, schema
-failure, or graph/plan mismatch aborts admission as `INFRA_FAILURE`. The failing
-parent invocation writes only immutable external evidence and performs no
-repository mutation. Admission reads `plan.json` only to audit the
+A trusted-launcher path/byte/interpreter/prefix/environment mismatch, parent
+CWD/`--cwd`/DOT-realpath mismatch, parent DOT byte/hash mismatch, unbound parent
+prefix/provider/process/logs-root value, missing file, schema failure, or
+graph/plan mismatch aborts before mutation. A failure before parent `execve` is
+reported as `PRELAUNCH_INFRASTRUCTURE_BLOCKED` with launcher-owned external
+evidence; it is not fabricated as a pipeline terminal. A failure after parent
+start is `INFRA_FAILURE`. Admission reads `plan.json` only to audit the
 already-static program; it never dispatches work from the JSON.
 
 #### Runtime invocation interface
@@ -686,12 +732,13 @@ Each compiled family member accepts only these runtime inputs:
 
 | Input | Type and rule |
 |---|---|
-| `target_repo` | Required absolute path to the Git working repository. Before the parent CLI starts, the launcher must change OS CWD to its canonical realpath. Admission must prove that same realpath is the Git top-level, equals `/proc/self/cwd`, equals the runner's literal `--cwd .` resolution, and satisfies the `remote` or `history_anchor` identity policy from `plan.json.target_repo`. |
+| `trusted_launcher_argv_prefix` | Required exact immutable prefix from `plan.json`; supplied by deployment packaging or the canonical smoke harness, never selected by target-repository code. The caller validates the external copy and prefix against `trusted_launcher_binding` before every bootstrap subcommand. |
+| `target_repo` | Required absolute path to the Git working repository. Before the parent CLI starts, the trusted bootstrap's `launch-parent` must change OS CWD to its canonical realpath. Admission must prove that same realpath is the Git top-level, equals `/proc/self/cwd`, equals the runner's literal `--cwd .` resolution, and satisfies the `remote` or `history_anchor` identity policy from `plan.json.target_repo`. |
 | `execution_source_sha` | Required full Git commit SHA. It must be the containing commit of the exact invoked parent DOT and adjacent `plan.json`, contain every immutable compiled source file, descend from `product_base_sha`, and satisfy the complete byte-manifest gate. The invoked DOT realpath and observed bytes/hash must equal the exact parent-DOT path/blob and compiled-manifest entry for this commit. |
 | `run_id` | Required slug unique within the plan's run directory. |
 | `state_root` | Effective value is a required absolute external path. The caller may omit it only to derive the canonical external user-state default defined below; it is never inside the target repository. |
-| `runtime_bundle_hash` | Required launcher-derived full SHA-256 from `plan.json.trusted_runtime_definition` and exact `execution_source_sha`. It is not user-selectable and must equal both the trusted-runtime directory name and binding field. |
-| `trusted_runtime_binding_path` | Required launcher-derived canonical absolute path equal to `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`. It is not a general path override; any other spelling, symlink, or location is rejected before the parent starts. |
+| `runtime_bundle_hash` | Required trusted-bootstrap-derived full SHA-256 from `plan.json.trusted_runtime_definition` and exact `execution_source_sha`. It is not user-selectable and must equal both the trusted-runtime directory name and binding field. |
+| `trusted_runtime_binding_path` | Required trusted-bootstrap-derived canonical absolute path equal to `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`. It is not a general path override; any other spelling, symlink, or location is rejected before the parent starts. |
 | `worktree_root` | Required absolute external path dedicated to this run's lane, integration, candidate-verification, and delivery worktrees. It is separate from `state_root`. |
 | `delivery_state_root` | Required absolute external path when `delivery_mode` is `pr`; forbidden when delivery is `none`. It contains delivery child logs, checkpoints, events, ledgers, and evidence and is separate from `state_root`, `worktree_root`, and every Git repository/worktree. |
 | `approval_mode` | Required enum `required` or `preapproved`; must equal the compiled plan value. |
@@ -699,52 +746,81 @@ Each compiled family member accepts only these runtime inputs:
 | `delivery_mode` | Required enum `none` or `pr`; must equal the compiled plan value. |
 | `github_repo` | `owner/repo` string required only when `delivery_mode` is `pr`; forbidden otherwise. |
 
-The canonical unattended smoke uses the absolute-console prefix form. Its
-launcher first canonicalizes `target_repo`, changes CWD before `exec`, and then
-uses this closed parent argv shape (paths and SHAs shown symbolically):
+The canonical unattended smoke stages the external bootstrap before launch,
+validates its bytes independently, records
+`goal-plan.trusted-launcher-installation/v1` evidence, and invokes only these
+closed bootstrap commands (paths and SHAs shown symbolically):
 
 ```text
-cd -- <canonical-absolute-target-repo>
-exec /absolute/path/to/attractor
-run
-pipelines/goal_plan_smoke/goal_plan_smoke.dot
---provider
-anthropic
---cwd
-.
---logs-root
-<absolute-state-root>/parent-attractor-run
---on-human-gate
-fail
---param target_repo=<canonical-absolute-target-repo>
---param execution_source_sha=<full-containing-sha>
---param run_id=<run-id>
---param state_root=<absolute-state-root>
---param runtime_bundle_hash=<full-trusted-runtime-bundle-hash>
---param trusted_runtime_binding_path=<absolute-state-root>/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
---param worktree_root=<absolute-worktree-root>
---param delivery_state_root=<absolute-delivery-state-root>
---param approval_mode=preapproved
---param human_gate_transport=none
---param delivery_mode=pr
---param github_repo=<owner/repo>
+<each token of trusted_launcher_argv_prefix>
+self-check
+--plan <absolute-target-repo>/pipelines/goal_plan_smoke/plan.json
+--evidence <absolute-state-root>/prelaunch/trusted-launcher-self-check.json
+
+<each token of trusted_launcher_argv_prefix>
+materialize-runtime
+--plan <absolute-target-repo>/pipelines/goal_plan_smoke/plan.json
+--target-repo <canonical-absolute-target-repo>
+--execution-source-sha <full-containing-sha>
+--state-root <absolute-state-root>
+--binding <absolute-state-root>/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
+
+<each token of trusted_launcher_argv_prefix>
+launch-parent
+--binding <absolute-state-root>/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
+--target-repo <canonical-absolute-target-repo>
+--parent-argv-json <absolute-state-root>/prelaunch/parent-argv.json
 ```
 
-`cd`/`exec` above describes the required pre-start sequence; the parent process
-argv begins with `/absolute/path/to/attractor`, contains no shell token, and its
-observed `/proc/self/cwd` is already the canonical target repository. The
-launcher must reject a `target_repo` whose canonical realpath differs from the
-directory it changed into. Admission then requires the literal `--cwd .` to
-resolve to that same realpath, requires the DOT operand to resolve to exact
+The canonical `parent-argv.json` is a JSON array, never a shell string. For the
+absolute-console runner form it contains, in this exact order:
+
+```json
+[
+  "/absolute/path/to/attractor",
+  "run",
+  "pipelines/goal_plan_smoke/goal_plan_smoke.dot",
+  "--provider",
+  "anthropic",
+  "--cwd",
+  ".",
+  "--logs-root",
+  "<absolute-state-root>/parent-attractor-run",
+  "--on-human-gate",
+  "fail",
+  "--param", "target_repo=<canonical-absolute-target-repo>",
+  "--param", "execution_source_sha=<full-containing-sha>",
+  "--param", "run_id=<run-id>",
+  "--param", "state_root=<absolute-state-root>",
+  "--param", "trusted_launcher_argv_prefix_sha256=<full-trusted-launcher-prefix-hash>",
+  "--param", "trusted_launcher_binding_sha256=<full-trusted-launcher-binding-hash>",
+  "--param", "runtime_bundle_hash=<full-trusted-runtime-bundle-hash>",
+  "--param", "trusted_runtime_binding_path=<absolute-state-root>/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json",
+  "--param", "worktree_root=<absolute-worktree-root>",
+  "--param", "delivery_state_root=<absolute-delivery-state-root>",
+  "--param", "approval_mode=preapproved",
+  "--param", "human_gate_transport=none",
+  "--param", "delivery_mode=pr",
+  "--param", "github_repo=<owner/repo>"
+]
+```
+
+`launch-parent` rejects a `target_repo` whose canonical realpath differs from
+the directory it changes into, rejects any parent token not equal to the
+compiled closed schema, then passes that exact JSON array to `execve` with no
+shell. The observed `/proc/self/cwd` is therefore already the canonical target
+repository. Admission requires literal `--cwd .` to resolve to that same
+realpath, requires the DOT operand to resolve to exact
 `<target_repo>/pipelines/goal_plan_smoke/goal_plan_smoke.dot`, and binds the
 observed DOT hash to both `execution_source_sha` and the compiled-source
 manifest before mutation.
 
-The equally valid Python-module form retains the same `cd`/`exec` sequence and
-replaces the console executable prefix after `exec` with
-`/absolute/path/to/python -m amplifier_module_pipeline_runner.cli`; all
-remaining parent argv tokens and their order are unchanged. An interactive
-required-approval invocation changes exactly
+The equally valid Python-module runner form changes only the beginning of the
+parent JSON array to
+`["/absolute/path/to/python", "-m",
+"amplifier_module_pipeline_runner.cli", ...]`; the trusted-launcher prefix is
+unchanged and remains external. An interactive required-approval invocation
+changes exactly
 `--on-human-gate fail` to `--on-human-gate console`,
 `approval_mode=preapproved` to `approval_mode=required`, and
 `human_gate_transport=none` to `human_gate_transport=console`. Admission also
@@ -757,9 +833,11 @@ provider change on resume fails admission.
 The parent `--logs-root` is not a caller-selected alternate location. It must
 realpath to exact `state_root/parent-attractor-run`. Before approval or
 preapproval can advance, the parent persists the immutable invocation record
-containing prefix/provider/cwd/DOT/hash, OS CWD, target repository,
-`execution_source_sha`, process identity, logs root, runtime-bundle hash, and
-trusted-runtime binding path/hash. A missing or inconsistent record is
+containing trusted-launcher installation/self-check/materialization/launch
+evidence, launcher and parent prefixes, provider/cwd/DOT/hash, OS CWD, target
+repository, `execution_source_sha`, process identity, logs root,
+runtime-bundle hash, and trusted-runtime binding path/hash. A missing or
+inconsistent record is
 `INFRA_FAILURE` and the parent performs no repository mutation.
 
 If `state_root` is omitted, preflight derives:
@@ -785,6 +863,9 @@ rejects symlink escapes. `state_root` and, when present,
 equal to, ancestors of, nor descendants of the target repository root, Git
 common directory, compiled-source directory, any registered Git worktree, or
 `worktree_root`.
+The exact external bootstrap realpath is additionally disjoint from all those
+roots and worktrees, including `state_root`; no run-owned root may contain it or
+be contained by it.
 
 `worktree_root` has phase-specific safety rules:
 
@@ -834,10 +915,11 @@ reapplies the pre-approval blanket prohibition to the run-owned worktrees it has
 just created.
 
 Lifecycle recovery is exact and mutation-authority-gated. Every cleanup
-recovery or retry first validates the external trusted-runtime binding, enters
-through exact `trusted_runtime_argv_prefix`, and reruns the current
-parent-runner, target/source-identity, and compiled-source gates; it may never
-infer authority from a prior cleanup record or reuse a prior
+recovery or retry first validates the external trusted launcher, runs exact
+`rehydrate-runtime`, enters the new parent through exact `launch-parent`, then
+invokes recovery through `trusted_runtime_argv_prefix` and reruns the current
+parent-runner, target/source-identity, and compiled-source gates. It may never
+infer authority from a prior cleanup record, reuse a prior
 `mutation_authority: "FULL"`. Ordinary lifecycle reconciliation may mutate Git
 only after the same current trusted-runtime plus repository/source gates grant
 `FULL`.
@@ -862,8 +944,9 @@ mismatches,
 `required` approval without attached standalone console/TTY evidence,
 `required` approval in unattended or hosted headless execution, failed
 remote/history-anchor identity proofs, reused `run_id` with incompatible state,
-an invalid child-runner or trusted-runtime/supervisor binding, identity,
-self-check, command, permission, or materialization preflight, an invalid
+an invalid trusted-launcher/child-runner/trusted-runtime/supervisor binding,
+identity, self-check, command, permission, installation, or materialization
+preflight, an invalid
 provider/credential/doctor/flag preflight, an invalid
 `product_base_sha`, or an `execution_source_sha` that does not contain the exact
 compiled program being invoked. A `preapproved` standalone run is explicitly
@@ -929,7 +1012,7 @@ lexicographically sorted entry for every regular file containing:
 
 Symlinks, submodules, untracked entries, non-regular files, duplicate normalized
 paths, and case-colliding paths are rejected. The manifest includes
-`plan.json`, parent DOT, lane/correction child DOTs, both runtime/supervisor
+`plan.json`, parent DOT, lane/correction child DOTs, bootstrap/runtime/supervisor
 source files, verifier definitions, delivery subgraph when present, and every
 other compiled-directory byte. Its
 `manifest_sha256` covers the canonical JSON excluding only that hash field.
@@ -981,17 +1064,26 @@ Any missing, added, mode-changed, or byte-changed compiled-source entry is
 retry loop. Composition additionally rejects any lane `owned_paths` or
 `integration_seams` pattern that could match `pipelines/PLAN_SLUG/**`.
 
-### External trusted-runtime bootstrap and binding
+### External trusted launcher and trusted-runtime binding
 
-The target-repository copies of `goal_plan_runtime.py` and
-`goal_plan_supervisor.py` are immutable compiled source, but they are not a
-stable terminal safety root: the very source mismatch that needs cleanup could
-make those paths unreadable, changed, or absent. The first green admission
-therefore treats the checked-out files as data, not executables, and creates one
-external trusted-runtime bundle before any repository, ref, worktree, process,
-`worktree_root`, or `delivery_state_root` mutation.
+The checked-in `goal_plan_bootstrap.py`, `goal_plan_runtime.py`, and
+`goal_plan_supervisor.py` are immutable compiled source, but none is trusted for
+first execution from the target working copy. The deployment or test harness
+must install a byte-exact copy of the bootstrap source blob before launching
+the pipeline. That external bootstrap is the only owner of first admission,
+trusted-runtime materialization, rehydration, and parent `execve` handoff.
+`goal_plan_runtime.py` begins only after materialization; it has no bootstrap,
+`materialize-runtime`, `rehydrate-runtime`, or `launch-parent` entry point.
 
-The trusted-runtime bundle path is exactly:
+The installed bootstrap path must be outside the target repository, its Git
+common directory, `state_root`, `worktree_root`, conditional
+`delivery_state_root`, and every current or future worktree. Target-repository
+code never installs, updates, repairs, or selects it. Production packaging or
+deployment that does not provide this external launcher and its installation
+evidence cannot run `goal_plan`; this is a declared prerequisite, not an
+in-pipeline fallback.
+
+The trusted-runtime bundle remains exactly:
 
 ```text
 state_root/trusted-runtime/<runtime-bundle-hash>/
@@ -1000,165 +1092,175 @@ state_root/trusted-runtime/<runtime-bundle-hash>/
   trusted-runtime-binding.json
 ```
 
-`runtime-bundle-hash` is the SHA-256 of canonical JSON containing the trusted
-runtime definition version, exact `execution_source_sha`, both
-repository-relative source paths, Git blob IDs, Git modes, byte lengths, and
-content SHA-256 values, plus the trusted Git and interpreter prefix tokens,
-prefix hashes, executable realpaths, executable byte hashes, permission
-policies, and closed runtime/supervisor suffix-schema hashes. It contains no
-working-tree absolute path, so the same approved execution source and toolchain
-produce the same bundle identity across worktrees.
+`runtime-bundle-hash` is the SHA-256 of canonical JSON containing trusted
+runtime definition version, exact `execution_source_sha`, both runtime source
+paths/blob IDs/modes/lengths/SHA-256 values, trusted interpreter identity,
+trusted-launcher binding hash, and closed runtime/supervisor suffix-schema
+hashes. It contains no working-tree absolute path.
 
-#### First-admission materialization
+#### Trusted launcher binding and exact CLI
 
-The launcher performs the trusted-runtime portion of first admission before
-starting any parent DOT command that can mutate the repository. It is the same
-already-bound launching process that canonicalizes `target_repo`, changes CWD,
-and starts the parent CLI; the checked-out runtime is never used to bootstrap
-itself. It performs this exact sequence:
+`plan.json.trusted_launcher_binding` is the immutable admission root. Its
+`goal-plan.trusted-launcher-binding/v1` object binds:
 
-1. Validate the absolute `trusted_git_argv_prefix` and
-   `trusted_interpreter_argv_prefix` from `plan.json`: each prefix, canonical
-   JSON hash, executable realpath, exact executable bytes/hash, `lstat` type,
-   owner/group/mode, and executable permission must match the compiled
-   definition. The Git and interpreter executable must not be group- or
-   world-writable. No PATH lookup, `/usr/bin/env`, shell command, relative
-   executable, symlink operand, or module lookup is allowed.
-2. With the exact absolute Git prefix and `shell=False`, run the two closed
-   object queries for each source:
+- bootstrap CLI schema/version `goal-plan.bootstrap-cli/v1`;
+- exact source path
+  `pipelines/PLAN_SLUG/python/goal_plan_bootstrap.py`, its Git blob ID, mode,
+  length, and SHA-256 at exact `execution_source_sha`;
+- exact external installed path, byte length/hash equal to that source blob,
+  `lstat` type/mode/uid/gid, no-write policy, and realpath;
+- either the executable's path/realpath/hash or the selected absolute Python
+  interpreter's path/realpath/hash plus the external script path/hash;
+- exact `trusted_launcher_argv_prefix` tokens and canonical JSON SHA-256;
+- the complete closed environment-key/value-or-value-hash schema and canonical
+  environment hash;
+- every permitted external call: direct Python/OS `open`/`lstat`/`realpath`/
+  `fsync`/`chmod`/atomic-no-replace/`execve` operations, plus only the
+  compile-bound absolute Git and interpreter argv prefixes with their
+  realpaths/hashes and closed suffixes;
+- exact supported bootstrap subcommands `self-check`, `materialize-runtime`,
+  `rehydrate-runtime`, and `launch-parent`, with the ordered suffix schemas
+  below; and
+- installation-evidence schema
+  `goal-plan.trusted-launcher-installation/v1`, per-invocation self-check schema
+  `goal-plan.trusted-launcher-self-check/v1`, and `binding_sha256`.
+
+The only valid command shapes are:
+
+```text
+<each token of trusted_launcher_argv_prefix> self-check --plan <absolute-plan.json> --evidence <absolute-external-evidence-path>
+<each token of trusted_launcher_argv_prefix> materialize-runtime --plan <absolute-plan.json> --target-repo <absolute-target-repo> --execution-source-sha <full-sha> --state-root <absolute-state-root> --binding <absolute-trusted-runtime-binding.json>
+<each token of trusted_launcher_argv_prefix> rehydrate-runtime --plan <absolute-plan.json> --target-repo <absolute-target-repo> --execution-source-sha <full-sha> --state-root <absolute-state-root> --binding <absolute-trusted-runtime-binding.json>
+<each token of trusted_launcher_argv_prefix> launch-parent --binding <absolute-trusted-runtime-binding.json> --target-repo <absolute-target-repo> --parent-argv-json <absolute-parent-argv.json>
+```
+
+Arguments are positional only as shown and options may not be omitted,
+reordered, repeated, or extended. The harness validates the external launcher
+path/type/mode/bytes, interpreter or executable identity, prefix hash, binding
+hash, and closed environment before **every** invocation. The bootstrap then
+repeats those observations in `self-check` and at the beginning of every other
+subcommand. Any mismatch stops before repository, process, ref, Git common
+directory, worktree, `worktree_root`, or `delivery_state_root` mutation.
+
+#### First-admission materialization ownership
+
+Only the externally installed copy of `goal_plan_bootstrap.py` implements this
+algorithm:
+
+1. Validate its `trusted_launcher_binding`, installation record, absolute
+   Git/interpreter prefixes, executable identities, permissions, and closed
+   environment. No PATH lookup, `/usr/bin/env`, shell, relative executable,
+   symlink operand, `-m`, or target-repository import is allowed.
+2. Validate `plan.json`, target-repository identity, exact
+   `execution_source_sha`, parent DOT identity, the complete compiled-source
+   tree, and checked-out bootstrap/runtime/supervisor bytes against their exact
+   Git objects and compiled manifest before any mutable action.
+3. With the bound absolute Git prefix and closed environment, run exactly:
 
    ```text
    <trusted-git-prefix> --git-dir <canonical-git-common-dir> rev-parse --verify <execution_source_sha>:<repo-relative-source-path>
    <trusted-git-prefix> --git-dir <canonical-git-common-dir> cat-file blob <expected-blob-id>
    ```
 
-   The first stdout must be the exact expected blob ID from
-   `plan.json.trusted_runtime_definition`; the second stdout is the source byte
-   stream. Extra/reordered arguments, another Git common directory, another
-   object ID, text decoding/newline conversion, filters, checkout, archive, or
-   working-tree reads are forbidden.
-3. Independently open the two checked-out source paths with no symlink
-   traversal, require regular files at the exact compiled paths, and compare
-   Git mode, byte length, and SHA-256 with both the just-read Git blob and the
-   corresponding `compiled-source-manifest.json` entry. This proves the current
-   checkout is green, but those reads are not used as materialization input.
-4. Create a unique sibling staging directory beneath
-   `state_root/trusted-runtime/` with mode `0700`. For each blob, write the exact
-   `cat-file blob` stdout bytes to a same-directory `O_CREAT|O_EXCL|O_NOFOLLOW`
-   temporary file, fsync the file, atomically rename it to the fixed basename,
-   fsync the staging directory, set mode `0444`, and reread/hash/length-verify
-   the final file. No data byte is sourced from a later working-tree read.
-5. Canonically write `trusted-runtime-binding.json` through the same
-   create/fsync/atomic-rename/fsync sequence, set all three files to `0444`,
-   set the staging directory to `0555`, fsync it, atomically install it at the
-   exact bundle-hash directory with no-replace semantics, and fsync
-   `state_root/trusted-runtime/`. An already-existing final directory is accepted
-   only after complete binding/path/type/permission/hash validation; it is never
-   overwritten in place.
-6. Reread the installed binding and every installed file using
-   `O_NOFOLLOW`, require the bundle directory and all three files to have no
-   write bits, revalidate every realpath/mode/length/hash and both tool
-   executable identities, then execute the two external non-mutating
-   self-checks. Extracted code is never executed before every byte, path,
-   permission, interpreter, and binding check passes.
+   for runtime and supervisor. The bootstrap source blob is resolved and hashed
+   for launcher/source identity but is never copied into `state_root`.
+4. Use only `cat-file blob` stdout bytes to create a unique `0700` staging
+   directory beneath `state_root/trusted-runtime/`. Write with
+   `O_CREAT|O_EXCL|O_NOFOLLOW`, fsync, atomically rename, fsync the directory,
+   set runtime/supervisor to `0444`, and reread/hash/length-verify. Working-copy
+   bytes are never materialization input.
+5. Write `trusted-runtime-binding.json` with the same
+   create/fsync/atomic-no-replace/fsync discipline; seal all files `0444` and
+   the bundle directory `0555`; install at the exact bundle-hash path; and
+   accept an existing directory only after complete validation.
+6. Reread binding/runtime/supervisor with no symlink traversal; require every
+   path, mode, length, hash, launcher/interpreter/Git identity, and prefix to
+   match; only then invoke external runtime and supervisor self-checks.
+7. For `launch-parent`, validate the runtime binding and canonical parent argv
+   JSON, call `chdir(realpath(target_repo))`, prove the new OS CWD, and pass the
+   exact parent array plus closed environment to `execve`. It never executes
+   extracted runtime before all prior identities and hashes are green.
 
-Every Git command receives a closed environment and has bounded stderr/stdout
-capture. Admission persists exact argv, cwd, environment hash, executable
-realpath/hash, exit code, stderr path/hash, stdout byte length/hash, expected and
-observed blob ID, destination path, fsync/rename/chmod observations, and final
-reread hash as materialization command evidence. A command or durability check
-that cannot be proved is `INFRA_FAILURE` before repository mutation.
+Every Git command has bounded binary stdout/stderr capture. Materialization
+evidence records launcher binding/installation/self-check hashes, exact
+argv/CWD/environment/executable identity, exit status, expected/observed blob
+ID, stdout length/hash, destination, fsync/rename/chmod observations, and final
+reread. A failure before parent handoff is
+`PRELAUNCH_INFRASTRUCTURE_BLOCKED`, not a pipeline terminal.
 
 #### `trusted-runtime-binding.json`
 
-The binding uses exact schema `goal-plan.trusted-runtime-binding/v1` and contains:
+The binding uses exact schema `goal-plan.trusted-runtime-binding/v2` and contains:
 
 | Field | Contract |
 |---|---|
 | `schema_version`, `created_at` | Exact schema and RFC 3339 UTC creation timestamp. |
 | `execution_source_sha`, `runtime_bundle_hash`, `trusted_runtime_definition_sha256` | Exact admitted source and compiled definition identities. |
+| `trusted_launcher_argv_prefix`, `trusted_launcher_binding_sha256` | Exact externally validated launcher prefix and immutable plan binding hash. |
+| `trusted_launcher_installation`, `trusted_launcher_self_check` | Absolute evidence paths and canonical hashes proving byte-exact external staging and the invocation that created/rehydrated this bundle. |
 | `source_blobs` | Ordered runtime/supervisor entries with role, repository-relative source path, Git blob ID, Git mode, byte length, and SHA-256. |
 | `external_files` | Ordered runtime/supervisor entries with fixed absolute path, `realpath`, `lstat` type/mode/uid/gid, byte length, and SHA-256. |
-| `trusted_git_argv_prefix`, `trusted_git_identity` | Exact absolute prefix, prefix hash, executable path/realpath, byte hash, mode/uid/gid, and closed environment hash used for object extraction. |
+| `trusted_git_argv_prefix`, `trusted_git_identity` | Exact absolute prefix, prefix hash, executable path/realpath, byte hash, mode/uid/gid, and closed environment hash used by the trusted bootstrap for object extraction. |
 | `trusted_interpreter_argv_prefix`, `trusted_interpreter_identity` | Exact absolute prefix, prefix hash, executable path/realpath, byte hash, mode/uid/gid, and executable-permission evidence. |
 | `trusted_runtime_argv_prefix` | Exact immutable list `[<interpreter-realpath>, <external-absolute-goal_plan_runtime.py>]` and canonical prefix SHA-256. |
 | `trusted_supervisor_argv_prefix` | Exact immutable list `[<interpreter-realpath>, <external-absolute-goal_plan_supervisor.py>]` and canonical prefix SHA-256. |
-| `materialization_commands` | For every `rev-parse` and `cat-file blob`, the exact absolute argv, cwd, environment hash, executable identity, exit code, stderr evidence, stdout length/hash, expected/observed blob identity, and destination-file fsync/rename/chmod/reread evidence. |
+| `materialization_commands` | Every exact bootstrap Git/filesystem command and observation, including source/destination hashes and durability evidence. |
 | `binding_sha256` | SHA-256 of canonical JSON excluding only this field. |
 
-The binding is append-never and replace-never for a run. Non-safety work has no
-operation that changes its path, prefixes, hashes, permissions, or selected
-interpreter. A different interpreter or source revision requires a different
-runtime-bundle hash and a new run; it cannot rotate a live run's binding.
+The binding is append-never and replace-never for a run. A different launcher,
+interpreter, or source revision requires a different binding/new run; no
+runtime command may rotate a live binding.
 
 #### Per-invocation validation and safety command boundary
 
-Before every safety-critical action, the caller validates the binding itself,
-the fixed bundle directory, both runtime files, the Git and interpreter
-executables, and the selected prefix. Validation requires exact absolute path
-and realpath, regular-file/directory type, recorded mode/uid/gid, no write bit on
-the bundle directory or its three files, interpreter/Git executable permission
-policy, byte length/hash, canonical prefix hash, definition hash, binding hash,
-and `execution_source_sha`. It opens files without symlink traversal and
-rechecks after command completion when the action can mutate Git, process, or
-terminal state.
+Before every safety-critical action, the caller validates the binding, fixed
+bundle directory, both runtime files, Git/interpreter identities, launcher
+provenance, and selected prefix. Validation requires exact path/realpath,
+type/mode/uid/gid, no write bits, length/hash, prefix/definition/binding hashes,
+and `execution_source_sha`, with no symlink traversal.
 
-The safety-critical set is closed: parent/trusted-runtime/target-source/
-compiled-source binding gates; root and ownership gates; all Git, ref, branch,
-worktree, candidate-envelope, delivery-envelope, integration, rollback, budget,
-deadline, process-launch, process-poll, process-termination, process-reconcile,
-attempt-reservation/classification, `PreTerminalCleanup`, durable terminal
-finalizer, and recovery actions. Every such parent action is exact
-`trusted_runtime_argv_prefix + <closed suffix>`; every supervisor start or
-control action is exact
-`trusted_supervisor_argv_prefix + <closed run|poll|terminate|reconcile suffix>`.
-Child Attractor and verifier execution remain separately bound by their own
-contracts, but only the external trusted runtime may authorize or launch them.
+The safety-critical set remains closed: parent/trusted-runtime/target-source/
+compiled-source binding gates; root/ownership gates; all Git/ref/branch/
+worktree/envelope/integration/rollback/budget/deadline/process operations;
+attempt accounting; `PreTerminalCleanup`; terminal finalizer; and recovery.
+After bootstrap handoff, every parent action is exact
+`trusted_runtime_argv_prefix + <closed suffix>` and every supervisor action is
+exact `trusted_supervisor_argv_prefix + <closed suffix>`. The materialized
+runtime owns those actions, but it never owns first admission, materialization,
+rehydration, or parent launch.
 
-A missing, unreadable, changed, writable, path-drifted, permission-drifted, or
-hash-mismatched binding/runtime/interpreter/Git executable is `INFRA`. It grants
-`mutation_authority: "NONE"`, forbids Git/repository/worktree mutation, and
-forbids signalling. The only exception is process-safe termination through an
-exact external `trusted_supervisor_argv_prefix` whose interpreter, supervisor
-file, prefix, launch contract, durable process identity, and source hash remain
-independently valid against the already-durable process record; that narrow
-exception may terminate only the matching fully procfs-identity-valid process
-group and may not write a general cleanup/finalizer success record.
+A missing or mismatched binding/runtime/interpreter/Git executable is `INFRA`
+and grants `mutation_authority: "NONE"`. The separately validated
+trusted-supervisor termination exception remains limited to one fully
+procfs-identity-valid process group and cannot publish cleanup/finalizer
+success.
 
 #### Deterministic prelaunch and recovery rehydration
 
-Before a new parent launch or recovery graph begins, the launcher first validates
-the external trusted-runtime binding from durable `state_root`; recovery does
-this before opening or hashing any current target-repository runtime script. If
-the exact bundle directory is absent, the launcher may perform one deterministic
-rehydration from the durable approved plan snapshot and exact Git objects. It:
+Recovery always begins with caller validation of
+`trusted_launcher_argv_prefix`, then exact trusted-launcher `self-check`, then
+exact `rehydrate-runtime` with the same plan/target/source/state/binding inputs
+as `materialize-runtime`. The external bootstrap validates an existing binding
+or, only when the exact bundle directory is absent, reconstructs runtime and
+supervisor from the two exact Git blobs using the same atomic sealed algorithm.
+It never reads materialization bytes from the current working copy and never
+repairs a present-but-mismatching bundle.
 
-1. validates the compile-bound absolute Git/interpreter prefixes and hashes from
-   the durable plan snapshot;
-2. resolves both expected paths at exact `execution_source_sha` to the expected
-   blob IDs through the closed absolute Git argv;
-3. extracts both exact blobs with `cat-file blob` into a new staging directory;
-4. verifies blob IDs, lengths, SHA-256 values, modes, tool identities, and
-   runtime-bundle-hash before executing any extracted code;
-5. recreates and seals the same versioned binding with the atomic/fsync/
-   no-write/reread procedure; and
-6. only after complete validation invokes the external self-check and starts
-   recovery through `trusted_runtime_argv_prefix`.
-
-Rehydration never reads source bytes from the current working copy, never
-executes current working-copy runtime code, and never overwrites or repairs a
-present-but-mismatching bundle. A present mismatch blocks action and requires
-operator custody of the suspect external directory. If exact blob,
-interpreter/Git executable identity, permissions, atomic durability, or final
-binding cannot be proved, the launcher writes only its own external
-infrastructure-blocked evidence, starts no recovery/cleanup/finalizer command,
-performs no Git mutation, and does not claim cleanup or terminal-finalizer
-completion.
+Only after the recreated/existing binding, runtime, supervisor, interpreter,
+Git executable, and launcher provenance are completely green may the harness
+invoke exact `launch-parent`, which starts recovery through
+`trusted_runtime_argv_prefix`. A missing, unavailable, path-drifted, or
+hash-mismatched external launcher, bad interpreter/executable, invalid
+installation evidence, present bad runtime bundle, or failed exact-blob
+rehydration produces `RECOVERY_INFRASTRUCTURE_BLOCKED` with only external
+launcher evidence. It starts no parent, runtime cleanup, terminal finalizer, or
+Git mutation and never claims that pipeline finalization ran.
 
 #### Parent DOT tool-command contract
 
 `trusted_runtime_binding_path` and `runtime_bundle_hash` are immutable parent
-context values established by the launcher and revalidated by admission. The
+context values established by the external trusted bootstrap and revalidated by
+admission. The
 parent DOT has no safety-critical `tool_command` whose executable operand is
 beneath `target_repo`. Its initial safety node and every later safety node use
 the exact ordered argv represented by:
@@ -1181,7 +1283,7 @@ permitted. A non-safety LLM/tool node cannot write the binding directory and
 cannot contribute or replace an argv prefix.
 
 The same rule applies inside lane, correction, and delivery child DOTs. Their
-launcher params carry the exact runtime-bundle hash, binding path, and external
+launch params carry the exact runtime-bundle hash, binding path, and external
 prefix hashes. `ReserveGlobalAttempt`, attempt classification, budget/deadline
 control, ownership/source gates, commit/ref operations, delivery Git/remote
 mutation, evidence finalization, and every other deterministic safety node
@@ -1193,13 +1295,20 @@ replace or rebind either trusted prefix.
 ### Top-level topology
 
 ```text
-Launcher preflight
-  -> validate or exact-blob rehydrate external trusted-runtime binding
-  -> reject before parent start if Git/interpreter/blob/binding proof is red
+Deployment/test harness
+  -> stage external bootstrap from exact execution_source_sha blob
+  -> independently hash/install it outside every repository/run/worktree root
+  -> persist trusted-launcher installation evidence
+  -> before every command, validate exact trusted_launcher_argv_prefix/binding
+  -> trusted launcher self-check
+  -> materialize-runtime on first admission OR rehydrate-runtime on recovery
+  -> reject as PRELAUNCH/RECOVERY_INFRASTRUCTURE_BLOCKED if launcher,
+     Git/interpreter/blob/runtime-binding proof is red
+  -> launch-parent validates parent argv JSON, chdir(target_repo), execve(parent)
 Start
   -> Bind typed runtime inputs
   -> TrustedRuntimeBindingGate on external bundle before reading target scripts
-  -> Require launcher-started OS CWD realpath == canonical target_repo
+  -> Require trusted-bootstrap-started OS CWD realpath == canonical target_repo
   -> ParentRunnerBindingGate:
        /proc/self/cwd == runner --cwd . == canonical target_repo
        invoked DOT == target_repo/pipelines/PLAN_SLUG/PLAN_SLUG.dot
@@ -1208,9 +1317,11 @@ Start
      + conditional delivery_state_root
   -> Admission: validate plan/graph/repo + bind product_base_sha/execution_source_sha
   -> Persist immutable parent argv/prefix/provider/cwd/DOT/hash/process/logs evidence
-  -> Prove checked-out runtime/supervisor bytes == Git blobs == compiled manifest
-  -> Materialize/verify/seal trusted runtime from exact Git blob bytes
-  -> Persist immutable trusted-runtime-binding.json and command evidence
+  -> Require trusted-launcher installation/self-check/materialization evidence
+  -> Prove checked-out bootstrap/runtime/supervisor bytes == Git blobs
+     == compiled manifest
+  -> Revalidate already materialized/sealed exact-blob trusted runtime
+  -> Persist immutable parent reference to trusted-runtime binding/command evidence
   -> Validate child runner prefix/module/source/doctor/flags + compiled provider credentials
   -> Validate external trusted runtime/supervisor prefixes, permissions, hashes,
      self-checks, and subcommands
@@ -2060,7 +2171,8 @@ evidence, and exact candidate disposition. It is a parent routing hint only.
 
 | Responsibility | Owner | Reason |
 |---|---|---|
-| Parent pre-start CWD, runner `--cwd .`, target-repository, parent-DOT path/hash, argv/provider/process/logs binding | Deterministic launcher plus `ParentRunnerBindingGate` | The parent must execute the reviewed graph in the repository named by the plan; an alternate CWD or DOT copy cannot be repaired by model work. |
+| Trusted-launcher installation, self-check, first admission, rehydration, and exact parent CWD/argv `execve` | Externally staged `goal_plan_bootstrap.py` plus deployment/test harness validation | No target-repository runtime can establish its own first trust. The external byte-exact launcher is validated before every invocation and owns only admission/rehydration/handoff. |
+| Parent pre-start CWD, runner `--cwd .`, target-repository, parent-DOT path/hash, argv/provider/process/logs binding | Trusted bootstrap `launch-parent` plus `ParentRunnerBindingGate` | The parent must execute the reviewed graph in the repository named by the plan; an alternate CWD or DOT copy cannot be repaired by model work. |
 | Plan-schema validation, dependency-cycle checks, ownership-collision checks, source-SHA/compiled-manifest admission | Deterministic nodes | These are exact predicates. |
 | Lane, candidate-verification, and integration worktree creation, cleanliness, cleanup, branch/source inspection | Deterministic nodes | Git state is observable and must be reproducible. |
 | Child process launch, identity ledger, logs, timeout, TERM/grace/KILL, exit capture, and restart reconciliation | Deterministic supervisor and parent nodes | Process control is exact infrastructure state; artifacts cannot substitute for the real exit status. |
@@ -2072,7 +2184,8 @@ evidence, and exact candidate disposition. It is a parent routing hint only.
 | Optional qualitative lane critique | Independent LLM gate plus deterministic artifact classifier | Some acceptance criteria cannot be reduced to a command; the reviewer must be outside the worker context, and its versioned artifact must be schema-valid and tied to the exact commit. |
 | Ownership diff, commit existence, ancestry, clean-state checks | Deterministic nodes | A worker cannot attest its own git side effects. |
 | Merge/cherry-pick, rollback of a failed candidate, merge journal | Deterministic nodes | Integration is state mutation with exact success criteria. |
-| Trusted-runtime bootstrap, pre-terminal authority derivation, process reconciliation, authority-scoped run-owned worktree removal/preservation, foreign-path proof, and final-status choice | Deterministic launcher plus externally pinned `PreTerminalCleanup` | The launcher materializes exact Git blobs and validates the external binding before executing safety code. Cleanup receives `FULL` only from fresh green trusted-runtime, parent-runner, target/source, and compiled-source gates; a green trusted runtime plus red repository/source binding restricts it to `EXTERNAL_ONLY`; a red trusted runtime grants `NONE` and prohibits cleanup/finalizer completion. |
+| Runtime materialization | External trusted bootstrap `materialize-runtime` | Only the bootstrap extracts exact Git blobs and writes/seals the runtime binding; the materialized runtime cannot bootstrap itself. |
+| Pre-terminal authority derivation, process reconciliation, authority-scoped run-owned worktree removal/preservation, foreign-path proof, and final-status choice | Externally pinned runtime `PreTerminalCleanup` | Cleanup begins only after trusted-launcher handoff and receives `FULL` only from fresh green trusted-runtime, parent-runner, target/source, and compiled-source gates; a green trusted runtime plus red repository/source binding restricts it to `EXTERNAL_ONLY`; a red trusted runtime grants `NONE` and prohibits cleanup/finalizer completion. |
 | Cross-lane coherence review | Fresh independent LLM gate plus the same deterministic artifact classifier | Semantic conflicts can survive lane-local mechanical checks. The shared review interface ties the verdict to final HEAD and routes correction to named lane IDs. |
 | PR existence and exact-head verification | Deterministic remote query | `OpenPR` cannot certify its own external side effect. |
 
@@ -2539,7 +2652,7 @@ The ledger contains:
 | Field | Contract |
 |---|---|
 | `schema_version` | Exact value `goal-plan.run-budget/v3`. |
-| `plan_id`, `run_id`, `product_base_sha`, `execution_source_sha`, `provider`, `attractor_runner_argv_prefix_sha256`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash`, `trusted_runtime_argv_prefix_sha256`, `trusted_supervisor_argv_prefix_sha256` | Exact immutable run, child-runner, external binding, safety-runtime, and external supervisor identities. |
+| `plan_id`, `run_id`, `product_base_sha`, `execution_source_sha`, `provider`, `trusted_launcher_argv_prefix_sha256`, `trusted_launcher_binding_sha256`, `attractor_runner_argv_prefix_sha256`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash`, `trusted_runtime_argv_prefix_sha256`, `trusted_supervisor_argv_prefix_sha256` | Exact immutable run, trusted-launcher, child-runner, external binding, safety-runtime, and external supervisor identities. |
 | `boot_id` | Exact Linux boot ID at run admission. |
 | `started_at_boottime`, `deadline_boottime` | `CLOCK_BOOTTIME` values captured with `clock_gettime`; deadline equals start plus `max_pipeline_seconds`. |
 | `max_pipeline_seconds`, `max_total_attempts`, `max_process_launches`, `max_integration_corrections` | Exact positive compiled limits. `max_total_attempts` excludes all process launches. |
@@ -2803,17 +2916,26 @@ There are no routine gates between waves.
 ## Durable State and Crash Recovery
 
 Recovery is a graph pattern, not an assumption about engine checkpoints. Every
-initial start and resume first validates or exact-blob rehydrates the external
-trusted-runtime binding, enters recovery only through
-`trusted_runtime_argv_prefix`, then satisfies the parent target-repository
-binding and persists its immutable invocation record before deterministic
-reconciliation.
+initial start and resume first validates the external
+`trusted_launcher_argv_prefix`. Recovery then runs the external bootstrap's
+exact `rehydrate-runtime` and `launch-parent` commands, enters graph recovery
+only through `trusted_runtime_argv_prefix`, and satisfies the parent
+target-repository binding before deterministic reconciliation. If launcher
+identity is unavailable or mismatched, no graph starts and the harness reports
+`RECOVERY_INFRASTRUCTURE_BLOCKED`; it does not claim pipeline finalization.
 
 ### Durable state
 
 The run persists:
 
 - approved plan snapshot/hash and preapproval/approval evidence;
+- exact `trusted_launcher_argv_prefix`, `trusted_launcher_binding` content/hash,
+  source bootstrap path/blob/mode/length/hash at `execution_source_sha`,
+  external bootstrap path/realpath/mode/length/hash, interpreter/executable
+  path/realpath/hash, closed environment schema/hash, supported subcommand
+  schemas, installation and per-invocation self-check evidence, and every
+  `materialize-runtime`/`rehydrate-runtime`/`launch-parent` command/evidence
+  hash;
 - exact trusted-runtime definition/hash, runtime-bundle hash, external bundle
   directory, versioned `trusted-runtime-binding.json` path/hash/content,
   runtime/supervisor source path/blob/mode/length/hash entries, external
@@ -2833,9 +2955,10 @@ The run persists:
   history-anchor proof, exact `product_base_sha`, exact
   `execution_source_sha`, their ancestry proof, and the separated compiled-plan
   and lane-produced delta ranges;
-- canonical external `state_root`, `worktree_root`, and conditional
-  `delivery_state_root`, root-safety evidence, XDG/default derivation evidence,
-  approval mode/transport, and approval boundary;
+- canonical external launcher path, `state_root`, `worktree_root`, and
+  conditional `delivery_state_root`, pairwise/root/worktree safety evidence,
+  XDG/default derivation evidence, approval mode/transport, and approval
+  boundary;
 - atomic `run-owned-worktrees.json` with every lane, integration,
   candidate-verification, and delivery entry's kind, lane/process ID, canonical
   path, expected branch or detached SHA, Git common directory, creation
@@ -2896,22 +3019,21 @@ state; they are not the source of truth.
 
 ### Reconciliation rules
 
-On restart, the graph compares state with reality:
+On restart, prelaunch recovery runs before the graph compares state with
+reality. The deployment/runtime harness validates the external bootstrap
+against `trusted_launcher_binding`, invokes exact `self-check`, then invokes
+exact `rehydrate-runtime` from the durable plan and Git objects at
+`execution_source_sha`. It never imports target code or materializes from
+current working-copy bytes. A bad/missing launcher, present mismatching runtime
+bundle, or rehydration that cannot prove exact blob, Git/interpreter,
+permission, fsync, and final binding identities stops as
+`RECOVERY_INFRASTRUCTURE_BLOCKED` before the parent; no cleanup/finalizer
+completion is claimed.
 
-Before opening any current target-repository runtime/supervisor script, the
-launcher validates the external trusted-runtime binding from durable
-`state_root`. If the exact bundle directory is absent, it may run only the
-deterministic closed-argv rehydration procedure from the durable approved plan
-snapshot and exact Git blobs at `execution_source_sha`. It never executes or
-materializes from current working-copy runtime bytes. A present mismatching
-bundle, or rehydration that cannot prove the exact blob, Git executable,
-interpreter, permission, fsync, and final binding identities, stops as
-infrastructure-blocked before the parent graph; no cleanup/finalizer completion
-is claimed.
-
-Only after the external binding is green does the launcher change into the
-durable canonical `target_repo`, `exec` the parent, and invoke recovery through
-exact `trusted_runtime_argv_prefix`. The new parent invocation reruns
+Only after the launcher and external runtime binding are green does exact
+`launch-parent` change into durable canonical `target_repo`, `execve` the exact
+parent argv, and invoke recovery through exact `trusted_runtime_argv_prefix`.
+The new parent invocation reruns
 `TrustedRuntimeBindingGate`, `ParentRunnerBindingGate`, target/source-identity
 proof, and `CompiledSourceGate`, appends a hash-chained invocation record, and
 matches the original trusted-runtime/prefix/provider/CWD/DOT/hash/logs/source
@@ -2961,7 +3083,8 @@ termination rule.
    complete verifier record.
 7. Through exact external `trusted_runtime_argv_prefix`, rerun admission against
    immutable `plan.json` and embedded `plan_sha256`,
-   including graph/plan correspondence, child-runner identity/doctor/flags,
+   including trusted-launcher installation/self-check/rehydration/launch-parent
+   evidence, graph/plan correspondence, child-runner identity/doctor/flags,
    trusted runtime/supervisor prefix/executable/interpreter/external-script/
    environment identity, binding permissions/hashes, non-mutating self-check,
    exact CLI/schema/subcommand support, provider/credential, approval transport,
@@ -3075,11 +3198,19 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 ## Terminal and Failure Behavior
 
+The four terminals below exist only after trusted `launch-parent` starts the
+parent graph. A missing or mismatched external launcher, failed launcher
+self-check, or failed pre-parent materialization/rehydration is instead reported
+by the harness as `PRELAUNCH_INFRASTRUCTURE_BLOCKED` or
+`RECOVERY_INFRASTRUCTURE_BLOCKED` with external evidence. No
+`PreTerminalCleanup`, finalizer, `result.json`, status, or `GOAL_PLAN:*` token is
+claimed because the pipeline terminal machine did not run.
+
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Both source SHAs, the immutable external trusted-runtime/parent/child/supervisor bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and externally invoked `PreTerminalCleanup` records `mutation_authority: "FULL"`, proves no live supervisor/child process group or foreign path, and marks every run-owned lane/candidate/delivery/integration worktree and Git registration `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
+| `COMPLETE` | Trusted-launcher installation/handoff evidence, both source SHAs, the immutable external trusted-runtime/parent/child/supervisor bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and externally invoked `PreTerminalCleanup` records `mutation_authority: "FULL"`, proves no live supervisor/child process group or foreign path, and marks every run-owned lane/candidate/delivery/integration worktree and Git registration `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked and every residual has evidence. Under current `FULL` authority, `PreTerminalCleanup` proves no live process group, marks only explicitly named residual worktrees `PRESERVED_RESIDUAL` with evidence/recovery commands, removes every other run-owned worktree/registration, and finds no unidentified or foreign path. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | Any external-root/approval boundary, trusted-runtime/parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. With a green trusted-runtime binding, `PreTerminalCleanup` records `FULL` or `EXTERNAL_ONLY`, performs only bounded actions that authority permits, and names every unresolved resource. Red/unknown parent, target/source, or compiled-source binding yields `EXTERNAL_ONLY` and leaves all Git/repository resources untouched. Red/unknown trusted runtime yields `NONE`; the launcher reports infrastructure-blocked without claiming cleanup/finalizer completion. | No delivery. |
+| `INFRA_FAILURE` | After parent start, any external-root/approval boundary, trusted-runtime/parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. With a green trusted-runtime binding, `PreTerminalCleanup` records `FULL` or `EXTERNAL_ONLY`, performs only bounded actions that authority permits, and names every unresolved resource. Red/unknown parent, target/source, or compiled-source binding yields `EXTERNAL_ONLY` and leaves all Git/repository resources untouched. Red/unknown trusted runtime yields `NONE`; the external trusted-launcher harness reports infrastructure-blocked without claiming cleanup/finalizer completion. | No delivery. |
 | `ABORTED` | The plan was rejected or cancelled before mutation, current cleanup authority is `FULL`, and `PreTerminalCleanup` proves no run-owned process, worktree, Git registration, `worktree_root`, or `delivery_state_root` mutation exists. A red/unknown binding yields `INFRA_FAILURE`, not `ABORTED`. | No delivery. |
 
 ### `PreTerminalCleanup` and durable finalizer machine contract
@@ -3134,7 +3265,7 @@ The required `mutation_authority` is derived, not supplied:
   invocation, or becomes red during the attempt. It permits no Git mutation,
   general signalling, cleanup publication, or terminal finalizer. Only the
   separately still-valid trusted-supervisor termination exception may stop one
-  exact identity-valid process group. The launcher records
+  exact identity-valid process group. The external trusted-launcher harness records
   infrastructure-blocked evidence and makes no completion claim.
 
 No prior cleanup record, lifecycle state, or prior `FULL`/`EXTERNAL_ONLY`
@@ -3272,6 +3403,10 @@ versioned `result.json` with, at minimum:
   `ABORTED`;
 - `plan_hash`;
 - `product_base_sha` and `execution_source_sha`;
+- `trusted_launcher_argv_prefix_sha256`,
+  `trusted_launcher_binding_sha256`, external launcher/interpreter-or-executable
+  identity, and installation/self-check/materialization-or-rehydration/
+  launch-parent evidence paths/hashes;
 - `attractor_runner_argv_prefix_sha256`, runner module/source identity, and
   compiled `provider`;
 - `parent_runner_invocation_definition_sha256`,
@@ -3333,7 +3468,7 @@ than aliases for a generic failure.
 
 If trusted-runtime validation fails before or during the finalizer, it writes no
 valid finalizer record and cannot claim `result.json`, status, token, cleanup, or
-finalizer completion. The launcher/carrier may report only
+finalizer completion. The external harness/carrier may report only
 `INFRASTRUCTURE_BLOCKED` with the external validation/rehydration evidence; it
 must not synthesize `GOAL_PLAN:INFRA_FAILURE` as though the durable terminal
 machine completed.
@@ -3528,29 +3663,41 @@ pipelines/goal_plan_smoke/goal_plan_smoke.md
 pipelines/goal_plan_smoke/subgraphs/goal_lane.dot
 pipelines/goal_plan_smoke/subgraphs/integration_correction.dot
 pipelines/goal_plan_smoke/subgraphs/deliver_pr.dot
+pipelines/goal_plan_smoke/python/goal_plan_bootstrap.py
 pipelines/goal_plan_smoke/python/goal_plan_runtime.py
 pipelines/goal_plan_smoke/python/goal_plan_supervisor.py
+pipelines/goal_plan_smoke/python/tests/test_goal_plan_bootstrap.py
 pipelines/goal_plan_smoke/python/tests/test_goal_plan_runtime.py
 pipelines/goal_plan_smoke/python/tests/test_goal_plan_supervisor.py
 pipelines/goal_plan_smoke/python/tests/test_goal_plan_trusted_runtime.py
 README.md
 ```
 
-`goal_plan_runtime.py` is the single deterministic home for source-SHA
-admission, parent target-repository/CWD/DOT invocation binding and immutable
-invocation evidence, trusted-runtime definition/binding validation and
-materialization primitives, compiled-source manifests/gates, ownership-pattern
-rejection,
+`goal_plan_bootstrap.py` is the sole deterministic source home for
+first-admission plan/source/launcher checks, exact Git-blob runtime
+materialization, trusted-runtime binding creation, recovery rehydration, and
+the parent `chdir`/`execve` handoff. Its external byte-exact staged copy is the
+only executable bootstrap. The module uses only the Python standard library and
+preflight-bound absolute Git/interpreter/system calls; it imports no
+`goal_plan_runtime`, `goal_plan_supervisor`, pipeline-runner, or other
+target-repository runtime module.
+
+`goal_plan_runtime.py` remains the single deterministic home for work performed
+after trusted-bootstrap handoff: parent target-repository/CWD/DOT invocation
+revalidation and immutable invocation evidence, trusted-runtime binding
+validation, compiled-source manifests/gates, ownership-pattern rejection,
 candidate-verification worktree lifecycle, the shared
 `VerifierExecutionEnvelope`, phase-split external-root safety,
 `run-owned-worktrees.json` lifecycle/recovery, run-budget
 process-launch/correction-round/adaptive-attempt reservation/reconciliation,
 child-runner/trusted-supervisor/provider preflight, engine-step admission,
 delivery-worktree envelope, `PreTerminalCleanup`, durable final-status
-selection, and delta reporting. First admission validates its checked-in bytes
-as source data, while every parent safety-critical DOT node calls only its
-sealed external trusted-runtime copy rather than duplicating shell logic or
-executing the target-repository path. `goal_plan_supervisor.py` remains the
+selection, and delta reporting. It exposes no `materialize-runtime`,
+`rehydrate-runtime`, or `launch-parent` command and never installs itself. Every
+parent safety-critical
+DOT node calls only its sealed external trusted-runtime copy rather than
+duplicating shell logic or executing the target-repository path.
+`goal_plan_supervisor.py` remains the
 single source home for the lane, correction, and delivery reaper, immutable
 self-check/CLI-schema report, authoritative wait-status capture, Linux process
 identity, long-poll/control-client schemas, and closed tokens; every runtime
@@ -3565,9 +3712,13 @@ state_root/trusted-runtime/<runtime-bundle-hash>/goal_plan_supervisor.py
 state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
 ```
 
-The launcher/CWD bootstrap gains the deterministic direct-Git-object
-materialization/rehydration sequence defined above. It contains no product
-scheduler or model logic.
+The deployment/test harness stages the external bootstrap copy from exact
+`execution_source_sha:pipelines/goal_plan_smoke/python/goal_plan_bootstrap.py`
+blob bytes, independently hashes and seals the installed file before execution,
+and writes `goal-plan.trusted-launcher-installation/v1` evidence. Production
+packaging/deployment must perform the same installation before invoking the
+pipeline; target-repository code has no installation path. The bootstrap
+contains no product scheduler or model logic.
 
 The smoke exemplar proves orchestration rather than product behavior. In a
 temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
@@ -3591,13 +3742,14 @@ orchestration behavior, not a library-only change.
 
 | Claim | Verification level | Required proof |
 |---|---|---|
+| First trust is outside the target repository | Packaging/harness + unit + prelaunch faults | Harness stages the exact bootstrap Git blob outside every repository/run/worktree root, independently hashes it, records installation evidence, validates it before every subcommand, and proves wrong launcher bytes/path/interpreter/prefix/environment stop before Git/repository/process mutation. |
 | Adaptive attempts, process launches, and correction rounds are separate | Unit + concurrent live fault injection | Flocked v3 ledger binds the trusted runtime and shows `ReserveGlobalAttempt` consumed at verifier classification, every supervised correction-child launch transitions its own `correction_round_id`, and every supervisor start changes `max_process_launches`; no counter borrows from another. |
-| Parent runner is bound to `target_repo` | Launcher/admission/recovery faults | Parent starts only after `chdir(realpath(target_repo))`; `/proc/self/cwd`, runner `--cwd .`, and canonical target repo are equal; parent DOT realpath is exact; observed/execution-source/manifest hashes agree; and immutable argv/prefix/provider/process/logs evidence is durable before mutation. |
-| Terminal runtime remains trustworthy after source failure | First-admission + live mutation/recovery faults | Checked-out runtime/supervisor bytes equal exact plan/manifest/Git blobs before mutation; sealed external copies and `trusted-runtime-binding.json` are atomically/fsync durably materialized from `cat-file blob`; every safety command revalidates and uses only external prefixes; source mutation reaches external-only final INFRA evidence, while external-copy/interpreter/hash drift blocks action. |
+| Parent runner is bound to `target_repo` | Trusted-launcher/admission/recovery faults | Exact `launch-parent` validates canonical parent argv JSON, calls `chdir(realpath(target_repo))`, and `execve`s without a shell; `/proc/self/cwd`, runner `--cwd .`, and canonical target repo are equal; parent DOT realpath/hash and immutable launcher/argv/provider/process/logs evidence agree before mutation. |
+| Terminal runtime remains trustworthy after source failure | First-admission + live mutation/recovery faults | Checked-out bootstrap/runtime/supervisor bytes equal exact plan/manifest/Git blobs before mutation; only the external bootstrap materializes sealed runtime/supervisor copies and `trusted-runtime-binding.json` from `cat-file blob`; every later safety command uses external runtime prefixes; source mutation reaches external-only final INFRA evidence, while launcher/runtime/interpreter/hash drift blocks action. |
 | Final proof and cleanup order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep` -> optional delivery -> intended status -> `PreTerminalCleanup` -> durable terminal publication. |
 | Long polling cannot exhaust engine steps prematurely | Static arithmetic + timed live run | Recomputed branch inequality, parent total-step inequality, exact 30-second poll argv, identity checks, and observed deadline-capped waits. |
 | Delivery preserves verified source | Live Git/remote probe | Disposable final-HEAD worktree has equal pre/post HEAD/status/full-filesystem/source records, no generated `.resolve` delta, external delivery evidence, and parent-observed PR exact head. |
-| Child-runner, trusted-supervisor, and provider identity cannot drift | Admission/recovery faults | Allowed child-runner forms and exact external trusted-supervisor prefix pass; PATH/shell/executable/interpreter/source-blob/external-script/hash/permission/environment/CLI/schema/subcommand/flag/credential faults and any binding/prefix/provider change on resume fail before mutation. |
+| Trusted-launcher, child-runner, trusted-supervisor, and provider identity cannot drift | Admission/recovery faults | Allowed launcher/child-runner forms and exact external launcher/supervisor prefixes pass; PATH/shell/executable/interpreter/source-blob/external-script/hash/permission/environment/CLI/schema/subcommand/flag/credential faults and any binding/prefix/provider change on resume fail before mutation. |
 | Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; fresh all-green trusted-runtime/parent/target-source/compiled gates grant `FULL`; a green trusted runtime plus red repository/source binding grants `EXTERNAL_ONLY`; red trusted runtime grants `NONE`; complete removes exact run-owned worktrees only under `FULL`; residual preserves only named `PRESERVED_RESIDUAL` entries under `FULL`; restricted cleanup touches no Git state, may stop only fully procfs-identity-valid process groups, records skipped/unresolved resources, and publishes no terminal first. |
 | Approval modes are operationally honest | Standalone admission probes | Preapproved unattended headless passes; required attached standalone console/TTY passes; required without TTY or on unattended/hosted headless execution fails before mutation. |
 | DOT remains inspectable | Graphviz + lint | Every DOT renders to a non-empty PNG with recorded hashes and passes strict lint; any render failure is loud. |
@@ -3613,7 +3765,7 @@ orchestration behavior, not a library-only change.
    verification failure; rendering is never optional.
 2. Run the immutable runner prefix's `lint --strict` on the entry graph and all
    three subgraphs.
-3. Run `python_check` on both checked-in Python implementation files and their
+3. Run `python_check` on all three checked-in Python implementation files and their
    tests, then run the tests with system Python exactly as
    `python3 -m pytest pipelines/goal_plan_smoke/python/tests -q`. Do not use,
    patch, or write any interpreter/module beneath `~/.amplifier/cache` or another
@@ -3629,13 +3781,21 @@ orchestration behavior, not a library-only change.
    two-attempt delivery ledger.
 9. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
    graph/plan correspondence, both target-repository identity modes,
-   `trusted_runtime_definition`, binding policy, exact runtime-bundle-hash
-   derivation, and typed runtime-input rejection cases.
+   required `trusted_launcher_argv_prefix`, complete
+   `trusted_launcher_binding`, `trusted_runtime_definition`, binding policy,
+   exact runtime-bundle-hash derivation, and typed runtime-input rejection
+   cases.
 10. Validate the only two permitted `attractor_runner_argv_prefix` forms,
     canonical prefix hash, executable/module/source identity, `doctor`,
     required run flags, exact compiled provider support/credential, explicit
     `--provider` on every child argv, and immutable provider/prefix on resume.
-    Validate the compile-bound absolute Git/interpreter prefixes and hashes,
+    Validate the two permitted `trusted_launcher_argv_prefix` forms, external
+    location exclusion, source path/blob/mode/length/hash, external byte hash,
+    executable/interpreter realpath/hash, closed environment schema/hash,
+    prefix/binding hashes, supported bootstrap CLI/schema versions, exact
+    self-check/materialize-runtime/rehydrate-runtime/launch-parent suffixes, and
+    installation evidence. Validate the compile-bound absolute
+    Git/interpreter prefixes and hashes,
     both source path/blob/mode/length/hash identities, exact `cat-file blob`
     materialization argv/evidence, atomic writes/fsyncs/non-writable modes/final
     rereads, complete `trusted-runtime-binding.json` schema/hash, exact external
@@ -3693,11 +3853,15 @@ orchestration behavior, not a library-only change.
     `ReserveGlobalAttempt` tuple identity; exact-once verifier-bound consumption;
     active process-run tracking; all budget ceilings; `CLOCK_BOOTTIME` deadline
     closure; boot-ID failure; and restart recovery.
-21. Unit-test first-admission checked-out-byte/blob/manifest equivalence,
-    direct-Git-object materialization, atomic/no-replace writes, fsync ordering,
-    non-writable permissions, final reread verification, complete
-    `trusted-runtime-binding.json`, per-invocation path/permission/hash checks,
-    absent-bundle rehydration, and present-mismatch refusal. Also unit-test
+21. In `test_goal_plan_bootstrap.py`, unit-test launcher `self-check`; wrong
+    external bytes, interpreter realpath/hash, executable hash, prefix hash, and
+    environment; source/external bootstrap path exclusion; exact
+    checked-out-byte/blob/manifest identity; target working-copy bootstrap and
+    runtime mutation; exact Git-blob materialization; atomic/no-replace writes;
+    fsync ordering; non-writable permissions; final reread; complete
+    `trusted-runtime-binding.json`; no imports from target-repository runtime
+    modules; absent-bundle `rehydrate-runtime`; present-mismatch refusal; and
+    exact `launch-parent` CWD/argv/environment passed to `execve`. Also unit-test
     phase-split root safety, exact run-owned worktree registration and recovery,
     preapproved headless success, required+attached-console/TTY success,
     required+unattended-or-hosted-headless rejection, and read-only preapproval
@@ -3706,12 +3870,15 @@ orchestration behavior, not a library-only change.
     modified, and explicitly fail if any changed path resolves beneath a managed
     cache.
 23. Validate the parent launch definition and every immutable invocation record:
-    trusted-runtime validation/rehydration precedes parent start; launcher CWD
-    changes before `exec`; `/proc/self/cwd`, runner `--cwd .`, and canonical
-    `target_repo` are equal; the parent DOT realpath is exact; its
-    observed/execution-source/compiled-manifest hashes agree; external binding,
-    argv prefixes, provider, process identity, logs root, and resume hash chain
-    are exact; and every mismatch fails before repository mutation.
+    external launcher installation and per-invocation validation precede every
+    bootstrap command; `materialize-runtime` or `rehydrate-runtime` precedes
+    parent start; exact `launch-parent` changes CWD before `execve`;
+    `/proc/self/cwd`, runner `--cwd .`, and canonical `target_repo` are equal;
+    parent argv equals canonical parent JSON token-for-token; the parent DOT
+    realpath and observed/execution-source/compiled-manifest hashes agree;
+    launcher/runtime bindings, argv prefixes, provider, process identity, logs
+    root, and resume hash chain are exact; and every mismatch fails before
+    repository mutation.
 24. Validate the exact external-prefix `pre-terminal-cleanup` and
     `terminal-finalize` command schemas; fresh
     `trusted_runtime_binding_verdict`, `parent_binding_verdict`, target/source,
@@ -3730,9 +3897,15 @@ orchestration behavior, not a library-only change.
 
 Run the canonical `goal_plan_smoke` pipeline against a temporary,
 GitHub-backed Git repository with a known aggregate verifier and three fixed
-fixture lanes. Its immutable `attractor_runner_argv_prefix` uses one permitted
-absolute form, its compiled `provider` is `anthropic`, and admission proves the
-Anthropic credential before the headless `preapproved` run:
+fixture lanes. Before execution, the smoke harness uses its preflight-bound
+absolute Git binary to read the exact
+`execution_source_sha:pipelines/goal_plan_smoke/python/goal_plan_bootstrap.py`
+blob, stages those bytes at the plan-bound external launcher path outside every
+repository/run/worktree root, independently hashes/seals/rereads that file, and
+records installation evidence. Its immutable `trusted_launcher_argv_prefix`
+and `attractor_runner_argv_prefix` each use one permitted absolute form, its
+compiled `provider` is `anthropic`, and admission proves the Anthropic
+credential before the headless `preapproved` run:
 
 - `lane_a` and `lane_b` each produce one fixture file in disjoint owned paths
   and run concurrently in Wave 1 as separate child Attractor processes launched
@@ -3751,25 +3924,25 @@ Anthropic credential before the headless `preapproved` run:
 
 The live smoke passes only if direct observation proves:
 
-1. The launcher changes into canonical `target_repo` before parent `exec`;
-   `/proc/self/cwd`, literal runner `--cwd .`, and canonical `target_repo`
-   resolve equally; the invoked parent DOT realpath is exact; its
-   observed/execution-source/compiled-manifest hashes agree; immutable parent
-   argv/prefix/provider/process/logs evidence is durable; and the adjacent
-   `plan.json` hash, graph/plan correspondence, normalized fetch-remote
-   identity, both source SHAs/ancestry, child-runner binding, and supervisor
-   source identity all pass before mutation. The checked-out runtime/supervisor
-   files equal plan-declared Git blobs and compiled-manifest entries; exact blob
-   bytes are atomically materialized and sealed under `state_root`; the complete
-   versioned binding and materialization command evidence are durable; and both
-   external self-checks pass before mutation.
+1. The harness's independently generated launcher-installation evidence proves
+   external bytes equal the exact bootstrap source blob. It validates the
+   trusted-launcher binding before exact `self-check`, `materialize-runtime`,
+   and `launch-parent`. The bootstrap imports no target module, validates
+   checked-out bootstrap/runtime/supervisor source identity, materializes exact
+   runtime/supervisor Git blobs, and writes the sealed binding. `launch-parent`
+   changes into canonical `target_repo` then `execve`s the exact canonical
+   parent argv JSON. `/proc/self/cwd`, literal runner `--cwd .`, and canonical
+   `target_repo` resolve equally; parent DOT and plan/source/manifest hashes,
+   launcher/runner/provider/process/logs evidence, normalized fetch-remote
+   identity, both source SHAs/ancestry, and all external self-checks pass before
+   mutation.
 2. Typed runtime inputs are bound; `state_root` resolves under
    `$XDG_STATE_HOME` or the external user-state fallback; `worktree_root` and
    `delivery_state_root` are separate safe external roots; strict preapproval
    overlap checks pass before mutation; `approval_mode=preapproved`,
    `human_gate_transport=none`, and parent/children use the compiled headless
    gate flags; `runtime_bundle_hash` and `trusted_runtime_binding_path` equal the
-   launcher-derived external binding; only external admission evidence is
+   trusted-bootstrap-derived external binding; only external admission evidence is
    written before preapproval.
 3. The integration worktree and prepared Wave 1 branches begin at exact
    `execution_source_sha`; a later-wave lane begins at a parent-verified
@@ -3857,6 +4030,16 @@ The live smoke passes only if direct observation proves:
 
 The implementation is not ready until live probes also demonstrate:
 
+- staging the external bootstrap from exact execution-source blob bytes,
+  independently hashing/sealing/rereading it, and recording installation
+  evidence succeeds without importing target-repository code; a working-copy
+  bootstrap mutation is detected as source drift and is never used as the
+  installed executable or materialization input;
+- wrong external bootstrap bytes/path/permissions, wrong
+  executable/interpreter realpath or hash, wrong launcher-prefix/environment
+  hash, or unsupported/reordered bootstrap subcommand fails caller validation
+  or launcher self-check before any parent/Git/repository/process mutation and
+  records `PRELAUNCH_INFRASTRUCTURE_BLOCKED`;
 - deleting one lane's required result before fan-in yields `CRASHED`, not a
   clean result;
 - launching the parent from the repository's parent directory, a symlink alias,
@@ -3867,12 +4050,13 @@ The implementation is not ready until live probes also demonstrate:
   external evidence for the observed OS CWD, CLI CWD, DOT realpath/hash,
   target repository, source SHA, process identity, and argv;
 - after green admission, byte-mutating or deleting the target-repository
-  `goal_plan_runtime.py` while leaving the external trusted bundle intact makes
-  the source gate red, invokes `PreTerminalCleanup` only through the exact
-  external `trusted_runtime_argv_prefix`, derives
+  `goal_plan_bootstrap.py` while leaving the external launcher/runtime bundle
+  intact makes the source gate red but never executes the changed source;
+  `PreTerminalCleanup` runs only through the external runtime, derives
   `mutation_authority: "EXTERNAL_ONLY"`, performs no Git/worktree mutation, and
   writes final `INFRA_FAILURE` cleanup/result/status/token evidence through the
-  externally pinned runtime; the same probe is repeated for
+  externally pinned runtime.
+  The same probe is repeated for target-repository `goal_plan_runtime.py` and
   `goal_plan_supervisor.py`;
 - byte-mutating, permission-widening, path-replacing, or deleting the external
   trusted runtime or supervisor copy makes the next per-invocation binding gate
@@ -3882,10 +4066,15 @@ The implementation is not ready until live probes also demonstrate:
   exact-process termination exception;
 - with the external trusted-runtime directory absent and the current
   target-repository runtime files deleted or mutated, recovery rehydration uses
-  the compile-bound absolute Git argv to extract the exact plan-declared blobs
+  exact validated `trusted_launcher_argv_prefix + rehydrate-runtime` and the
+  compile-bound absolute Git argv to extract the exact plan-declared blobs
   from `execution_source_sha`, recreates byte-identical non-writable external
   files and `trusted-runtime-binding.json`, verifies all hashes/permissions,
-  then starts recovery only through the recreated external prefix;
+  then exact `launch-parent` starts recovery only through the recreated external
+  runtime prefix;
+- unavailable, deleted, or mismatched external bootstrap identity during
+  recovery reports `RECOVERY_INFRASTRUCTURE_BLOCKED`, starts no parent/runtime/
+  cleanup/finalizer command, and never synthesizes a pipeline terminal;
 - a wrong plan-declared blob ID, Git object whose bytes do not match the
   expected hash, substituted interpreter realpath or bytes, wrong Git
   executable hash, widened materialized-file permissions, or mismatched
