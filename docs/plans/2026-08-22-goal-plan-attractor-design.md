@@ -49,7 +49,7 @@ The same choices follow the local doctrine:
   pipeline patterns, especially the shared PR-delivery subgraph, instead of
   inventing bespoke delivery steps.
 - `docs/primer.md`'s engine foot-gun card requires file-backed evidence,
-  routing on deterministic output such as `tool.last_line`, explicit
+  routing on deterministic output such as `context.tool.last_line`, explicit
   failure routes, and graph-owned resume guards rather than assumed checkpoint
   resume.
 
@@ -226,9 +226,12 @@ orchestration.
   phase choose the final status from real process/worktree state, and only then
   publish durable terminal result/status/token/carrier evidence.
 - Route the durable finalizer to four exact parent-graph carrier nodes.
-  `COMPLETE` alone exits success; `RESIDUALS`, `INFRA`, and `ABORTED` emit their
-  exact `GOAL_PLAN:*` token and reach the terminal `Msquare` on `outcome=fail`.
-  Carrier validation failure routes to `INFRA` rather than dead-ending.
+  Every successful finalizer/carrier token edge uses canonical condition
+  `context.tool.last_line=<TOKEN> && outcome=success`. `COMPLETE` alone denotes
+  workflow success; `RESIDUALS`, `INFRA`, and `ABORTED` retain their exact
+  non-success `GOAL_PLAN:*` tokens. Every tool source also has a separate exact
+  `condition="outcome=fail"` route to infrastructure handling, so carrier
+  validation failure cannot dead-end or masquerade as a token match.
 - End in one of four explicit terminal states:
   `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or `ABORTED`.
 
@@ -1605,24 +1608,32 @@ Start
   -> exact trusted_runtime_argv_prefix + DurableTerminalFinalizer(final status)
        -> atomically write immutable result.json, goal_plan.status, finalizer record
        -> emit exactly one routing token TERMINAL_FINALIZED:<STATUS>
-  -> TERMINAL_FINALIZED:COMPLETE -> CompleteCarrier
+  -> context.tool.last_line=TERMINAL_FINALIZED:COMPLETE && outcome=success
+       -> CompleteCarrier
        -> validate result/status/hash/token -> emit GOAL_PLAN:COMPLETE
-       -> exit 0/outcome=success -> TerminalExit [shape=Msquare]
-       -> validation failure/outcome=fail -> InfraCarrier
-  -> TERMINAL_FINALIZED:RESIDUALS_READY -> ResidualsCarrier
+       -> context.tool.last_line=GOAL_PLAN:COMPLETE && outcome=success
+          -> TerminalExit [shape=Msquare]
+       -> command outcome=fail -> InfraCarrier
+  -> context.tool.last_line=TERMINAL_FINALIZED:RESIDUALS_READY && outcome=success
+       -> ResidualsCarrier
        -> valid -> emit GOAL_PLAN:RESIDUALS_READY
-          -> exit nonzero/outcome=fail -> TerminalExit
-       -> invalid -> emit GOAL_PLAN:CARRIER_INFRA
-          -> outcome=fail -> InfraCarrier
-  -> TERMINAL_FINALIZED:INFRA_FAILURE -> InfraCarrier
+       -> context.tool.last_line=GOAL_PLAN:RESIDUALS_READY && outcome=success
+          -> TerminalExit
+       -> invalid/command outcome=fail -> InfraCarrier
+  -> context.tool.last_line=TERMINAL_FINALIZED:INFRA_FAILURE && outcome=success
+       -> InfraCarrier
        -> validate result or record carrier-escalation evidence
        -> emit GOAL_PLAN:INFRA_FAILURE
-       -> exit nonzero/outcome=fail -> TerminalExit
-  -> TERMINAL_FINALIZED:ABORTED -> AbortedCarrier
+       -> context.tool.last_line=GOAL_PLAN:INFRA_FAILURE && outcome=success
+          -> TerminalExit
+       -> command outcome=fail -> TerminalExit as raw infrastructure failure
+  -> context.tool.last_line=TERMINAL_FINALIZED:ABORTED && outcome=success
+       -> AbortedCarrier
        -> valid -> emit GOAL_PLAN:ABORTED
-          -> exit nonzero/outcome=fail -> TerminalExit
-       -> invalid -> emit GOAL_PLAN:CARRIER_INFRA
-          -> outcome=fail -> InfraCarrier
+       -> context.tool.last_line=GOAL_PLAN:ABORTED && outcome=success
+          -> TerminalExit
+       -> invalid/command outcome=fail -> InfraCarrier
+  -> any TerminalFinalizer command outcome=fail -> InfraCarrier
 ```
 
 Each dependency wave is drawn explicitly. `shape=component` and
@@ -2370,7 +2381,7 @@ and emits exactly one aggregate token:
 | Envelope `FAIL` | `FAIL` | `AGGREGATE_VERIFY:FAIL` |
 | Envelope `INFRA`, missing/stale evidence, or hash/schema mismatch | `INFRA` | `AGGREGATE_VERIFY:INFRA` |
 
-Graph edges route on `tool.last_line`. Only `AGGREGATE_VERIFY:PASS` may advance
+Graph edges route on `context.tool.last_line`. Only `AGGREGATE_VERIFY:PASS` may advance
 to another dependency wave, a coherence review, the post-sweep aggregate gate,
 delivery eligibility, or completion. `FAIL` enters the responsible correction
 loop; `INFRA` leaves product-correction loops and routes toward
@@ -3551,9 +3562,12 @@ termination rule.
     carrier evidence is absent, revalidate the binding and resume only the
     idempotent exact carrier node from that final status; do not rewrite
     result/status/finalizer token or rerun cleanup. Missing/mismatched carrier
-    input routes to `InfraCarrier`, which records escalation evidence and exits
-    nonzero without changing result. A mismatch is infrastructure inconsistency,
-    never a reason to rewrite a prior `COMPLETE` in place.
+    input makes the primary carrier emit `GOAL_PLAN:CARRIER_INFRA` and fail; its
+    separate `outcome=fail` edge routes to `InfraCarrier`, which records
+    escalation evidence and, on successful validation, emits
+    `GOAL_PLAN:INFRA_FAILURE` without changing result. A mismatch is
+    infrastructure inconsistency, never a reason to rewrite a prior `COMPLETE`
+    in place.
 
 Reconciliation is idempotent. It skips work only when durable evidence and real
 state agree. Ambiguous or contradictory infrastructure state fails loudly as
@@ -3876,11 +3890,13 @@ one routing token as its last non-empty stdout line, with no prose after it:
 | `ABORTED` | `TERMINAL_FINALIZED:ABORTED` |
 
 The finalizer completes its writes successfully so the graph can route on
-`tool.last_line`; it never prints a `GOAL_PLAN:*` token. Only the explicit
+`context.tool.last_line`; it never prints a `GOAL_PLAN:*` token. Only the explicit
 terminal carriers publish those caller-facing tokens. `COMPLETE` is the only
-successful and deliverable outcome. The other three remain distinct
-non-success, evidence-bearing outcomes rather than aliases for a generic
-failure.
+successful and deliverable workflow outcome. A valid carrier command exits `0`
+so its exact token edge is reachable; that tool success is a routing fact only
+and does not reclassify `RESIDUALS_READY`, `INFRA_FAILURE`, or `ABORTED` as
+workflow success. Those three remain distinct non-success, evidence-bearing
+outcomes rather than aliases for a generic failure.
 
 If trusted-runtime validation fails before or during the finalizer, it writes no
 valid finalizer record and cannot claim `result.json`, status, routing token,
@@ -3917,60 +3933,68 @@ identity, and carrier definition hash, then writes one immutable
 replace, repair, or mutate `result.json`, `goal_plan.status`, cleanup evidence,
 or finalizer evidence.
 
-The exact outcomes are:
+The exact successful-validation outcomes are:
 
-| Node | Valid result/status | Last line | Exit/outcome |
+| Node | Valid result/status | Last line | Tool exit/outcome |
 |---|---|---|---|
 | `CompleteCarrier` | `COMPLETE` | `GOAL_PLAN:COMPLETE` | `0` / `success` |
-| `ResidualsCarrier` | `RESIDUALS_READY` | `GOAL_PLAN:RESIDUALS_READY` | `20` / `fail` |
-| `InfraCarrier` | `INFRA_FAILURE`, or a bound carrier-escalation record for missing/mismatched terminal input | `GOAL_PLAN:INFRA_FAILURE` | `21` / `fail` |
-| `AbortedCarrier` | `ABORTED` | `GOAL_PLAN:ABORTED` | `22` / `fail` |
+| `ResidualsCarrier` | `RESIDUALS_READY` | `GOAL_PLAN:RESIDUALS_READY` | `0` / `success` |
+| `InfraCarrier` | `INFRA_FAILURE`, or a bound carrier-escalation record for missing/mismatched terminal input | `GOAL_PLAN:INFRA_FAILURE` | `0` / `success` |
+| `AbortedCarrier` | `ABORTED` | `GOAL_PLAN:ABORTED` | `0` / `success` |
 
 For `CompleteCarrier`, `ResidualsCarrier`, or `AbortedCarrier`, a missing result,
 schema/status/hash/token mismatch, or evidence mismatch writes carrier
 validation-failure evidence, prints exact `GOAL_PLAN:CARRIER_INFRA`, and exits
-`21`; the graph routes that failure to `InfraCarrier`. `InfraCarrier` repeats
-all available validation, binds the prior carrier evidence, records whether a
-valid `INFRA_FAILURE` result existed or terminal input was missing/mismatched,
-prints `GOAL_PLAN:INFRA_FAILURE`, and exits `21`. It reports the infrastructure
-failure without changing the immutable result.
+nonzero; the graph routes that command failure solely through its separate
+`condition="outcome=fail"` edge to `InfraCarrier`, not through a token edge.
+`InfraCarrier` repeats all available validation, binds the prior carrier
+evidence, records whether a valid `INFRA_FAILURE` result existed or terminal
+input was missing/mismatched, prints `GOAL_PLAN:INFRA_FAILURE`, and exits `0`
+when that infrastructure disposition is successfully published. It reports the
+infrastructure failure without changing the immutable result. If
+`InfraCarrier` itself fails as a command, its separate `outcome=fail` edge
+reaches `TerminalExit` as a raw infrastructure failure and no valid
+`GOAL_PLAN:INFRA_FAILURE` token match is claimed.
 
 The parent DOT contains one terminal node
 `TerminalExit [shape=Msquare]` and these normative edges:
 
 ```dot
 TerminalFinalizer -> CompleteCarrier
-  [condition="tool.last_line == 'TERMINAL_FINALIZED:COMPLETE'"];
+  [condition="context.tool.last_line=TERMINAL_FINALIZED:COMPLETE && outcome=success"];
 TerminalFinalizer -> ResidualsCarrier
-  [condition="tool.last_line == 'TERMINAL_FINALIZED:RESIDUALS_READY'"];
+  [condition="context.tool.last_line=TERMINAL_FINALIZED:RESIDUALS_READY && outcome=success"];
 TerminalFinalizer -> InfraCarrier
-  [condition="tool.last_line == 'TERMINAL_FINALIZED:INFRA_FAILURE'"];
+  [condition="context.tool.last_line=TERMINAL_FINALIZED:INFRA_FAILURE && outcome=success"];
 TerminalFinalizer -> AbortedCarrier
-  [condition="tool.last_line == 'TERMINAL_FINALIZED:ABORTED'"];
-TerminalFinalizer -> InfraCarrier [outcome=fail];
+  [condition="context.tool.last_line=TERMINAL_FINALIZED:ABORTED && outcome=success"];
+TerminalFinalizer -> InfraCarrier [condition="outcome=fail"];
 
-CompleteCarrier -> TerminalExit [outcome=success];
-CompleteCarrier -> InfraCarrier [outcome=fail];
+CompleteCarrier -> TerminalExit
+  [condition="context.tool.last_line=GOAL_PLAN:COMPLETE && outcome=success"];
+CompleteCarrier -> InfraCarrier [condition="outcome=fail"];
 
 ResidualsCarrier -> TerminalExit
-  [outcome=fail,
-   condition="tool.last_line == 'GOAL_PLAN:RESIDUALS_READY'"];
-ResidualsCarrier -> InfraCarrier
-  [outcome=fail,
-   condition="tool.last_line == 'GOAL_PLAN:CARRIER_INFRA'"];
+  [condition="context.tool.last_line=GOAL_PLAN:RESIDUALS_READY && outcome=success"];
+ResidualsCarrier -> InfraCarrier [condition="outcome=fail"];
 
 AbortedCarrier -> TerminalExit
-  [outcome=fail, condition="tool.last_line == 'GOAL_PLAN:ABORTED'"];
-AbortedCarrier -> InfraCarrier
-  [outcome=fail,
-   condition="tool.last_line == 'GOAL_PLAN:CARRIER_INFRA'"];
+  [condition="context.tool.last_line=GOAL_PLAN:ABORTED && outcome=success"];
+AbortedCarrier -> InfraCarrier [condition="outcome=fail"];
 
-InfraCarrier -> TerminalExit [outcome=fail];
+InfraCarrier -> TerminalExit
+  [condition="context.tool.last_line=GOAL_PLAN:INFRA_FAILURE && outcome=success"];
+InfraCarrier -> TerminalExit [condition="outcome=fail"];
 ```
 
-Thus every non-success carrier reaches the terminal `Msquare` on
-`outcome=fail`; validation faults route through `InfraCarrier`; and no carrier
-depends on a nonexistent success edge, a “successful failure” sentinel, or a
+Thus every finalizer/carrier token edge uses the canonical Attractor context
+syntax and requires a successful tool outcome. Semantic workflow disposition
+comes from the immutable status/token, not by treating a valid non-success
+status as a crashed command. Every command failure has a separate explicit
+`condition="outcome=fail"` edge: finalizer and primary-carrier faults route
+through `InfraCarrier`, while failure of `InfraCarrier` itself reaches the
+terminal `Msquare` as raw infrastructure failure. No carrier depends on an
+unsupported expression, a “successful failure” sentinel, or a
 `no_matching_edge` dead end.
 
 There is no post-terminal repository/process/worktree cleanup phase. After
@@ -3981,8 +4005,9 @@ conditions capable of changing it to `INFRA_FAILURE` are resolved inside
 `PreTerminalCleanup` first.
 
 The carrier edges above are the exact terminal routing contract; implementations
-must preserve the node IDs, status/token map, exit codes, evidence paths, and
-explicit `outcome=fail` routes.
+must preserve the node IDs, status/token map, successful-validation exit `0`,
+evidence paths, exact token-edge conditions, and separate explicit
+`condition="outcome=fail"` routes.
 
 ## PR Delivery
 
@@ -4323,10 +4348,10 @@ orchestration behavior, not a library-only change.
 | Dirty child verification cannot manufacture product state | Unit + dirty-worktree live faults | `ChildAttemptVerifierEnvelope` snapshots exact post-attempt HEAD/index/staged/full tracked-untracked-ignored filesystem/compiled source, runs read-only with external output root, and proves exact equality afterward; mutation-plus-pass is discarded as INFRA while a normal dirty read-only control preserves state. |
 | Parent runner is bound to `target_repo` | Trusted-launcher/admission/recovery faults | Exact `launch-parent` validates canonical parent argv JSON, calls `chdir(realpath(target_repo))`, and `execve`s without a shell; `/proc/self/cwd`, runner `--cwd .`, and canonical target repo are equal; parent DOT realpath/hash and immutable launcher/argv/provider/process/logs evidence agree before mutation. |
 | Terminal runtime remains trustworthy after source failure | First-admission + live mutation/recovery faults | Checked-out bootstrap/runtime/supervisor bytes equal exact plan/manifest/Git blobs before mutation; only the external bootstrap materializes sealed runtime/supervisor copies and `trusted-runtime-binding.json` from `cat-file blob`; every later safety command uses external runtime prefixes; source mutation reaches external-only final INFRA evidence, while launcher/runtime/interpreter/hash drift blocks action. |
-| Final proof, cleanup, and carrier order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep` -> optional delivery -> intended status -> `PreTerminalCleanup` -> immutable finalizer -> exact carrier; COMPLETE exits 0, every non-success carrier reaches `Msquare` on outcome=fail. |
+| Final proof, cleanup, and carrier order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep` -> optional delivery -> intended status -> `PreTerminalCleanup` -> immutable finalizer -> exact carrier; all eight finalizer/carrier token edges use canonical context syntax plus tool success, semantic non-success remains explicit in the exact token, and every command failure takes a separate infrastructure route. |
 | Long polling cannot exhaust engine steps prematurely | Static arithmetic + timed live run | Recomputed branch inequality, parent total-step inequality, exact 30-second poll argv, identity checks, and observed deadline-capped waits. |
 | Delivery preserves verified source and branch identity | Live Git/remote probe | Canonical `delivery_branch` passes `check-ref-format`, local branch is created only from exact final HEAD, unexplained/mismatched collisions fail before network mutation, idempotent same-run exact-head remote state is accepted, no force push occurs, and disposable worktree/remote PR retain exact final HEAD. |
-| Harness-only blocked results are distinct from graph terminals | Prelaunch/recovery + caller contract tests | Prelaunch/recovery write exact external result schema, print exact blocked token, and exit 78 before graph; in-graph carriers alone print `GOAL_PLAN:*`, validate immutable final result, and use their documented success/failure exits. |
+| Harness-only blocked results are distinct from graph terminals | Prelaunch/recovery + caller contract tests | Prelaunch/recovery write exact external result schema, print exact blocked token, and exit 78 before graph; in-graph carriers alone print `GOAL_PLAN:*`, validate immutable final result, return tool success only after valid publication, and route command failure separately. |
 | Trusted-launcher, child-runner, trusted-supervisor, and provider identity cannot drift | Admission/recovery faults | Allowed launcher/child-runner forms and exact external launcher/supervisor prefixes pass; PATH/shell/executable/interpreter/source-blob/external-script/hash/permission/environment/CLI/schema/subcommand/flag/credential faults and any binding/prefix/provider change on resume fail before mutation. |
 | Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; fresh all-green trusted-runtime/parent/target-source/compiled gates grant `FULL`; a green trusted runtime plus red repository/source binding grants `EXTERNAL_ONLY`; red trusted runtime grants `NONE`; complete removes exact run-owned worktrees only under `FULL`; residual preserves only named `PRESERVED_RESIDUAL` entries under `FULL`; restricted cleanup touches no Git state, may stop only fully procfs-identity-valid process groups, records skipped/unresolved resources, and publishes no terminal first. |
 | Approval modes are operationally honest | Standalone admission probes | Preapproved unattended headless passes; required attached standalone console/TTY passes; required without TTY or on unattended/hosted headless execution fails before mutation. |
@@ -4351,13 +4376,23 @@ orchestration behavior, not a library-only change.
 4. Audit the implementation against every item in `docs/RUBRIC.md`.
 5. Confirm all deterministic routes use observed state and explicit failure
    edges; no LLM judgment gate uses `shape=diamond`.
-6. Confirm every terminal is reachable and routes explicitly to the exit.
+6. Parse the generated parent DOT and assert all eight terminal token edges use
+   exact `condition="context.tool.last_line=<TOKEN> && outcome=success"` syntax:
+   four `TERMINAL_FINALIZED:*` finalizer-to-carrier edges and four
+   `GOAL_PLAN:*` carrier-validation edges, one for each of `COMPLETE`,
+   `RESIDUALS_READY`, `INFRA_FAILURE`, and `ABORTED`. Assert every tool source
+   also has a separate exact `condition="outcome=fail"` route to infrastructure
+   handling. Reject every legacy unqualified last-line equality expression,
+   quoted-token equality syntax, bare token edge without `&& outcome=success`,
+   or combined token/failure edge.
+   Confirm every terminal is reachable and routes explicitly to the exit.
 7. Confirm the README and companion guide describe the actual graph.
 8. Validate the aggregate-verifier evidence schema, all verification kinds,
    exit/token normalization, child-attempt and parent envelope
    schemas/hashes/token maps, verifier-hash guard, fresh-review schema,
-   finalizer routing-token map, exact four-carrier status/token/exit/evidence
-   map, and two-attempt delivery ledger.
+   finalizer routing-token map, exact four-carrier
+   status/token/successful-validation/failure-route/evidence map, and
+   two-attempt delivery ledger.
 9. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
    graph/plan correspondence, both target-repository identity modes,
    required external launch-descriptor schema/hash/path/plan-blob identity,
@@ -4490,8 +4525,9 @@ orchestration behavior, not a library-only change.
     ordering before `result.json`, `goal_plan.status`, finalizer routing token,
     and CLI carrier publication. Validate exact `CompleteCarrier`,
     `ResidualsCarrier`, `InfraCarrier`, `AbortedCarrier`, result/hash/token
-    validation, immutable carrier evidence, exit codes `0/20/21/22`, INFRA
-    escalation, and every explicit `outcome=fail` edge to terminal `Msquare`.
+    validation, immutable carrier evidence, exact successful token conditions
+    with tool exit `0`, INFRA escalation, and every separate explicit
+    `condition="outcome=fail"` edge to infrastructure handling.
 25. Validate canonical `delivery_branch` with descriptor-bound
     `git check-ref-format --branch`, exact full ref/remote/refspec/definition
     hash in plan/DOT/launch/result/ledger/recovery, absent-branch creation at
@@ -4968,11 +5004,14 @@ The implementation is not ready until live probes also demonstrate:
   rejected if it creates `.resolve`;
 - restarting after remote PR creation discovers the existing PR and the parent
   independently verifies its exact final head instead of opening another;
-- each valid final result routes to its exact carrier: COMPLETE exits `0`, while
-  RESIDUALS/INFRA/ABORTED exit `20`/`21`/`22` and reach terminal `Msquare` on
-  `outcome=fail`; deleting or hash/status/token-mismatching carrier input routes
-  through `InfraCarrier`, writes external carrier evidence, emits
-  `GOAL_PLAN:INFRA_FAILURE`, and never changes `result.json`;
+- each valid final result routes to its exact carrier through
+  `context.tool.last_line=TERMINAL_FINALIZED:<STATUS> && outcome=success`; every
+  carrier validates and emits its unchanged `GOAL_PLAN:*` token with tool exit
+  `0`, and the matching carrier-validation edge requires the exact token plus
+  `&& outcome=success`. Deleting or hash/status/token-mismatching carrier input
+  takes the separate `condition="outcome=fail"` route through `InfraCarrier`,
+  writes external carrier evidence, emits `GOAL_PLAN:INFRA_FAILURE`, and never
+  changes `result.json`;
 - prelaunch and recovery descriptor faults each produce only their exact
   harness-owned external result, exact blocked token, and exit `78`, with no
   parent graph, finalizer, carrier, or `GOAL_PLAN:*` token;
