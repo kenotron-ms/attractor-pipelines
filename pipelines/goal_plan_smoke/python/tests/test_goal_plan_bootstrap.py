@@ -458,6 +458,13 @@ def harness(tmp_path: Path) -> Harness:
         },
         "provider": "test-provider",
         "attractor_runner_argv_prefix": ["/opt/goal-plan-test-attractor"],
+        "attractor_runner_identity": {
+            "schema_version": "goal-plan.attractor-runner-identity/v1",
+            "argv_prefix_sha256": digest(canonical(["/opt/goal-plan-test-attractor"])),
+            "module_name": None,
+            "expected_doctor_contract": "amplifier_module_pipeline_runner.doctor/v1",
+            "required_run_flags": ["--provider"],
+        },
         "parent_runner_invocation": parent_invocation,
         "approval_mode": "preapproved",
         "delivery_mode": "none",

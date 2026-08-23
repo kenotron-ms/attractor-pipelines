@@ -15,11 +15,10 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import stat
 import subprocess
 import sys
-import urllib.parse
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -1046,20 +1045,49 @@ def _normalize_fetch_remote(value: str) -> str:
     port: int | None
     path: str
     if "://" in remote:
-        parsed = urllib.parse.urlsplit(remote)
-        if parsed.scheme not in {"https", "ssh"} or not parsed.hostname:
+        scheme, _, rest = remote.partition("://")
+        scheme = scheme.lower()
+        if scheme not in {"https", "ssh"}:
             _fail(code, "fetch remote must use HTTPS, ssh://, or scp-like SSH")
-        if parsed.query or parsed.fragment:
+        if "?" in rest or "#" in rest:
             _fail(code, "fetch remote may not contain query or fragment")
-        host = parsed.hostname.lower()
-        try:
-            port = parsed.port
-        except ValueError:
-            _fail(code, "fetch remote port is invalid")
-        default_port = 443 if parsed.scheme == "https" else 22
+        if "/" in rest:
+            authority, _, path_part = rest.partition("/")
+            path = "/" + path_part
+        else:
+            authority, path = rest, ""
+        if "@" in authority:
+            _, _, authority = authority.rpartition("@")
+        if not authority:
+            _fail(code, "fetch remote must use HTTPS, ssh://, or scp-like SSH")
+        if authority.startswith("["):
+            end = authority.find("]")
+            if end == -1:
+                _fail(code, "fetch remote must use HTTPS, ssh://, or scp-like SSH")
+            host = authority[1:end]
+            remainder = authority[end + 1 :]
+            if remainder.startswith(":"):
+                port_text = remainder[1:]
+            elif remainder == "":
+                port_text = ""
+            else:
+                _fail(code, "fetch remote must use HTTPS, ssh://, or scp-like SSH")
+        elif ":" in authority:
+            host, _, port_text = authority.partition(":")
+        else:
+            host, port_text = authority, ""
+        if not host:
+            _fail(code, "fetch remote must use HTTPS, ssh://, or scp-like SSH")
+        host = host.lower()
+        if port_text:
+            if not port_text.isdigit() or int(port_text) > 65535:
+                _fail(code, "fetch remote port is invalid")
+            port = int(port_text)
+        else:
+            port = None
+        default_port = 443 if scheme == "https" else 22
         if port == default_port:
             port = None
-        path = parsed.path
     else:
         match = re.fullmatch(r"(?:[^/@:\s]+@)?([^/@:\s]+):(.+)", remote)
         if match is None:
@@ -1068,8 +1096,7 @@ def _normalize_fetch_remote(value: str) -> str:
         port = None
         path = match.group(2)
     normalized_path = path.strip("/")
-    if normalized_path.endswith(".git"):
-        normalized_path = normalized_path[:-4]
+    normalized_path = normalized_path.removesuffix(".git")
     if not normalized_path or any(
         part in {"", ".", ".."} for part in normalized_path.split("/")
     ):
@@ -1085,10 +1112,9 @@ def _validate_remote_repository_identity(
     expected = _require_string(
         identity["expected_fetch_remote"], code, "expected fetch remote"
     )
-    if (
-        re.fullmatch(r"[a-z0-9.-]+(?::[1-9][0-9]{0,4})?/.+", expected) is None
-        or expected.endswith(".git")
-    ):
+    if re.fullmatch(
+        r"[a-z0-9.-]+(?::[1-9][0-9]{0,4})?/.+", expected
+    ) is None or expected.endswith(".git"):
         _fail(code, "expected fetch remote is not canonical host[:port]/path")
     remote_name = identity["remote_name"]
     if remote_name is not None and (
