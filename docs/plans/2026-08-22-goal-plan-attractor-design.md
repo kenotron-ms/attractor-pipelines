@@ -113,8 +113,9 @@ Execution is intentionally hierarchical. The parent Attractor graph owns batch
 admission, static dependency waves, process supervision, parent verification,
 integration, aggregate/coherence gates, recovery, terminals, and delivery. One
 separate headless child Attractor process owns each lane's bounded correction
-cycle. This is parent/child Attractor composition, not nested app-cli `/goal`
-orchestration.
+cycle; the same supervised-child boundary owns integration-correction and
+delivery runs. This is parent/child Attractor composition, not nested app-cli
+`/goal` orchestration.
 
 ## Goals
 
@@ -122,11 +123,17 @@ orchestration.
 - Preserve adaptive, feedback-informed goal pursuit inside each bounded lane.
 - Isolate concurrent lanes in separate git worktrees and separate headless
   child Attractor processes whose OS working directories are those worktrees.
-- Supervise every child through one accountable long-lived per-lane reaper,
+- Supervise every child through one accountable long-lived per-child reaper,
   durable intent/ledger/ack/result records, logs, timeouts, process-group
   cancellation, and restart reconciliation.
-- Enforce concurrent run-wide attempts and deadline through one locked external
-  budget ledger.
+- Enforce verification-bearing adaptive attempts, separately bounded process
+  launches, and the run-wide deadline through one locked external budget
+  ledger.
+- Require every lane and integration-correction child to execute a deterministic
+  `ReserveGlobalAttempt` node before each adaptive attempt; process
+  starts/restarts never stand in for attempt accounting.
+- Launch every lane, integration-correction, and delivery child from one
+  immutable `attractor_runner_argv_prefix` with the exact compiled `provider`.
 - Separate the approved product baseline from the later execution-source commit
   that contains the complete compiled pipeline, and bind both identities through
   every runtime and evidence boundary.
@@ -139,14 +146,17 @@ orchestration.
   envelope.
 - Enforce declared path ownership before integration.
 - Integrate passing lane commits sequentially.
-- Run the aggregate verifier through the same envelope after every integration
-  and again at final HEAD.
+- Run the aggregate verifier through the same envelope after every integration,
+  before every coherence review, and after the final all-lane sweep.
 - Run a fresh cross-lane coherence review against the fully integrated result.
 - Route late multi-owner findings through one bounded integration-branch
   correction loop.
-- Rerun every lane verifier through the envelope against exact final integration
+- After coherence passes, rerun every lane verifier at one exact final
+  integration HEAD, then require `final-aggregate-after-sweep` at that same
   HEAD before completion.
-- Optionally deliver one PR through the proven `deliver_pr.dot` pattern and
+- Optionally deliver one PR by adapting the proven `deliver_pr.dot` topology
+  into a supervised child running in a clean disposable final-HEAD worktree
+  whose generated state is rooted only at external `delivery_state_root`, then
   independently verify that the remote PR points at the exact integrated HEAD.
 - Recover by reconciling durable state with real git, worktree, verifier,
   merge, and remote PR state.
@@ -238,7 +248,7 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 
 | Field | Type and invariant |
 |---|---|
-| `schema_version` | String with exact value `goal-plan.plan/v1`. |
+| `schema_version` | String with exact value `goal-plan.plan/v2`. |
 | `plan_id` | Slug string equal to `PLAN_SLUG`; stable across runs of the same compiled plan. |
 | `source_request` | Non-empty string containing the originating request or its durable reference. |
 | `target_repo` | Object with `vcs: "git"`, `identity_mode: "remote"` or `"history_anchor"`, and the mode-specific fields defined below. |
@@ -250,7 +260,13 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `integration_seams` | Array of repository-relative path patterns explicitly writable by late integration correction. No pattern may equal, contain, or overlap `pipelines/PLAN_SLUG/**`. |
 | `verifier_execution_envelope` | Shared immutable `VerifierExecutionEnvelope` contract defined below, including checked-in implementation path/hash, canonical HEAD/status commands, output-root policy, evidence schema, token mapping, and `definition_sha256`. |
 | `aggregate_verifier` | Aggregate-verifier contract defined below. |
-| `global_budgets` | Object with positive integer `max_total_attempts`, positive integer `max_integration_corrections`, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v1`, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, and budget-ledger implementation hash. |
+| `attractor_runner_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/path/to/attractor"]` or `["/absolute/path/to/python", "-m", "amplifier_module_pipeline_runner.cli"]`. PATH lookup, `/usr/bin/env`, relative executables, wrapper shell strings, and extra prefix tokens are forbidden. |
+| `attractor_runner_identity` | Object binding the prefix's canonical JSON SHA-256, executable realpath/hash, exact module name, module-source realpath/hash, expected `doctor` contract, and required `run` flags. |
+| `provider` | Non-empty compiled provider ID. Every parent-spawned lane, correction, and delivery runner argv contains exact `--provider <provider>`; the value is immutable across restart/resume. |
+| `integration_correction_child` | Immutable child-pipeline path/hash, exact prefix/provider/argv contract, `integration_worktree` CWD policy, positive `max_child_seconds`, result schema, and process-supervision contract for bounded integration correction. |
+| `delivery_child` | Required only for `delivery_mode: "pr"`; immutable adapted `deliver_pr.dot` path/hash, exact prefix/provider/argv contract, `delivery_worktree` CWD policy, positive `max_child_seconds`, external-state policy, delivery-result schema, and process-supervision contract. Forbidden for `delivery_mode: "none"`. |
+| `engine_step_budget` | Object with exact positive integers `poll_wait_seconds: 30` and `engine_step_multiplier: 50`; compiled parent node/step totals; and, for every lane, correction, and delivery branch, `branch_nonpoll_steps`, `branch_node_count`, and `max_poll_cycles`. |
+| `global_budgets` | Object with positive integer `max_total_attempts` for verification-bearing adaptive attempts only, positive integer `max_process_launches` for supervisor starts/restarts, positive integer `max_integration_corrections`, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v2`, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, and budget-ledger implementation hash. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
 | `delivery_mode` | Enum string `none` or `pr`. |
 
@@ -336,9 +352,9 @@ Each `lanes` entry contains:
 | `dependencies` | Array of lane IDs; references must exist and form an acyclic graph. |
 | `verifier` | Object with exactly one of non-empty argv, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "candidate_verification_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; `write_policy: "read_only"`; mandatory `--output-root {verifier_output_root}` argv interface and required containment environment; evidence schema version `goal-plan.lane-verifier/v1`; exit/token mapping; `envelope_definition_sha256`; and `definition_sha256`. |
 | `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
-| `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v1`, and a hash binding those immutable values. |
-| `budgets` | Object with positive integer `max_attempts` and positive integer `max_child_seconds`. |
-| `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v2"`, `platform: "linux"`, `mode: "per_lane_reaper"`, repository-relative `supervisor_path`, exact `supervisor_sha256`, positive integer `poll_interval_seconds`, `pre_ledger_reconciliation_timeout_seconds`, and `term_grace_seconds`; canonical supervisor/child procfs identity requirements; deterministic intent/ledger/ack/result paths; control-client schemas/tokens; and supervisor-definition hash. |
+| `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v2`, and a hash binding those immutable values. |
+| `budgets` | Object with positive integer `max_attempts` for local verification-bearing adaptive attempts and positive integer `max_child_seconds`. Process launches are not attempts. |
+| `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v3"`, `platform: "linux"`, `mode: "per_child_reaper"`, repository-relative `supervisor_path`, exact `supervisor_sha256`, exact positive integer `poll_wait_seconds: 30`, `pre_ledger_reconciliation_timeout_seconds`, and `term_grace_seconds`; canonical supervisor/child procfs identity requirements; deterministic intent/ledger/ack/result paths; control-client schemas/tokens; and supervisor-definition hash. |
 
 The composition layer owns decomposition, collision analysis, all typed values
 above, and plan approval or explicit preapproval. It writes `plan.json`
@@ -348,34 +364,44 @@ The child launch command is an exact argv-array template, never a freeform shell
 string. The parent mints:
 
 ```text
-process_run_id = PLAN_ID/RUN_ID/LANE_ID/LAUNCH_ATTEMPT
+process_run_id = PLAN_ID/RUN_ID/PROCESS_KIND/PROCESS_ID/PROCESS_LAUNCH
 ```
 
-where every component is the already-validated slug or positive decimal launch
-attempt. This is the durable process-run identifier. Individual child box
-session IDs are optional observability and never identity or completion
-evidence.
+`PROCESS_KIND` is exactly `lane`, `correction`, or `delivery`;
+`PROCESS_ID` is the validated lane/correction/delivery ID; and
+`PROCESS_LAUNCH` is the positive decimal process-launch ordinal. This is the
+durable process-run identifier. It is intentionally independent from local
+adaptive-attempt numbers. Individual child box-session IDs are optional
+observability and never identity or completion evidence.
 
-After resolving typed placeholders, argv has exactly this order:
+After resolving typed parameters, argv has exactly this order:
 
 ```text
-attractor
+<each token of attractor_runner_argv_prefix>
 run
 <repo-relative-child-dot>
+--provider
+<compiled-provider>
 --cwd
 .
 --logs-root
-<absolute state_root/lanes/<lane-id>/runs/<launch-attempt>/attractor-run>
+<absolute state_root/lanes/<lane-id>/runs/<process-launch>/attractor-run>
+--on-human-gate
+fail
 --param lane_id=<lane-id>
---param process_run_id=<plan-id>/<run-id>/<lane-id>/<launch-attempt>
+--param process_run_id=<plan-id>/<run-id>/lane/<lane-id>/<process-launch>
 --param lane_state_root=<absolute state_root/lanes/<lane-id>>
 --param lane_result_path=<absolute lane-attempt-root/lane-result.json>
 --param lane_feedback_path=<absolute lane-state-root/feedback/current.md>
---param lane_attempt_root=<absolute state_root/lanes/<lane-id>/runs/<launch-attempt>>
+--param lane_attempt_root=<absolute state_root/lanes/<lane-id>/runs/<process-launch>>
 --param lane_contract_snapshot_path=<absolute lane-state-root/contract.json>
+--param run_budget_ledger_path=<absolute state_root/budgets/run-wide.json>
+--param run_budget_lock_path=<absolute state_root/budgets/run-wide.lock>
 --param candidate_branch=<validated lane branch name>
 --param product_base_sha=<full product base SHA>
 --param execution_source_sha=<full execution source SHA>
+--param provider=<compiled-provider>
+--param attractor_runner_argv_prefix_sha256=<full prefix hash>
 --param lane_verifier_definition_sha256=<full verifier contract hash>
 --param ownership_contract_sha256=<full ownership contract hash>
 ```
@@ -383,23 +409,28 @@ run
 The child DOT operand is repository-relative, contains no `..`, and resolves
 under `pipelines/PLAN_SLUG/` in the lane worktree. `--cwd` is the literal token
 `.`. `candidate_branch`, IDs, and SHA/hash params are typed strings with the
-validation stated above. `--logs-root` and every path-valued `--param` are
+validation stated above. `--provider` is always explicit and equals the
+immutable compiled `provider`; `--on-human-gate fail` prevents an unattended
+child from inventing approval. `--logs-root` and every path-valued `--param` are
 absolute, `realpath`-canonicalized, and must resolve beneath that lane's
-run-scoped `state_root/lanes/<lane-id>/`; none may resolve beneath immutable
-source. No additional child parameter is permitted unless a new compiled-plan
-revision adds it to this ordered schema and changes the launch-contract hash.
+run-scoped `state_root/lanes/<lane-id>/`, except the two exact shared budget
+paths beneath `state_root/budgets/`; none may resolve beneath immutable source.
+No additional child parameter is permitted unless a new compiled-plan revision
+adds it to this ordered schema and changes the launch-contract hash.
 
 The launch environment is also closed and hashed. The plan declares the exact
 allowed environment-key set. The ledger records non-secret values directly and
 sensitive values only as `sha256(value)`; a canonical environment hash covers
 the complete key set and value/value-hash representation. The immutable
-launch-contract hash covers executable identity policy, ordered argv template,
-typed parameter schema, environment policy, child DOT hash, symbolic
-`lane_worktree` CWD policy, and expected lane-result schema.
+launch-contract hash covers the exact runner-prefix tokens/hash, executable and
+module/source identity, compiled provider, ordered argv template, typed
+parameter schema, environment policy, child DOT hash, symbolic `lane_worktree`
+CWD policy, shared budget-ledger paths, and expected lane-result schema.
 
-At launch, the parent records the resolved executable realpath, exact argv,
-environment hash, lane-worktree realpath, `process_run_id`, and a
-`launch_command_sha256` over their canonical serialization. Plan/DOT
+At launch, the parent records the prefix hash, resolved executable and module
+source realpaths/hashes, provider, exact argv, environment hash, lane-worktree
+realpath, `process_run_id`, and a `launch_command_sha256` over their canonical
+serialization. Plan/DOT
 correspondence validates the immutable template and parameter ordering;
 runtime admission and the process ledger bind the resolved values. Extra argv,
 environment keys, parameter reordering, or path escape is `INFRA_FAILURE`.
@@ -419,15 +450,23 @@ fall back to writing generated state beside `goal_lane.dot`.
 - every dependency edge;
 - the full integration-order chain;
 - every lane, integration-correction, run-wide, and duration budget;
+- `max_total_attempts` as adaptive verifier-bearing work and
+  `max_process_launches` as the separate supervisor-start/restart ceiling;
+- exact `poll_wait_seconds="30"`, `engine_step_multiplier="50"`, every
+  branch's compiled non-poll/node/poll-cycle values, and parent total-step
+  bound;
 - the literal `product_base_sha` and the `execution_source_sha`
   containing-commit binding contract;
 - every child DOT path/hash, launch-command contract, symbolic worktree-CWD
   policy, exact ordered parameter schema, expected child-evidence schema, and
   Linux process-supervision policy;
+- exact `attractor_runner_argv_prefix` hash/module/source identity and compiled
+  `provider`;
 - the shared verifier-envelope definition hash, canonical commands, and
   read-only/external-output policies;
 - the aggregate-verifier definition hash;
-- approval and delivery modes; and
+- approval mode/transport requirements, delivery mode, and external
+  `delivery_state_root` policy; and
 - all terminal and correction routes.
 
 Embedding the exact `execution_source_sha` inside the commit it identifies would
@@ -453,10 +492,26 @@ Admission runs before approval and before any mutation. It deterministically:
 6. parses the static DOT to require exact correspondence for lane IDs, waves,
    dependency edges, integration order, budget values, aggregate-verifier hash,
    both source-SHA contracts, child launch/monitor nodes, exact child argv/param
-   ordering, child DOT/command/supervision hashes, verifier-envelope hash and
-   policies, approval mode, and delivery mode; and
-7. records the complete compiled-directory byte manifest and its canonical hash
+   ordering, child DOT/command/supervision hashes, exact runner-prefix and
+   provider bindings, engine-step values, verifier-envelope hash and policies,
+   approval mode/transport requirements, delivery mode, and delivery-state
+   policy;
+7. validates the runner without PATH lookup: exact prefix form and canonical
+   prefix hash, executable realpath/hash, module name and source
+   realpath/hash, successful `<prefix> doctor`, required `run --help` flags
+   (`--provider`, `--cwd`, `--logs-root`, `--on-human-gate`, and `--param`),
+   support for the compiled provider, and its required credential; and
+8. records the complete compiled-directory byte manifest and its canonical hash
    under `state_root/admission/`.
+
+For the Python-module prefix, the absolute interpreter runs a deterministic
+`importlib.util.find_spec("amplifier_module_pipeline_runner.cli")` probe and the
+preflight records/rechecks the resolved module source bytes. For the absolute
+console prefix, preflight hashes the console file, resolves its interpreter and
+declared console entry point without PATH search, and performs the same module
+probe in that interpreter. The observed executable/module/source identities
+must equal `attractor_runner_identity`; a console wrapper whose target cannot be
+resolved deterministically is rejected.
 
 A missing file, hash mismatch, schema failure, or graph/plan mismatch aborts
 admission loudly. Admission reads `plan.json` only to audit the already-static
@@ -473,9 +528,50 @@ Each compiled family member accepts only these runtime inputs:
 | `run_id` | Required slug unique within the plan's run directory. |
 | `state_root` | Effective value is a required absolute external path. The caller may omit it only to derive the canonical external user-state default defined below; it is never inside the target repository. |
 | `worktree_root` | Required absolute external path dedicated to this run's lane, integration, and candidate-verification worktrees. It is separate from `state_root`. |
+| `delivery_state_root` | Required absolute external path when `delivery_mode` is `pr`; forbidden when delivery is `none`. It contains delivery child logs, checkpoints, events, ledgers, and evidence and is separate from `state_root`, `worktree_root`, and every Git repository/worktree. |
 | `approval_mode` | Required enum `required` or `preapproved`; must equal the compiled plan value. |
+| `human_gate_transport` | Required enum `none`, `console`, or `host_interviewer`. `preapproved` requires `none`; `required` requires an attached `--on-human-gate console` runner or an available host interviewer capability. |
 | `delivery_mode` | Required enum `none` or `pr`; must equal the compiled plan value. |
 | `github_repo` | `owner/repo` string required only when `delivery_mode` is `pr`; forbidden otherwise. |
+
+The canonical unattended smoke uses the absolute-console prefix form and this
+closed parent argv shape (paths and SHAs shown symbolically):
+
+```text
+/absolute/path/to/attractor
+run
+pipelines/goal_plan_smoke/goal_plan_smoke.dot
+--provider
+anthropic
+--cwd
+.
+--logs-root
+<absolute-state-root>/parent-attractor-run
+--on-human-gate
+fail
+--param target_repo=<absolute-target-repo>
+--param execution_source_sha=<full-containing-sha>
+--param run_id=<run-id>
+--param state_root=<absolute-state-root>
+--param worktree_root=<absolute-worktree-root>
+--param delivery_state_root=<absolute-delivery-state-root>
+--param approval_mode=preapproved
+--param human_gate_transport=none
+--param delivery_mode=pr
+--param github_repo=<owner/repo>
+```
+
+The equally valid Python-module form replaces only the first token with
+`/absolute/path/to/python -m amplifier_module_pipeline_runner.cli`; all remaining
+tokens and their order are unchanged. An interactive required-approval
+invocation changes exactly
+`--on-human-gate fail` to `--on-human-gate console`,
+`approval_mode=preapproved` to `approval_mode=required`, and
+`human_gate_transport=none` to `human_gate_transport=console`. A hosted run
+using `host_interviewer` supplies the interviewer capability through the host
+instead of pretending the standalone CLI has a console. The compiled provider
+is not a runtime override: any other `--provider`, omitted explicit provider, or
+provider change on resume fails admission.
 
 If `state_root` is omitted, preflight derives:
 
@@ -494,37 +590,44 @@ raw remote or filesystem path. If neither an absolute `XDG_STATE_HOME` nor an
 absolute `HOME` is available, admission fails; there is no repository-relative
 or current-directory fallback.
 
-Admission resolves both effective roots through their nearest existing parent,
-rejects symlink escapes, and requires that `state_root` and `worktree_root`:
+Admission resolves every effective root through its nearest existing parent,
+rejects symlink escapes, and requires that `state_root`, `worktree_root`, and,
+when present, `delivery_state_root`:
 
 - are absolute and external;
 - are neither equal to, ancestors of, nor descendants of the target repository
   root, Git common directory, compiled-source directory, or any registered Git
   worktree;
-- are neither equal to nor ancestors/descendants of each other; and
+- are pairwise neither equal to nor ancestors/descendants of each other; and
 - have no existing path component owned by a different run identity.
 
 Preflight rejects non-Linux hosts, missing or unreadable required procfs
-identity files, relative or unsafe roots, mode mismatches, failed
+identity files, relative or unsafe roots, mode/approval-transport mismatches,
+`required` approval in unattended headless execution, failed
 remote/history-anchor identity proofs, reused `run_id` with incompatible state,
-an invalid `product_base_sha`, or an `execution_source_sha` that does not
-contain the exact compiled program being invoked.
+an invalid runner-prefix/provider/credential/doctor/flag preflight, an invalid
+`product_base_sha`, or an `execution_source_sha` that does not contain the exact
+compiled program being invoked. A `preapproved` standalone run is explicitly
+valid in unattended headless execution.
 
 Composition owns the immutable files under `pipelines/PLAN_SLUG/`. Runtime
-reads but never rewrites them. All runtime-created filesystem state and
-evidence live beneath external `state_root`; all Git worktrees live beneath
-external `worktree_root`. Product changes leave worktrees only as explicit Git
-commits and integrations.
+reads but never rewrites them. All ordinary runtime-created filesystem state and
+evidence live beneath external `state_root`; delivery-generated state lives
+beneath external `delivery_state_root`; all Git worktrees live beneath external
+`worktree_root`. Product changes leave worktrees only as explicit Git commits
+and integrations.
 
 Before approval, admission may create and atomically write only beneath
 external `state_root`. It reads Git objects, refs, repository identity, and
 compiled source without mutating them; compiled-source manifests, rendered-plan
 evidence, approval packets, and admission logs are persisted externally.
 `target_repo`, Git refs/branches, the Git common directory, registered
-worktrees, and `worktree_root` remain byte- and state-untouched.
+worktrees, `worktree_root`, and `delivery_state_root` remain byte- and
+state-untouched.
 
 Only after approval or explicit preapproval may the parent create
-`worktree_root`, create branches/worktrees, mutate refs, or launch a process.
+`worktree_root` or `delivery_state_root`, create branches/worktrees, mutate
+refs, or launch a process.
 The integration worktree and every initially prepared lane branch are then
 created at exact `execution_source_sha`. Before a later dependency wave
 launches, its lane branch is advanced only to the current parent-verified
@@ -542,6 +645,7 @@ The runtime graph is responsible for:
 - explicit dependency-wave execution;
 - supervised launch and monitoring of one headless child Attractor process per
   lane;
+- supervised integration-correction and delivery child processes;
 - parent-side evidence checks;
 - sequential integration and rollback of failed candidates;
 - aggregate and coherence gates;
@@ -564,8 +668,9 @@ lexicographically sorted entry for every regular file containing:
 
 Symlinks, submodules, untracked entries, non-regular files, duplicate normalized
 paths, and case-colliding paths are rejected. The manifest includes
-`plan.json`, parent DOT, child lane DOT, supervisor code, verifier definitions,
-delivery subgraph when present, and every other compiled-directory byte. Its
+`plan.json`, parent DOT, lane/correction child DOTs, supervisor code, verifier
+definitions, delivery subgraph when present, and every other
+compiled-directory byte. Its
 `manifest_sha256` covers the canonical JSON excluding only that hash field.
 The manifest itself lives under `state_root`, so it does not create a
 self-hashing source cycle.
@@ -579,9 +684,10 @@ only `COMPILED_SOURCE:PASS` or `COMPILED_SOURCE:INFRA`. The gate runs:
 3. against the candidate commit before parent candidate verification;
 4. against the integration worktree before and after every post-merge aggregate
    envelope, and after every `IntegrationCorrection`;
-5. against all existing run worktrees during restart reconciliation; and
-6. against the integration worktree immediately before finalization or
-   delivery.
+5. against every clean disposable delivery worktree before and after its child;
+6. against all existing run worktrees during restart reconciliation; and
+7. against the integration worktree immediately before finalization or
+   delivery eligibility.
 
 Any missing, added, mode-changed, or byte-changed compiled-source entry is
 `INFRA_FAILURE`. It never enters a lane, integration-correction, or verifier
@@ -595,17 +701,22 @@ Start
   -> Reconcile durable state
   -> Bind typed runtime inputs
   -> Resolve and validate external state_root + worktree_root
+     + conditional delivery_state_root
   -> Admission: validate plan/graph/repo + bind product_base_sha/execution_source_sha
+  -> Validate runner prefix/module/source/doctor/flags + compiled provider credentials
+  -> Validate poll/branch/parent engine-step arithmetic
   -> Persist manifest/render/admission evidence under external state_root only
-  -> Plan approval (or verify explicit preapproval)
+  -> Plan approval through console/host interviewer (or verify explicit preapproval)
   -> Create worktree_root; mint flock-protected run-wide budget/deadline ledger
   -> Prepare integration + Wave 1 worktrees from execution_source_sha
   -> component fan-out
-       -> reserve attempt(A) -> mint intent + launch contract(A)
-            -> Popen reaper(A) in own session -> require ack -> poll(A) loop
+       -> reserve process launch(A) -> mint intent + launch contract(A)
+            -> Popen reaper(A) in own session -> require ack
+            -> long-poll(A, --wait-seconds 30) loop
             -> require authoritative supervisor-result(A) -> classify terminal A
-       -> reserve attempt(B) -> mint intent + launch contract(B)
-            -> Popen reaper(B) in own session -> require ack -> poll(B) loop
+       -> reserve process launch(B) -> mint intent + launch contract(B)
+            -> Popen reaper(B) in own session -> require ack
+            -> long-poll(B, --wait-seconds 30) loop
             -> require authoritative supervisor-result(B) -> classify terminal B
        -> missing ledger/ack -> reconcile intent via bounded /proc discovery
        -> vanished reaper without result -> terminate valid orphan child -> INFRA
@@ -627,22 +738,31 @@ Start
        -> on failure: undo candidate merge, return evidence to owning lane
   -> Prepare next explicit dependency wave
   -> ...
-  -> VerifierExecutionEnvelope(final_aggregate, expected final HEAD)
-  -> Fresh cross-lane coherence review at final HEAD
-       -> ITERATE: one IntegrationCorrection on integration branch
+  -> VerifierExecutionEnvelope(pre_coherence_aggregate, expected current HEAD)
+  -> Fresh cross-lane coherence review at that exact HEAD
+       -> ITERATE: reserve process launch for one supervised IntegrationCorrection child
+            -> child ReserveGlobalAttempt -> adaptive correction -> verifier classification
             -> CompiledSourceGate after correction
             -> VerifierExecutionEnvelope for each affected-closure lane
-            -> VerifierExecutionEnvelope(aggregate_after_merge, expected current HEAD)
-            -> fresh coherence review
+            -> VerifierExecutionEnvelope(affected_closure_aggregate, expected current HEAD)
+            -> VerifierExecutionEnvelope(pre_coherence_aggregate, expected current HEAD)
+            -> fresh coherence review at that same HEAD
        -> residual classification when no bounded correction remains
-       -> PASS: VerifierExecutionEnvelope for every final-sweep lane
+       -> PASS: freeze exact final HEAD
+            -> VerifierExecutionEnvelope for every final-sweep lane at frozen HEAD
             -> red: IntegrationCorrection within integration budget
-            -> all green: completion-eligible
+            -> all green: VerifierExecutionEnvelope(final_aggregate_after_sweep)
+               at frozen HEAD
   -> CompiledSourceGate before finalization/delivery
   -> Classify convergence result
-       -> all gates green
+       -> fresh coherence + final sweep + final-aggregate-after-sweep all green
+          at exact final HEAD
             -> delivery disabled -> COMPLETE
-            -> delivery enabled -> deliver_pr.dot
+            -> delivery enabled -> clean disposable final-HEAD delivery worktree
+                 -> pre-HEAD/status/full-filesystem/source gates
+                 -> reserve process launch -> supervised adapted deliver_pr.dot child
+                    with all generated state under delivery_state_root
+                 -> post-HEAD/status/full-filesystem/source gates
                  -> exact-head PR verification -> COMPLETE
                  -> unverifiable delivery -> INFRA_FAILURE
        -> residuals -> residual disposition gate
@@ -658,8 +778,44 @@ wave. Each branch contains its statically named launch and monitor/poll gates.
 Launch nodes start the approved child process and atomically record the process
 ledger; they perform no lane cognition. Monitor gates poll only their compiled
 lane ID until the child is terminal, timed out, cancelled, or inconsistent.
+Each poll is one supervisor long-poll with exact `--wait-seconds 30`, not a
+sleep node or model turn.
 The graph contains no generic "get next lane" operation, dynamic scheduler, or
 work queue.
+
+### Engine-step and long-poll contract
+
+The parent DOT embeds graph attributes `poll_wait_seconds="30"` and
+`engine_step_multiplier="50"`. Composition statically computes, records in
+`plan.json`, and embeds for every lane, correction, and delivery monitor branch:
+
+- `branch_nonpoll_steps`: the conservative maximum deterministic/LLM node
+  executions outside the poll loop for one branch traversal;
+- `branch_node_count`: the exact reachable node count in that static branch;
+  and
+- `max_poll_cycles = ceil(max_child_seconds / poll_wait_seconds)`.
+
+Admission recomputes those values from the immutable DOT and enforces, for every
+branch, exactly:
+
+```text
+ceil(max_child_seconds / poll_wait_seconds) + branch_nonpoll_steps
+  < branch_node_count * 50
+```
+
+It also expands all statically possible branch traversals under
+`max_process_launches`, `max_integration_corrections`, and the two-attempt
+delivery limit, computes `parent_total_step_upper_bound`, and requires:
+
+```text
+parent_total_step_upper_bound < parent_node_count * engine_step_multiplier
+```
+
+A mismatch or non-strict inequality fails admission before mutation. The
+supervisor `poll` client receives exact `--wait-seconds 30`, validates the
+process identities and durable result before and after waiting, and returns
+early on terminal state. Its monotonic wait is capped by the smaller remaining
+lane wall and run-wide deadline, so it never sleeps past either deadline.
 
 ## Lane Contract
 
@@ -675,7 +831,7 @@ Every lane has the following approved, immutable contract:
 | Dependencies | Lane IDs that must be `PASS` and integrated before this lane starts. |
 | Verifier | Exact, non-interactive command with a defined symbolic CWD policy and timeout. The child uses `lane_worktree`; pre-integration parent verification uses a clean detached `candidate_verification_worktree`; post-merge closure and final-sweep verification use `integration_worktree`. Exit zero means the mechanical condition passed; any other result is evidence to classify. |
 | Qualitative criteria | Optional criteria that require an independent judgment gate after the mechanical verifier passes. |
-| Attempt budget | Maximum verification-bearing attempts available to the lane. |
+| Attempt budget | Maximum local verification-bearing adaptive attempts available to the lane. Every one is reserved by `ReserveGlobalAttempt` and consumed only at verifier-record classification; supervisor starts/restarts are separately bounded by run-wide `max_process_launches`. |
 
 A lane may read outside its owned paths as needed to understand the repository,
 but it may not modify outside them. Generated files and repository-wide files
@@ -692,6 +848,8 @@ The lane result must bind evidence to:
 - the approved child DOT and launch-command hashes;
 - the durable process-ledger entry, `process_run_id`, and observed exit
   status;
+- every `ReserveGlobalAttempt` reservation/start/classification record and
+  bound verifier-definition hash;
 - the verifier command and exit status;
 - verifier output;
 - ownership-check output;
@@ -770,9 +928,10 @@ deterministic `VerifierExecutionEnvelope`. It is mandatory for:
 
 - pre-integration candidate lane verification;
 - aggregate verification immediately after each merge;
-- every affected-closure lane and aggregate verification;
+- every affected-closure lane and affected-closure aggregate verification;
+- the pre-coherence aggregate at current HEAD before every coherence review;
 - the final all-lane verifier sweep; and
-- final aggregate verification.
+- `final-aggregate-after-sweep`.
 
 The caller supplies immutable `expected_head_sha`, one symbolic CWD policy, the
 approved verifier argv/hash/timeout, and a run-scoped external evidence
@@ -780,7 +939,8 @@ directory at
 `state_root/verifications/VERIFICATION_KIND/INVOCATION_ID/`. Candidate
 verification selects
 `candidate_verification_worktree`; every aggregate, affected-closure,
-final-sweep, and final-aggregate invocation selects `integration_worktree`.
+final-sweep, pre-coherence aggregate, and
+`final-aggregate-after-sweep` invocation selects `integration_worktree`.
 The caller cannot replace the envelope's HEAD, cleanliness, compiled-source, or
 output-root policies.
 
@@ -807,7 +967,7 @@ and created only beneath approved `state_root`.
 
 `plan.json.verifier_execution_envelope` declares:
 
-- schema version `goal-plan.verifier-envelope-definition/v1`;
+- schema version `goal-plan.verifier-envelope-definition/v2`;
 - checked-in implementation path and content SHA-256;
 - exact HEAD command `git rev-parse --verify HEAD`;
 - exact full non-ignored status command
@@ -817,7 +977,7 @@ and created only beneath approved `state_root`.
 - compiled-source gate definition/hash;
 - exact symbolic CWD policy allowlist;
 - external output-root policy `state_root_only`;
-- evidence schema `goal-plan.verifier-envelope/v1`;
+- evidence schema `goal-plan.verifier-envelope/v2`;
 - verdict/token mapping; and
 - `definition_sha256`.
 
@@ -888,8 +1048,8 @@ Every invocation writes one atomic record with:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.verifier-envelope/v1`. |
-| `invocation_id`, `verification_kind` | Unique run-scoped ID and one of `candidate_lane`, `aggregate_after_merge`, `affected_closure_lane`, `affected_closure_aggregate`, `final_sweep_lane`, or `final_aggregate`. |
+| `schema_version` | Exact value `goal-plan.verifier-envelope/v2`. |
+| `invocation_id`, `verification_kind` | Unique run-scoped ID and one of `candidate_lane`, `aggregate_after_merge`, `affected_closure_lane`, `affected_closure_aggregate`, `pre_coherence_aggregate`, `final_sweep_lane`, or `final_aggregate_after_sweep`. |
 | `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
 | `expected_head_sha`, `pre_head_sha`, `post_head_sha` | Full SHAs; all three must be equal for a non-infrastructure verdict. |
 | `cwd_policy`, `cwd` | Approved symbolic token and canonical worktree realpath. |
@@ -922,9 +1082,12 @@ integration correction and can never become `PASS`.
 ### Child launch and process-supervision contract
 
 `goal_plan_supervisor.py` provides one accountable long-lived reaper process per
-lane launch. It is neither tmux nor a shared daemon/service. Each supervisor
-owns exactly one child Attractor, remains alive until that child is reaped and
-its authoritative result is durable, then exits.
+lane, integration-correction, or delivery process launch. It is neither tmux
+nor a shared daemon/service. Each supervisor owns exactly one child Attractor,
+remains alive until that child is reaped and its authoritative result is
+durable, then exits. Initial starts and all replacement starts use the same
+contract and consume the separately bounded `max_process_launches`; they do not
+consume `max_total_attempts`.
 
 The exact reaper interface is:
 
@@ -935,37 +1098,42 @@ goal_plan_supervisor.py run --contract <absolute launch-contract.json> --intent 
 The short-lived deterministic control-client interfaces are:
 
 ```text
-goal_plan_supervisor.py poll --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --output <absolute poll-result.json>
-goal_plan_supervisor.py terminate --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --reason <token> --output <absolute termination-result.json>
-goal_plan_supervisor.py reconcile --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --output <absolute reconciliation-result.json>
+goal_plan_supervisor.py poll --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --wait-seconds 30 --output <absolute poll-result.json>
+goal_plan_supervisor.py terminate --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --reason <token> --output <absolute termination-result.json>
+goal_plan_supervisor.py reconcile --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --output <absolute reconciliation-result.json>
 ```
 
-All paths are deterministic, absolute, beneath the lane's external state
-directory, and outside every Git worktree. All JSON writes use same-directory
+All paths are deterministic and absolute. Per-process outputs are beneath the
+lane/correction `state_root` namespace or delivery `delivery_state_root`
+namespace; the two shared budget paths are beneath `state_root/budgets/`.
+Everything is outside every Git worktree. All JSON writes use same-directory
 temporary files, fsync, atomic replace, and canonical JSON hashes.
 
 #### Launch intent and parent spawn
 
-After approval and an atomic run-budget reservation, the parent mints
-`launch-intent.json` with schema `goal-plan.launch-intent/v1` before starting
+After approval and an atomic process-launch reservation, the parent mints
+`launch-intent.json` with schema `goal-plan.launch-intent/v2` before starting
 the supervisor. It contains:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.launch-intent/v1`. |
-| `lane_id`, `launch_attempt`, `process_run_id` | Exact approved lane identity and canonical process-run ID. |
+| `schema_version` | Exact value `goal-plan.launch-intent/v2`. |
+| `process_kind`, `process_id`, `process_launch`, `process_run_id` | Exact approved lane/correction/delivery identity, positive process-launch ordinal, and canonical process-run ID. |
 | `launch_contract_path`, `launch_contract_sha256` | Absolute contract path and canonical hash. |
-| `budget_reservation_id` | Exact live reservation from the run-wide budget ledger. |
-| `supervisor_argv`, `supervisor_env`, `supervisor_cwd` | Exact expected reaper argv, closed environment, and canonical lane worktree CWD. The argv and environment both contain exact `process_run_id`; environment key is `GOAL_PLAN_PROCESS_RUN_ID`. |
+| `process_launch_reservation_id` | Exact live process-launch reservation from the run-wide budget ledger; never an adaptive-attempt reservation. |
+| `attractor_runner_argv_prefix_sha256`, `provider` | Exact immutable compiled child-runner prefix hash and provider. |
+| `supervisor_argv`, `supervisor_env`, `supervisor_cwd` | Exact expected reaper argv, closed environment, and canonical lane, integration, or delivery worktree CWD. The argv and environment both contain exact `process_run_id`; environment key is `GOAL_PLAN_PROCESS_RUN_ID`. |
 | `ledger_path`, `ack_path`, `supervisor_result_path` | Exact deterministic absolute output paths. |
 | `identity_policy` | Exact value `goal-plan.linux-procfs-identity/v1`. |
 | `supervisor_command_sha256` | Canonical hash of executable/argv/env/CWD/process-run/contract/output identities. |
 
-The existing `goal-plan.process-launch-contract/v1` remains immutable and
-contains exact child argv/env/CWD, process-run ID, source identities, budget
-reservation, log descriptors, child result/evidence paths, wall timeout, TERM
-grace, and child launch-command hash. Child argv includes exact
-`--param process_run_id=...`; child environment contains exact
+The `goal-plan.process-launch-contract/v2` is immutable and contains exact
+process kind/ID, child `attractor_runner_argv_prefix` tokens/hash,
+executable/module/source identity, provider, closed child argv/env/CWD,
+process-run ID, source identities, process-launch reservation, log descriptors,
+child result/evidence paths, wall timeout, TERM grace, and child launch-command
+hash. Child argv includes exact `--provider`, `--param process_run_id=...`, and
+`--on-human-gate fail`; child environment contains exact
 `GOAL_PLAN_PROCESS_RUN_ID`.
 
 The parent atomically persists the intent, then starts the reaper:
@@ -984,12 +1152,15 @@ This PID is not trusted until ledger/ack identity validation succeeds.
 
 #### Reaper lifecycle and authoritative result
 
-`run` validates intent, contract, reservation, hashes, paths, executable, CWD,
-and output descriptors. Before launching the child, it atomically records its
-own canonical Linux procfs identity in `goal-plan.process-ledger/v2`. It then
+`run` validates intent, contract, process-launch reservation, runner
+prefix/module/source/provider, hashes, paths, executable, CWD, and output
+descriptors. Before launching the child, it atomically records its own canonical
+Linux procfs identity in `goal-plan.process-ledger/v3`. It then
 launches the child Attractor as its direct child in a distinct child process
 group, validates child PID/PGID/procfs identity, records child identity, and
-atomically writes/fsyncs ledger then `goal-plan.launch-ack/v2`.
+atomically writes/fsyncs ledger then `goal-plan.launch-ack/v3`. Creation of the
+reaper or child consumes the process-launch reservation exactly once; only
+proof that no process was created permits `RELEASED_NO_PROCESS`.
 
 The reaper remains alive and calls `wait`/`waitpid` until child termination. It
 alone owns:
@@ -1004,11 +1175,12 @@ alone owns:
 
 After child termination, it proves the child process group is empty, hashes the
 closed logs, and atomically writes `supervisor-result.json` with schema
-`goal-plan.supervisor-result/v1`:
+`goal-plan.supervisor-result/v2`:
 
 | Field | Contract |
 |---|---|
-| `schema_version`, `process_run_id`, `budget_reservation_id` | Exact run identities. |
+| `schema_version`, `process_kind`, `process_id`, `process_run_id`, `process_launch_reservation_id` | Exact run and process-launch identities. |
+| `attractor_runner_argv_prefix_sha256`, `provider` | Exact compiled runner/provider bindings observed by the supervisor. |
 | `intent_sha256`, `launch_contract_sha256`, `ledger_sha256` | Exact bound artifact hashes. |
 | `supervisor_identity`, `final_child_identity` | Canonical validated Linux identities. |
 | `raw_wait_status` | Exact non-negative integer returned by `wait`/`waitpid`. |
@@ -1030,23 +1202,28 @@ procfs identities before observation or signalling. Result schemas reject
 unknown fields and share process-run ID, artifact hashes, observed boottime,
 identities, verdict, and failure reason.
 
-`poll` writes `goal-plan.supervisor-poll/v1` and emits exactly:
+`poll` writes `goal-plan.supervisor-poll/v2`. Exact `--wait-seconds 30` is
+mandatory. The client validates intent, contract, budget ledger, supervisor and
+child identities before waiting; waits internally on durable result/process
+state without model or graph sleep; caps the monotonic wait at the smaller
+remaining child-wall and run-wide deadline; validates identities and result
+again after waking; and emits exactly:
 
 - `SUPERVISOR:POLL_RUNNING`;
 - `SUPERVISOR:POLL_TERMINAL` only for a complete valid supervisor result;
 - `SUPERVISOR:POLL_SUPERVISOR_GONE`; or
 - `SUPERVISOR:POLL_INFRA`.
 
-`terminate` accepts only `global_deadline`, `lane_wall_timeout`,
-`lane_cancelled`, `parent_aborted`, or `recovery_cleanup`. It signals the
+`terminate` accepts only `global_deadline`, `child_wall_timeout`,
+`child_cancelled`, `parent_aborted`, or `recovery_cleanup`. It signals the
 identity-valid supervisor, which forwards/cleans/reaps its child, writes
-`goal-plan.supervisor-termination/v1`, and emits exactly:
+`goal-plan.supervisor-termination/v2`, and emits exactly:
 
 - `SUPERVISOR:TERMINATION_REQUESTED`;
 - `SUPERVISOR:ALREADY_TERMINAL`; or
 - `SUPERVISOR:TERMINATE_INFRA`.
 
-`reconcile` writes `goal-plan.supervisor-reconciliation/v1` and emits exactly:
+`reconcile` writes `goal-plan.supervisor-reconciliation/v2` and emits exactly:
 
 - `SUPERVISOR:RECONCILED_RUNNING`;
 - `SUPERVISOR:RECONCILED_TERMINAL`;
@@ -1081,12 +1258,16 @@ start ticks, PGID, CWD, contract path/hash, and
 - A matching orphan child without its supervisor is identity-validated,
   terminated through the control path, and classified `INFRA_FAILURE`.
 - Zero matches with no result becomes
-  `INTERRUPTED_BEFORE_LAUNCH` only when the budget reservation remains
-  unconsumed; a consumed reservation is `INFRA_FAILURE`.
+  `INTERRUPTED_BEFORE_LAUNCH` only when the process-launch reservation remains
+  `RESERVED` and reconciliation proves no reaper or child process was created;
+  that process-launch reservation becomes `RELEASED_NO_PROCESS`. A consumed
+  process-launch reservation is `INFRA_FAILURE`.
 - Multiple or ambiguous matches are `INFRA_FAILURE` and none is signalled until
   identity becomes unambiguous.
 
-The parent monitor checks run and lane deadlines before each `poll`.
+The parent monitor checks run and child deadlines before each `poll`; `poll`
+performs the same check internally and never waits beyond the remaining
+deadline.
 Cancellation and deadline handling always call `terminate`; no graph node
 treats supervisor or child disappearance as lane completion.
 
@@ -1171,7 +1352,7 @@ directory. An adjacent aggregate projection is written atomically with:
 | `expected_head_sha` | Immutable full SHA supplied by the caller. |
 | `verifier_hash` | Recomputed SHA-256 verifier-definition hash. |
 | `envelope_hash` | Recomputed shared envelope-definition hash. |
-| `envelope_evidence_path` | Path to the complete `goal-plan.verifier-envelope/v1` record. |
+| `envelope_evidence_path` | Path to the complete `goal-plan.verifier-envelope/v2` record. |
 | `cwd_policy` | Exact value `integration_worktree`. |
 | `cwd` | Absolute, `realpath`-canonicalized integration-worktree path from envelope evidence. |
 | `exit_code`, `timed_out` | Verifier result copied from envelope evidence only after integrity classification. |
@@ -1187,9 +1368,10 @@ and emits exactly one aggregate token:
 | Envelope `INFRA`, missing/stale evidence, or hash/schema mismatch | `INFRA` | `AGGREGATE_VERIFY:INFRA` |
 
 Graph edges route on `tool.last_line`. Only `AGGREGATE_VERIFY:PASS` may advance
-to another dependency wave, final coherence review, delivery eligibility, or
-completion. `FAIL` enters the responsible correction loop; `INFRA` leaves
-product-correction loops and routes toward `INFRA_FAILURE`.
+to another dependency wave, a coherence review, the post-sweep aggregate gate,
+delivery eligibility, or completion. `FAIL` enters the responsible correction
+loop; `INFRA` leaves product-correction loops and routes toward
+`INFRA_FAILURE`.
 
 ## Lane Convergence Subgraph
 
@@ -1199,18 +1381,46 @@ shape:
 
 ```text
 Orient
-  -> Adaptive attempt
+  -> ReserveGlobalAttempt
+  -> MarkAttemptStarted
+  -> Adaptive Attempt
   -> Deterministic verifier
+  -> ClassifyVerifierAndConsumeGlobalAttempt
        -> red -> classify failure
-                    -> novel/actionable -> curate feedback -> attempt
+                    -> novel/actionable -> curate feedback -> ReserveGlobalAttempt
                     -> repeated signature -> root-cause diagnosis
-                         -> actionable change of course -> attempt
+                         -> actionable change of course -> ReserveGlobalAttempt
                          -> blocker -> BLOCKED
                     -> budget exhausted -> budget-exhausted
        -> green -> optional fresh qualitative critique
-                    -> iterate -> curate feedback -> attempt
+                    -> iterate -> curate feedback -> ReserveGlobalAttempt
                     -> pass -> ownership check -> commit check -> PASS candidate
 ```
+
+`ReserveGlobalAttempt` is deterministic checked-in code. Immediately before
+each adaptive `Attempt`, it opens the external flocked budget ledger and
+reserves by exact tuple:
+
+```text
+(lane_or_correction_id, process_run_id, local_attempt, verifier_definition_sha256)
+```
+
+The tuple is unique and idempotent across child restart. It checks the child's
+local `max_attempts`, run-wide `max_total_attempts`, correction count when
+applicable, boot identity, and deadline before atomically writing `RESERVED`.
+`MarkAttemptStarted` durably records that the adaptive node began before model
+work starts. The deterministic verifier writes one immutable verifier record;
+`ClassifyVerifierAndConsumeGlobalAttempt` binds that record's path/hash/verdict
+to the reservation and transitions it to `CONSUMED` exactly once. A duplicate
+classification is idempotent only when every bound value matches.
+
+A crash after reservation consumes conservatively when
+`MarkAttemptStarted` or verifier-start evidence exists: reconciliation writes a
+synthetic crash classification and consumes that reservation. It may transition
+to `RELEASED_NO_ATTEMPT` only when durable state plus process evidence prove the
+adaptive attempt never started. Process launch/relaunch neither reserves nor
+consumes an adaptive attempt by itself; conversely one healthy child process
+may consume several bounded adaptive attempts.
 
 The cheap deterministic verifier always precedes the expensive qualitative
 gate. Feedback records the highest-leverage next correction and replaces stale
@@ -1219,9 +1429,41 @@ failure signatures route to diagnosis rather than another blind attempt.
 
 The child lane graph does not mark the batch lane `PASS`, certify integration,
 or certify batch completion. It produces a candidate commit and versioned
-`goal-plan.lane-result/v1` evidence under
-`state_root/lanes/<lane-id>/runs/<launch-attempt>/`. Parent verification in a
+`goal-plan.lane-result/v2` evidence under
+`state_root/lanes/<lane-id>/runs/<process-launch>/`. Parent verification in a
 clean detached candidate worktree assigns the final `PASS` disposition.
+
+### Integration-correction convergence subgraph
+
+The supervised `integration_correction.dot` uses the same accounting skeleton:
+
+```text
+OrientCorrection
+  -> ReserveGlobalAttempt
+  -> MarkAttemptStarted
+  -> Adaptive Correction
+  -> Commit correction
+  -> Deterministic correction verifier using aggregate verifier definition/hash
+  -> ClassifyVerifierAndConsumeGlobalAttempt
+       -> red -> curate findings -> ReserveGlobalAttempt
+       -> green -> ownership check -> correction-result candidate
+       -> local/global/correction budget exhausted -> residual
+```
+
+Its reservation tuple substitutes the immutable correction ID for lane ID and
+uses the aggregate verifier's `definition_sha256`. The child verifier emits a
+run-scoped correction-attempt record beneath external `state_root`; it never
+certifies closure/coherence/completion. After an authoritative zero-exit child
+result, the parent still reruns the complete affected-closure aggregate and
+pre-coherence sequence. Crash release/consumption rules are identical to lane
+attempts.
+
+The terminal `correction-result.json` uses schema
+`goal-plan.correction-result/v1` and binds correction/process IDs, process
+launch, both source SHAs, runner-prefix/provider hashes, integration base and
+candidate correction commit, ordered adaptive-attempt reservation/verifier
+records, ownership evidence, and exact candidate disposition. It is a parent
+routing hint only.
 
 ## Deterministic and LLM Boundaries
 
@@ -1230,6 +1472,7 @@ clean detached candidate worktree assigns the final `PASS` disposition.
 | Plan-schema validation, dependency-cycle checks, ownership-collision checks, source-SHA/compiled-manifest admission | Deterministic nodes | These are exact predicates. |
 | Lane, candidate-verification, and integration worktree creation, cleanliness, cleanup, branch/source inspection | Deterministic nodes | Git state is observable and must be reproducible. |
 | Child process launch, identity ledger, logs, timeout, TERM/grace/KILL, exit capture, and restart reconciliation | Deterministic supervisor and parent nodes | Process control is exact infrastructure state; artifacts cannot substitute for the real exit status. |
+| `ReserveGlobalAttempt`, attempt-start marking, verifier-record classification, and exact-once consumption | Deterministic child/runtime nodes using the external flocked ledger | Verification-bearing work is the scarce attempt unit; process launches are a separate substrate budget. |
 | Advancing a lane goal and adapting implementation | LLM lane worker inside the child Attractor process | The implementation path may change as the domain surprises the worker. |
 | Running parent-side lane and aggregate verifiers plus pre/post integrity checks | Shared deterministic `VerifierExecutionEnvelope` | A verifier result is evidence only when immutable HEAD, cleanliness, compiled source, and external-output invariants survive. |
 | Failure-signature comparison and budget accounting | Deterministic nodes | Loop control must not depend on model judgment. |
@@ -1277,7 +1520,8 @@ serialization, but the state must include:
 - durable combined stdout/stderr and child event log;
 - `product_base_sha`, `execution_source_sha`, current integration base, and
   candidate head SHAs;
-- attempt/convergence record;
+- process-launch record plus every adaptive-attempt reservation/start/verifier
+  classification record;
 - latest verifier log and status;
 - curated feedback and diagnosis;
 - ownership diff/check result;
@@ -1290,21 +1534,23 @@ schema:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.lane-result/v1`. |
+| `schema_version` | Exact value `goal-plan.lane-result/v2`. |
 | `lane_id`, `plan_hash` | Exact compiled lane ID and approved plan hash. |
-| `process_run_id`, `launch_attempt` | Canonical process-run ID and matching positive launch-attempt integer. |
+| `process_run_id`, `process_launch` | Canonical process-run ID and matching positive process-launch ordinal. |
 | `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
 | `child_dot_sha256`, `launch_command_sha256` | Exact approved child DOT and launch-contract hashes. |
 | `process_ledger_path`, `child_box_session_ids` | Path to the matching durable process record and optional observability-only box-session ID array. |
 | `integration_base_sha`, `candidate_head_sha` | Full expected integration base and candidate commit SHA, or null candidate when no commit exists. Both must descend from `execution_source_sha`. |
-| `attempts_used`, `max_attempts` | Non-negative used count and approved positive limit. |
+| `attempts_used`, `max_attempts` | Non-negative count of classified/consumed verification-bearing adaptive attempts and approved positive local limit; process launches are excluded. |
+| `attempt_reservation_paths` | Ordered non-empty array when an attempt started; every record binds lane ID, process-run ID, local attempt, verifier hash, and exact-once classification. |
 | `candidate_disposition` | One of `CANDIDATE`, named `FAIL`, named `BLOCKED`, `PENDING_HUMAN`, or `BUDGET_EXHAUSTED`; never parent `PASS`. |
 | `verifier_evidence_paths`, `review_evidence_paths`, `ownership_evidence_path` | Run-scoped evidence references; arrays may be empty only when the candidate disposition explains why the gate was unreachable. |
 | `feedback_sha256` | Hash of the final curated feedback that informed the last correction, or null when no correction occurred. |
 
 The parent requires the child process ledger and `lane-result.json` to agree on
 lane ID, both source SHAs, plan/command/DOT hashes, `process_run_id`, launch
-attempt, and terminal timing. This agreement still supplies only a candidate
+ordinal, adaptive-attempt reservation records, and terminal timing. This
+agreement still supplies only a candidate
 routing hint. Parent verification is the evidence gate that can assign `PASS`.
 
 The fan-in collector treats a missing required result artifact as `CRASHED`.
@@ -1397,8 +1643,14 @@ Before a wave starts, deterministic preflight confirms:
 - worktree paths are available or reconcilable;
 - lane branches do not point at unexpected commits;
 - the child DOT, launch command, and supervisor hashes match the approved plan;
+- the immutable `attractor_runner_argv_prefix` executable/module/source
+  identity, `doctor`, required flags, exact provider support/credential, and
+  durable run binding remain green;
 - process ledgers/evidence resolve beneath approved external `state_root`, and
   lane worktrees resolve beneath approved external `worktree_root`;
+- every branch's `poll_wait_seconds`, `branch_nonpoll_steps`,
+  `branch_node_count`, and `max_poll_cycles`, plus parent total-step arithmetic,
+  match the compiled engine-step contract;
 - the aggregate verifier is runnable;
 - lane verifiers are present, non-interactive, read-only, and externally
   output-configured;
@@ -1487,9 +1739,48 @@ branches no longer share the current integrated base and cannot jointly prove a
 coherent result.
 
 Instead, every cross-lane `ITERATE` routes to one bounded
-`IntegrationCorrection` worker operating directly on the integration branch.
-Its input contains the complete fresh-review artifact, all findings, and the
-full `responsible_lane_ids` array.
+`IntegrationCorrection` child Attractor operating directly on the integration
+branch under the same accountable supervisor contract. Its input contains the
+complete fresh-review artifact, all findings, and the full
+`responsible_lane_ids` array. The parent first reserves one process launch
+under `max_process_launches`; the correction child separately executes
+`ReserveGlobalAttempt` before every verification-bearing adaptive correction.
+
+After resolving typed values, every correction child uses this exact closed
+argv:
+
+```text
+<each token of attractor_runner_argv_prefix>
+run
+<repo-relative-integration-correction-dot>
+--provider
+<compiled-provider>
+--cwd
+.
+--logs-root
+<absolute state_root/corrections/<correction-id>/runs/<process-launch>/attractor-run>
+--on-human-gate
+fail
+--param correction_id=<validated-correction-id>
+--param process_run_id=<plan-id>/<run-id>/correction/<correction-id>/<process-launch>
+--param correction_state_root=<absolute state_root/corrections/<correction-id>>
+--param correction_result_path=<absolute correction-run-root/correction-result.json>
+--param findings_path=<absolute external fresh-review artifact>
+--param responsible_lane_ids_path=<absolute external canonical JSON>
+--param run_budget_ledger_path=<absolute state_root/budgets/run-wide.json>
+--param run_budget_lock_path=<absolute state_root/budgets/run-wide.lock>
+--param product_base_sha=<full product base SHA>
+--param execution_source_sha=<full execution source SHA>
+--param provider=<compiled-provider>
+--param attractor_runner_argv_prefix_sha256=<full prefix hash>
+--param aggregate_verifier_definition_sha256=<full aggregate verifier hash>
+--param ownership_contract_sha256=<full correction ownership hash>
+```
+
+No extra/reordered argv or parameter is accepted. All generated child state is
+external, and the launch contract binds exact prefix/module/source/provider,
+integration-worktree CWD, correction DOT/hash, environment, budget paths, and
+result schema.
 
 For each correction round, deterministic setup computes:
 
@@ -1521,15 +1812,20 @@ After `IntegrationCorrection` writes and commits a correction, the graph:
    current HEAD;
 4. invokes `VerifierExecutionEnvelope(affected_closure_aggregate)` against that
    same expected current HEAD;
-5. reruns fresh cross-lane coherence review; and
-6. repeats only through the one `IntegrationCorrection` loop when product evidence is
-   red.
+5. invokes `VerifierExecutionEnvelope(pre_coherence_aggregate)` against that
+   same expected current HEAD;
+6. reruns fresh cross-lane coherence review at that exact current HEAD; and
+7. repeats only through the one supervised `IntegrationCorrection` loop when
+   product evidence is red.
 
 An affected-closure lane envelope `FAIL` with all integrity checks green adds
 that lane ID to the next responsible set and routes back to
 `IntegrationCorrection`. Envelope `INFRA` routes only to `INFRA_FAILURE`. Each
-worker entry consumes one `global_budgets.max_integration_corrections` unit and
-also counts toward `max_total_attempts`. Exhaustion writes named
+adaptive correction round consumes one
+`global_budgets.max_integration_corrections` unit and one
+`max_total_attempts` unit only when its verifier record is classified. A
+correction supervisor start/restart consumes only `max_process_launches`.
+Exhaustion writes named
 `BUDGET_EXHAUSTED(integration_correction:SORTED_LANE_IDS)` residuals with the
 last findings, closure, ownership check, verifier logs, and integration HEAD.
 
@@ -1538,7 +1834,7 @@ last findings, closure, ownership check, verifier logs, and integration HEAD.
 After coherence returns `PASS`, and before delivery eligibility or
 `COMPLETE`, `CompiledSourceGate` passes and the graph runs every lane verifier
 once more through `VerifierExecutionEnvelope(final_sweep_lane)` against the
-exact current integration HEAD in full static integration order. Each
+exact frozen current integration HEAD in full static integration order. Each
 final-sweep envelope is bound to that one SHA,
 `product_base_sha`, and `execution_source_sha`.
 
@@ -1546,16 +1842,25 @@ If any final-sweep lane envelope returns `FAIL` with integrity green, its lane
 ID becomes the responsible set for `IntegrationCorrection`; the graph computes
 its transitive-dependent closure and re-enters the same bounded correction
 loop. Envelope `INFRA` routes only to `INFRA_FAILURE`. After correction the run
-must again pass closure verification, aggregate verification, coherence review,
-and the complete final sweep. No pre-merge, lane-branch, or pre-correction
-verifier evidence can satisfy completion.
+must again pass affected-closure verification, the affected-closure aggregate,
+the pre-coherence aggregate, coherence review, and the complete final sweep. No
+pre-merge, lane-branch, pre-correction, or prior-HEAD verifier evidence can
+satisfy completion.
 
-## Final Aggregate and Coherence Gates
+Only after every final-sweep lane is green does
+`VerifierExecutionEnvelope(final_aggregate_after_sweep)` run. This is the
+machine gate named **`final-aggregate-after-sweep`** in the graph/report. It uses
+the same frozen expected HEAD and must finish with identical expected/pre/post
+HEAD plus an integrity-preserving aggregate `PASS`. Any `FAIL` routes to
+`IntegrationCorrection`; `INFRA` routes only to `INFRA_FAILURE`.
+
+## Pre-Coherence, Final Sweep, and Post-Sweep Aggregate Gates
 
 After all runnable waves finish:
 
-1. `VerifierExecutionEnvelope(final_aggregate)` runs at immutable expected final
-   integrated HEAD and must return an integrity-preserving aggregate `PASS`.
+1. `VerifierExecutionEnvelope(pre_coherence_aggregate)` runs at immutable
+   expected current integrated HEAD and must return an integrity-preserving
+   aggregate `PASS`.
 2. A fresh independent reviewer reads the approved plan, lane evidence, final
    lane-produced diff `execution_source_sha..final_integrated_head`, the
    separately labeled compiled-plan delta
@@ -1566,33 +1871,44 @@ After all runnable waves finish:
    satisfaction of qualitative criteria.
 4. The reviewer writes the versioned fresh-review artifact.
 5. The shared deterministic classifier schema-validates it, requires
-   `reviewed_head` to equal final integrated HEAD, and routes only the exact
+   `reviewed_head` to equal the pre-coherence aggregate HEAD, and routes only the exact
    `PASS`, `ITERATE`, or `BLOCKED` verdicts.
+6. On coherence `PASS`, the graph freezes that same HEAD, runs the complete
+   final all-lane sweep there, then runs `final-aggregate-after-sweep` there.
+7. Only a current `CompiledSourceGate` plus those three fresh proof families at
+   one exact HEAD may enter source gating and delivery/finalization.
 
 Actionable coherence findings route only to `IntegrationCorrection`, carrying
 all responsible lane IDs. They must survive affected-closure lane verification,
-aggregate verification, a fresh coherence review, and the final all-lane
-verifier sweep. If responsibility is ambiguous or correction budget is
+the affected-closure aggregate, the pre-coherence aggregate, a fresh coherence
+review, the final all-lane verifier sweep, and
+`final-aggregate-after-sweep`. If responsibility is ambiguous or correction budget is
 exhausted, the finding becomes an evidence-backed residual rather than an
 invented pass.
 
-Final coherence review is unreachable until a complete final-aggregate envelope
+Final coherence review is unreachable until a complete pre-coherence aggregate envelope
 and classifier emitted `AGGREGATE_VERIFY:PASS` for the same expected/pre/post
 HEAD. A coherence `PASS` therefore cannot mask a red, stale, discarded, or
-mutation-tainted mechanical result.
+mutation-tainted mechanical result. `COMPLETE` additionally requires coherence,
+the later final sweep, and `final-aggregate-after-sweep` all to be fresh and
+bound to the exact final HEAD; a HEAD change invalidates all three.
 
 ## Budgets and Exhaustion
 
 ### Per-lane budget
 
-Each lane contract declares its attempt budget. Every entry into the
-verification-bearing attempt cycle consumes budget, including retries caused by
-mechanical failure, qualitative refusal, or reintegration failure.
+Each lane and correction contract declares a local adaptive-attempt budget.
+`max_total_attempts` counts only verification-bearing adaptive attempts whose
+reservation is consumed when the verifier record is classified. Retries caused
+by mechanical failure, qualitative refusal, or reintegration failure consume
+only if they reach that verifier-bearing attempt cycle. Merely starting,
+restarting, polling, or reaping a child process never counts as an adaptive
+attempt.
 
 The lane budget cannot be reset by re-entering from parent integration or
 coherence review.
 
-Each child launch also has one wall-clock limit, `max_child_seconds`, enforced by
+Each child process run also has one wall-clock limit, `max_child_seconds`, enforced by
 the deterministic process supervisor across the entire child Attractor run.
 That wall is a safety bound, not evidence of completion. When it fires, the
 supervisor performs TERM -> grace -> KILL against the verified child process
@@ -1604,7 +1920,8 @@ lane-attempt evidence exists.
 
 The parent mints an external run-wide budget ledger at
 `state_root/budgets/run-wide.json` with schema
-`goal-plan.run-budget/v1`. Every read-modify-write opens the dedicated
+`goal-plan.run-budget/v2`. Every read-modify-write by the parent or any
+`ReserveGlobalAttempt` node opens the dedicated
 `state_root/budgets/run-wide.lock`, holds `fcntl.flock(LOCK_EX)`, rereads and
 validates the current ledger, writes a same-directory temporary file, fsyncs,
 atomically replaces the ledger, fsyncs the directory, and only then releases
@@ -1614,14 +1931,16 @@ The ledger contains:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.run-budget/v1`. |
-| `plan_id`, `run_id`, `product_base_sha`, `execution_source_sha` | Exact immutable run identity. |
+| `schema_version` | Exact value `goal-plan.run-budget/v2`. |
+| `plan_id`, `run_id`, `product_base_sha`, `execution_source_sha`, `provider`, `attractor_runner_argv_prefix_sha256` | Exact immutable run and runner identity. |
 | `boot_id` | Exact Linux boot ID at run admission. |
 | `started_at_boottime`, `deadline_boottime` | `CLOCK_BOOTTIME` values captured with `clock_gettime`; deadline equals start plus `max_pipeline_seconds`. |
-| `max_pipeline_seconds`, `max_total_attempts`, `max_integration_corrections` | Exact positive compiled limits. |
-| `reserved_attempts`, `consumed_attempts` | Non-negative counts derived from reservation records. |
-| `active_process_run_ids` | Sorted unique process-run IDs with consumed launches not yet terminal. |
-| `reservations` | Map of reservation ID to lane ID, launch/correction attempt, process-run ID or correction ID, kind, boottime timestamp, and state. |
+| `max_pipeline_seconds`, `max_total_attempts`, `max_process_launches`, `max_integration_corrections` | Exact positive compiled limits. `max_total_attempts` excludes all process launches. |
+| `reserved_attempts`, `started_attempts`, `consumed_attempts` | Non-negative adaptive-attempt counts derived only from attempt-reservation records. |
+| `reserved_process_launches`, `consumed_process_launches` | Non-negative process-start/restart counts derived only from process-launch records. |
+| `active_process_run_ids` | Sorted unique process-run IDs with consumed process launches not yet terminal. |
+| `attempt_reservations` | Map keyed by canonical reservation ID to lane/correction ID, process-run ID, local attempt, verifier definition hash, timestamps, start/classification evidence, and exact state. |
+| `process_launch_reservations` | Map keyed by canonical launch-reservation ID to process kind/ID, process-run ID, process-launch ordinal, timestamps, procfs/intent evidence, and exact state. |
 | `closed`, `closed_reason`, `closed_at_boottime` | Run-wide no-further-work wall. |
 
 Admission records `boot_id = /proc/sys/kernel/random/boot_id`,
@@ -1629,62 +1948,87 @@ Admission records `boot_id = /proc/sys/kernel/random/boot_id`,
 deadline. A boot-ID mismatch, unreadable `CLOCK_BOOTTIME`, decreasing boottime,
 or deadline/limit mismatch is `INFRA_FAILURE`, never ordinary exhaustion.
 
-#### Atomic reservation and exactly-once accounting
+#### Process-launch reservation and exactly-once accounting
 
-Before every child process launch, and before every entry into
-`IntegrationCorrection`, the parent acquires the budget lock and checks:
+Before every initial supervisor start or restart for a lane, correction, or
+delivery child, the parent acquires the budget lock and checks:
 
 1. the ledger is not closed;
 2. boot ID still matches;
-3. current `CLOCK_BOOTTIME` is strictly before the deadline;
-4. `consumed_attempts + reserved_attempts + 1 <= max_total_attempts`; and
-5. an integration correction also remains below
-   `max_integration_corrections`.
+3. current `CLOCK_BOOTTIME` is strictly before the deadline; and
+4. `consumed_process_launches + reserved_process_launches + 1 <=
+   max_process_launches`.
 
-If green, it atomically creates one `RESERVED` record containing `lane_id`,
-`launch_attempt`, canonical `process_run_id`, reservation kind, and boottime
-timestamp. The reservation ID is copied into `launch-contract.json`. No
-`Popen`, correction worker, branch mutation for a retry, or replacement launch
-occurs without that durable reservation.
+If green, it creates one `RESERVED` process-launch record binding process
+kind/ID, canonical `process_run_id`, process-launch ordinal, runner prefix hash,
+provider, launch-contract hash, and boottime. That reservation ID is copied into
+`launch-intent.json` and `launch-contract.json`. No `Popen` or replacement
+start occurs without it.
 
-A reservation has one legal terminal transition:
+A process-launch reservation becomes `CONSUMED` exactly once when procfs/ack
+evidence proves the supervisor or child process was created, or
+`RELEASED_NO_PROCESS` only when reconciliation proves neither process ever
+started. A consumed run is added to `active_process_run_ids`; terminal
+poll/reconcile/termination removes it exactly once. Duplicate identical
+transition is idempotent; a conflict is `INFRA_FAILURE`. Exhausting
+`max_process_launches` cannot borrow from `max_total_attempts`.
 
-- `CONSUMED` when a valid reaper ack/live supervisor or integration-correction entry
-  proves work began; or
-- `RELEASED_NO_LAUNCH` when reconciliation proves no child/correction began.
+#### Adaptive-attempt reservation through `ReserveGlobalAttempt`
 
-The transition is atomic and exactly once. Repeating the same transition is
-idempotent; a conflicting transition or duplicate consumption is
-`INFRA_FAILURE`. A consumed child launch is added to
-`active_process_run_ids`; terminal poll/reconcile/termination removes it
-exactly once. A crash between reservation and launch is reconciled from
-reservation, launch contract, ledger, ack, procfs identity, and child result
-before any new reservation for that lane is allowed.
+Immediately before every adaptive `Attempt` in every lane or correction child,
+`ReserveGlobalAttempt` acquires the same flock and checks:
 
-Only the reservation operation is serialized. Parallel lane processes execute
-without holding the budget lock.
+1. the ledger is not closed and immutable identity/provider/prefix values match;
+2. boot ID and `CLOCK_BOOTTIME` are valid and before deadline;
+3. the local attempt number is within the child's `max_attempts`;
+4. `consumed_attempts + started_attempts + reserved_attempts + 1 <=
+   max_total_attempts`; and
+5. correction attempts remain below `max_integration_corrections`.
+
+It creates or idempotently reuses one `RESERVED` record keyed by canonical
+serialization of lane/correction ID, `process_run_id`, positive local attempt,
+and verifier-definition SHA-256. A different value reusing any tuple component
+is `INFRA_FAILURE`. Immediately before model work, `MarkAttemptStarted`
+transitions the record to `STARTED`. When the deterministic verifier record is
+complete, `ClassifyVerifierAndConsumeGlobalAttempt` validates its schema,
+verifier hash, subject/process/local-attempt tuple, path, content hash, and
+verdict, then transitions the reservation to `CONSUMED` exactly once.
+
+Crash reconciliation is conservative. A `RESERVED` record becomes
+`RELEASED_NO_ATTEMPT` only when durable child-node state, supervisor result,
+logs, and verifier state prove `MarkAttemptStarted` never occurred. Any start
+marker, model-side effect, verifier start, or ambiguity causes a synthetic
+`CRASHED` verifier-classification record and `CONSUMED`; the ceiling is not
+refunded. A classified reservation can never be released. Only the brief ledger
+transaction is serialized; parallel adaptive work and verifier execution never
+hold the lock.
 
 #### Deadline wall
 
-The parent checks boot identity and deadline before every reservation, process
-`poll`, and `IntegrationCorrection` entry. When
+The parent and each `ReserveGlobalAttempt` check boot identity and deadline
+before every reservation; supervisor `poll` checks them before and after its
+bounded long-poll. When
 `CLOCK_BOOTTIME >= deadline_boottime`, one locked transition sets
 `closed = true`, `closed_reason = "global_deadline"`, and permanently forbids
-new reservations or retries.
+new process-launch or adaptive-attempt reservations.
 
 The parent then enumerates the ledger's active process-run IDs. For each, it
 calls the `terminate` control client with reason `global_deadline` after
 full identity validation. Every active lane becomes
 `BUDGET(global_deadline)`; every approved but unstarted lane whose work cannot
-run becomes exact `BLOCKED-global-deadline`; existing passing evidence is
-preserved. Termination/evidence failures remain `INFRA_FAILURE`. The parent
+run becomes exact `BLOCKED-global-deadline`; an active correction records named
+integration-correction budget exhaustion; and an active/unstarted delivery
+records `BUDGET_EXHAUSTED(delivery:global_deadline)` and cannot emit
+`COMPLETE`. Existing passing evidence is preserved. Termination/evidence
+failures remain `INFRA_FAILURE`. The parent
 records residuals and continues only to terminal classification. No restart,
 new wave, reintegration, correction, or delivery retry can reopen the ledger.
 
-The run-wide ledger and its reservations are reconciled before process ledgers
-on restart. It is the authoritative source for attempt/deadline admission, not
-in-memory counters. The ceiling is never replenished by moving waves,
-aggregate failure, coherence correction, restart, or delivery.
+The run-wide ledger and both reservation maps are reconciled before process
+ledgers on restart. It is the authoritative source for process-launch,
+adaptive-attempt, correction, and deadline admission, not in-memory counters.
+Neither ceiling is replenished by moving waves, aggregate failure, coherence
+correction, restart, or delivery.
 
 ### Exhaustion behavior
 
@@ -1704,6 +2048,13 @@ exhaustion never routes directly to `COMPLETE`.
 Integration-correction exhaustion preserves the integration branch and records
 named residuals for the responsible set and affected closure. It never restores
 or resumes old lane branches.
+
+`max_process_launches` exhaustion records
+`BUDGET_EXHAUSTED(process_launches:PROCESS_KIND:PROCESS_ID)` for any child that
+cannot be started/restarted, blocks dependents by name, and prevents delivery
+when the required delivery child cannot launch. It is not silently converted to
+an adaptive-attempt exhaustion and cannot be increased by releasing or
+reclassifying attempt reservations.
 
 ## Human Gates
 
@@ -1725,9 +2076,24 @@ The only pre-mutation gate presents:
 
 Before approval, only external `state_root` may be created or written. The
 target repository, Git common directory, refs, branches, registered worktrees,
-and external `worktree_root` remain untouched. An invocation may carry explicit
+external `worktree_root`, and `delivery_state_root` remain untouched. An
+invocation may carry explicit
 preapproval, but the graph must still render and persist the same plan,
 root-safety proof, and admission evidence externally before mutation.
+
+`preapproved` is a valid unattended headless standalone mode. It bypasses the
+interactive decision only after the same immutable admission/render packet is
+durable; it does not bypass any source, budget, runner, provider, or verifier
+gate. The canonical smoke uses `approval_mode=preapproved`,
+`human_gate_transport=none`, and runner `--on-human-gate fail`.
+
+`approval_mode=required` is valid only with either an attached readable console
+and exact parent runner flag `--on-human-gate console`, or a host-provided
+interviewer capability durably identified as `human_gate_transport=host_interviewer`.
+Admission rejects `required` plus unattended headless execution, absent/closed
+console input, `--on-human-gate fail`, or missing host interviewer before
+mutation. Lane, correction, and delivery children always use
+`--on-human-gate fail`; only the parent plan gate may interview a person.
 
 Rejecting or cancelling this gate produces `ABORTED`.
 
@@ -1759,45 +2125,55 @@ The run persists:
 
 - approved plan snapshot/hash and preapproval/approval evidence;
 - compiled-pipeline path, embedded `plan_sha256`, typed runtime inputs,
+  immutable `attractor_runner_argv_prefix`/identity/hash, compiled `provider`,
+  provider credential preflight, doctor/flag evidence, and engine-step budget,
   selected target-repository identity mode and its remote-match or
   history-anchor proof, exact `product_base_sha`, exact
   `execution_source_sha`, their ancestry proof, and the separated compiled-plan
   and lane-produced delta ranges;
-- canonical external `state_root` and `worktree_root`, root-safety evidence,
-  XDG/default derivation evidence, and approval boundary;
+- canonical external `state_root`, `worktree_root`, and conditional
+  `delivery_state_root`, root-safety evidence, XDG/default derivation evidence,
+  approval mode/transport, and approval boundary;
 - admission compiled-source manifest path/hash and every subsequent
   `CompiledSourceGate` record;
-- flock-protected run-wide budget ledger, boot/deadline binding, reservation
-  transitions, active process-run IDs, and deadline closure evidence;
-- run-wide and per-lane counters;
+- flock-protected run-wide budget ledger, boot/deadline binding, separate
+  process-launch and adaptive-attempt reservation transitions, verifier-bound
+  exact-once consumption, active process-run IDs, and deadline closure evidence;
+- run-wide process-launch/adaptive-attempt/correction counters and per-lane
+  adaptive counters;
 - worktree/branch/base/head mapping, including recorded `realpath` values for
   every lane worktree, disposable candidate-verification worktree, and the
   integration worktree;
-- per-lane launch intent/contract, provisional supervisor PID, ledger, ack,
+- per-lane/correction/delivery launch intent/contract, provisional supervisor PID, ledger, ack,
   poll/termination/reconciliation records, and authoritative supervisor result,
   including supervisor/child procfs identities, raw wait status, normalized
-  exit/signal/timeout/cancellation, group cleanup, log hashes, budget
-  reservation, `process_run_id`, and optional box-session IDs;
+  exit/signal/timeout/cancellation, group cleanup, log hashes,
+  process-launch reservation, `process_run_id`, runner/provider bindings, and
+  optional box-session IDs;
 - lane contracts, evidence, and dispositions;
 - parent-verification records, including detached candidate SHA/path,
   verifier/envelope hashes, complete envelope evidence, and
   removal/reconciliation proof;
-- every `goal-plan.verifier-envelope/v1` record, including immutable expected
+- every `goal-plan.verifier-envelope/v2` record, including immutable expected
   HEAD, pre/post porcelain-v2 status, complete worktree manifests including
   ignored paths, compiled-source evidence, output-root environment/manifest,
   verifier outputs, and final envelope verdict;
 - integration journal whose every entry binds `product_base_sha`,
   `execution_source_sha`, candidate SHA, and pre-merge/post-merge HEADs;
-- integration-correction journal with each round's responsible set, affected
+- integration-correction journal with each child/process launch, adaptive
+  attempt reservation/classification, responsible set, affected
   closure, allowed write set, both source SHAs, compiled-source-gate evidence,
   evidence invalidations, commit, and budget count;
-- aggregate-verifier records after each merge;
-- final aggregate and versioned fresh-review records;
+- aggregate-verifier records after each merge and affected closure;
+- pre-coherence aggregate and versioned fresh-review records at exact HEAD;
 - final-sweep lane-verifier records bound to final integration HEAD;
+- `final-aggregate-after-sweep` record bound to that same final HEAD;
 - terminal classification;
 - versioned `result.json`; and
-- the versioned delivery-attempt ledger, branch, expected head, PR URL, observed
-  remote head, and verification result.
+- the versioned delivery-attempt ledger, external `delivery_state_root`,
+  disposable delivery-worktree lifecycle and pre/post envelope, supervised
+  delivery-child process records, branch, expected head, PR URL, observed remote
+  head, and independent verification result.
 
 State writes must be atomic. Human-readable reports are derived from structured
 state; they are not the source of truth.
@@ -1806,87 +2182,98 @@ state; they are not the source of truth.
 
 On restart, the graph compares state with reality:
 
-1. Re-resolve `state_root` and `worktree_root`, re-run all external
+1. Re-resolve `state_root`, `worktree_root`, and conditional
+   `delivery_state_root`, re-run all pairwise/external
    ancestor/descendant/symlink safety checks, and require equality with the
    durable run binding before writing or mutating anything.
 2. Reconcile the flock-protected run-wide budget ledger first. Require matching
-   boot ID, monotonic `CLOCK_BOOTTIME`, limits, deadline, reservation counts,
-   and active process-run IDs. Reconcile each `RESERVED` entry exactly once
-   before admitting new work.
-3. Rerun admission against immutable `plan.json` and embedded `plan_sha256`,
-   including graph/plan correspondence, while preserving the rule that only
-   external `state_root` may be written before approval state is restored.
-4. Re-prove the selected `remote` or `history_anchor` target-repository
-   identity policy, then confirm `plan_id`, typed runtime inputs,
-   `product_base_sha`, `execution_source_sha`, their ancestry, and the
-   compiled-source manifest hash match the durable run record.
-5. Run `CompiledSourceGate` against the execution source and every existing
-   lane, candidate-verification, and integration worktree. Any mismatch is
-   immediate `INFRA_FAILURE`.
-6. Enumerate actual worktrees and branches beneath `worktree_root`; canonicalize
+   boot ID, monotonic `CLOCK_BOOTTIME`, all four limits, deadline, separate
+   process-launch/adaptive-attempt counts, and active process-run IDs.
+3. Reconcile each process-launch reservation exactly once. Release only a
+   `RESERVED` record proven never to have created a process; otherwise consume
+   it and preserve/recover the bound process run. Never charge a process launch
+   to `max_total_attempts`.
+4. Reconcile each adaptive-attempt reservation by its lane/correction ID,
+   `process_run_id`, local attempt, and verifier hash. Release only when no
+   attempt-start evidence exists; consume a started/classified attempt exactly
+   once, using a synthetic crash classification when it started but lacks a
+   complete verifier record.
+5. Rerun admission against immutable `plan.json` and embedded `plan_sha256`,
+   including graph/plan correspondence, runner prefix/module/source identity,
+   successful doctor/flag checks, exact provider/credential, approval transport,
+   and engine-step arithmetic. Provider and runner prefix must equal the durable
+   run binding; resume cannot change either.
+6. Preserve the rule that only external `state_root` may be written before
+   approval state is restored. Re-prove the selected target-repository identity
+   policy, source SHAs/ancestry, and compiled-source manifest.
+7. Run `CompiledSourceGate` against the execution source and every existing
+   lane, candidate-verification, integration, and delivery worktree. Any
+   mismatch is immediate `INFRA_FAILURE`.
+8. Enumerate actual worktrees and branches beneath `worktree_root`; canonicalize
    each with `realpath` and require equality with its recorded path and Git
    common object database.
-7. Reconcile any disposable candidate-verification worktree left by a crash.
+9. Reconcile any disposable candidate-verification worktree left by a crash.
    Require its recorded candidate SHA/path, exact detached HEAD, and empty output
    from the canonical full non-ignored status command; dirty, wrong, or
    unremovable state is `INFRA_FAILURE`. Remove and prune a valid leftover,
-   record reconciliation evidence, and restart parent candidate verification
-   from worktree creation only when no envelope invocation had started.
-8. For every intent missing ledger/ack, invoke `reconcile`. Its bounded `/proc`
-   discovery adopts exactly one identity-valid live supervisor and consumes the
-   reservation; an identity-valid orphan child is terminated and becomes
-   `INFRA_FAILURE`; zero matches releases an unconsumed reservation as
-   interrupted-before-launch but makes a consumed reservation infrastructure
-   failure; multiple/ambiguous matches are never signalled and are
-   `INFRA_FAILURE`.
-9. For every acknowledged nonterminal run, invoke `poll` and validate both
-   supervisor and child identities. At or beyond the run deadline, close the
-   budget ledger first and invoke `terminate --reason global_deadline` for every
-   active process-run ID.
-10. If the supervisor disappears before a complete authoritative result,
+   recording evidence. Restart verification from worktree creation only when no
+   envelope invocation had started.
+10. For every intent missing ledger/ack, invoke `reconcile`. Its bounded `/proc`
+    discovery adopts exactly one identity-valid live supervisor and consumes
+    its process-launch reservation; an identity-valid orphan child is
+    terminated and becomes `INFRA_FAILURE`; zero matches releases only a proven
+    never-started process-launch reservation; multiple/ambiguous matches are
+    never signalled and are `INFRA_FAILURE`.
+11. For every acknowledged nonterminal run, invoke long-poll with exact
+    `--wait-seconds 30` and validate both identities before and after its bounded
+    wait. At or beyond deadline, close the budget ledger first and invoke
+    `terminate --reason global_deadline` for every active process-run ID.
+12. If the supervisor disappears before a complete authoritative result,
     immediately terminate any identity-valid live child group and classify
     `INFRA_FAILURE`; child absence/evidence never means success.
-11. Resolve recorded commits directly from Git and require every work commit and
+13. Resolve recorded commits directly from Git and require every work commit and
     current integration HEAD to descend from `execution_source_sha`.
-12. Reclassify a purported completed lane whose artifact or commit is missing
-    as `CRASHED` or `INFRA_FAILURE`, depending on whether lane work or the
-    substrate is untrustworthy.
-13. Require `supervisor-result.json` to match intent/ledger and record real child
-    exit `0` before candidate eligibility. Nonzero exit, signal, timeout,
-    cancellation, missing result, or child-only evidence cannot become `PASS`.
-14. Reconcile every envelope record against immutable expected HEAD,
+14. Reclassify a purported completed lane whose artifact or commit is missing as
+    `CRASHED` or `INFRA_FAILURE`, depending on whether lane work or substrate is
+    untrustworthy.
+15. Require every supervisor result to match intent/ledger, process-launch
+    reservation, runner prefix, provider, and real child exit. Nonzero exit,
+    signal, timeout, cancellation, missing result, or child-only evidence cannot
+    become `PASS`.
+16. Reconcile every verifier envelope against immutable expected HEAD,
     verifier/envelope hashes, exact output-root interface/environment, output
     containment manifest, pre/post porcelain-v2 status, complete
     tracked/untracked/ignored filesystem manifests, and compiled-source
     evidence. Missing/red/incomplete evidence is `INFRA_FAILURE`.
-15. Start pre-integration parent verification through a newly created clean
-   `candidate_verification_worktree` only when no envelope invocation was
-   durably started for that candidate. Once envelope execution starts, missing
-   or incomplete postconditions are handled only by rule 14 as
-   `INFRA_FAILURE`.
-16. Reconcile the integration journal against the actual integration HEAD and
-   Git ancestry before attempting another merge.
-17. Recompute every recorded integration-correction affected closure from the
-   static DAG and require it to match the durable journal. Preserve prior
-   artifacts but enforce all recorded invalidations.
-18. Before resuming or starting `IntegrationCorrection`, check the budget
-    deadline and atomically reserve its run-wide attempt.
-19. If an integration-correction commit exists but its proof sequence is
-   incomplete, first run `CompiledSourceGate`, then resume at affected-closure
-   verification against current integration HEAD rather than rerunning the
-   worker.
-20. Invoke a new aggregate envelope only when the integration worktree is
-   independently proven clean at the intended expected HEAD and lacks a
-   completed bound envelope record.
-21. Reject a fresh-review artifact whose source SHAs differ or whose
-   `reviewed_head` does not equal actual HEAD.
-22. Require a complete all-lane final sweep of passing envelope records and a
-    current compiled-source pass
-    at actual integration HEAD before
-    restoring completion eligibility.
-23. Reconcile the delivery ledger, then query remote PR state at the ledger's
-   exact expected head if delivery may already have occurred; never open a
-   duplicate merely because local state is incomplete.
+17. Start pre-integration parent verification through a newly created clean
+    candidate worktree only when no envelope invocation was durably started.
+    Once it starts, missing/incomplete postconditions follow rule 16 only.
+18. Reconcile the integration journal against actual HEAD and Git ancestry
+    before another merge. Recompute every correction's affected closure from
+    the static DAG and enforce all recorded invalidations.
+19. Before starting/restarting a correction child, reserve only a process-launch
+    unit. Its child graph performs `ReserveGlobalAttempt` immediately before
+    each adaptive attempt; no parent restart may pre-consume an attempt.
+20. If a correction commit exists but proof is incomplete, run
+    `CompiledSourceGate`, affected-closure lane envelopes,
+    `affected_closure_aggregate`, and `pre_coherence_aggregate` at current HEAD
+    before coherence. Do not rerun the correction worker.
+21. Invoke a new aggregate envelope only when the integration worktree is
+    independently clean at the intended HEAD and lacks a completed bound record.
+22. Reject a fresh-review artifact whose source SHAs differ or whose
+    `reviewed_head` does not equal actual HEAD.
+23. Restore completion eligibility only when one exact actual integration HEAD
+    has fresh passing coherence evidence, a complete all-lane final sweep,
+    `final-aggregate-after-sweep`, and a current compiled-source pass.
+24. Reconcile any delivery worktree through its pre/post HEAD, full status,
+    complete non-`.git` filesystem manifests, and source gates. Dirty,
+    wrong-HEAD, state-bearing, or unremovable worktrees are `INFRA_FAILURE`.
+25. Reconcile every delivery process through the same process-launch/supervisor
+    rules and exact runner/provider binding. No generated `.resolve` or other
+    delivery state in the delivery worktree is accepted.
+26. Reconcile the external delivery ledger, then independently query remote PR
+    state at its exact expected head if delivery may already have occurred;
+    never open a duplicate merely because local state is incomplete.
 
 Reconciliation is idempotent. It skips work only when durable evidence and real
 state agree. Ambiguous or contradictory infrastructure state fails loudly as
@@ -1896,9 +2283,9 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Both source SHAs remain bound; the compiled-source manifest passes immediately before finalization; all work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; every final-sweep lane and final aggregate has a passing, non-discarded envelope bound to exact final integration HEAD; fresh coherence review passes at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
-| `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, or final aggregate/coherence criteria remain unsatisfied. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | External-root/approval boundary, run-budget accounting, source/compiled identity, Git/worktree state, verifier integrity, candidate lifecycle, missing/invalid supervisor result, supervisor/orphan/procfs identity, verifier substrate, credentials, remote API, or recovery state cannot be trusted. | No delivery. |
+| `COMPLETE` | Both source SHAs, immutable runner prefix, and provider remain bound; the compiled-source manifest passes immediately before finalization; all work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; fresh coherence, every final-sweep lane, and `final-aggregate-after-sweep` all pass with non-discarded evidence bound to the exact same final integration HEAD; and, when delivery is enabled, a clean supervised delivery child preserves that HEAD and the parent independently confirms the PR at it. | May auto-deliver one PR. |
+| `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, pre-coherence/coherence/final-sweep/final-aggregate-after-sweep criteria remain unsatisfied, or the global deadline prevented delivery after product proof passed. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
+| `INFRA_FAILURE` | External-root/approval boundary, process-launch/adaptive-attempt accounting, runner/provider identity, source/compiled identity, Git/worktree state, verifier integrity, candidate/delivery lifecycle, missing/invalid supervisor result, supervisor/orphan/procfs identity, verifier substrate, credentials, remote API, or recovery state cannot be trusted. | No delivery. |
 | `ABORTED` | The plan was rejected/cancelled before mutation, or the operator explicitly stopped the run at an allowed gate. | No delivery. |
 
 ### Finalizer machine contract
@@ -1906,11 +2293,13 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 Every terminal route passes through one deterministic finalizer. It atomically
 writes the run root's versioned `result.json` with, at minimum:
 
-- `schema_version` with exact value `goal-plan.result/v1`;
+- `schema_version` with exact value `goal-plan.result/v2`;
 - `status` with exact value `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or
   `ABORTED`;
 - `plan_hash`;
 - `product_base_sha` and `execution_source_sha`;
+- `attractor_runner_argv_prefix_sha256`, runner module/source identity, and
+  compiled `provider`;
 - `compiled_source_manifest_path` and `compiled_source_manifest_sha256`;
 - `integrated_head_sha`, or `null` when no integration HEAD exists;
 - `compiled_plan_delta` describing `product_base_sha..execution_source_sha`;
@@ -1922,11 +2311,13 @@ writes the run root's versioned `result.json` with, at minimum:
 - `run_budget_ledger_path` and `run_budget_ledger_sha256`;
 - `verifier_envelope_evidence_paths`;
 - `integration_correction_records`;
-- `aggregate_evidence_path`;
+- `pre_coherence_aggregate_evidence_path`;
 - `fresh_review_evidence_paths`;
 - `final_sweep_evidence_paths`;
+- `final_aggregate_after_sweep_evidence_path`;
 - `residual_evidence_paths`;
-- `delivery_ledger_path`; and
+- `delivery_state_root`, `delivery_worktree_evidence_path`,
+  `delivery_supervisor_result_paths`, and `delivery_ledger_path`; and
 - `delivery_pr_url` and `delivery_verified_head_sha` when delivery was
   requested, otherwise `null`.
 
@@ -1957,8 +2348,9 @@ ID remains, then removes only clean registered worktrees beneath
 `worktree_root`, prunes their registrations, and records path/ref outcomes under
 `state_root/cleanup/`. Dirty, identity-mismatched, or unremovable worktrees are
 preserved and reported; cleanup never force-removes ambiguous state. External
-`state_root` and its evidence remain. A never-approved run has no worktree/ref
-cleanup because `worktree_root` and repository state were never mutated.
+`state_root`, conditional `delivery_state_root`, and their evidence remain. A
+never-approved run has no worktree/ref cleanup because `worktree_root`,
+`delivery_state_root`, and repository state were never mutated.
 
 Terminal nodes must route explicitly to the graph exit with the intended machine
 status. They must not dead-end and become `no_matching_edge` authoring errors.
@@ -1968,32 +2360,96 @@ sentinel may rely on an unreachable `outcome=fail` edge.
 ## PR Delivery
 
 The `COMPLETE` path is the only automatic-delivery path. A run becomes eligible
-for that path only after all lane, aggregate, and coherence gates pass. When
-delivery is enabled, the final `COMPLETE` terminal is emitted only after
-delivery is independently verified.
+only after fresh coherence, the final all-lane sweep,
+`final-aggregate-after-sweep`, and `CompiledSourceGate` all pass at one exact
+final HEAD. When delivery is enabled, `COMPLETE` is emitted only after the
+supervised delivery child preserves that HEAD and the parent independently
+verifies remote state.
 
-The implementation copies the proven portable `deliver_pr.dot` into the
-pipeline-local `subgraphs/` directory, as required by `AGENTS.md` and
-`docs/RUBRIC.md` section 5. It must retain independent push and PR existence
-checks.
+The implementation starts from the proven portable `deliver_pr.dot` topology,
+as required by `AGENTS.md` and `docs/RUBRIC.md` section 5, but adapts every
+generated-state edge. Checkpoints, events, session metadata, logs, request/
+response files, delivery result, and attempt ledger all go beneath the required
+external `delivery_state_root`. The adapted graph is prohibited from creating
+`.resolve` or any other generated state in the verified delivery worktree.
+Independent push/PR-existence checks are retained, and the parent adds the
+exact-head remote assertion.
 
-`goal_plan` adds one final deterministic assertion: the remote PR head SHA must
-equal the exact final integrated HEAD that passed the all-lane final sweep,
-aggregate verification, and coherence review. A real PR at the wrong head is
-not successful delivery.
+For each delivery attempt, the parent creates a clean disposable registered
+delivery worktree beneath `worktree_root/delivery/ATTEMPT/` at the exact frozen
+final HEAD, on the validated delivery branch. Before child launch it:
 
-Delivery must not mutate that verified HEAD. If the delivery subgraph changes
-local HEAD, the exact-head assertion fails; the run cannot claim `COMPLETE`
-without re-establishing the aggregate and coherence evidence for the new HEAD.
+1. requires exact `git rev-parse --verify HEAD == final_head`;
+2. requires empty output from the canonical full ignored-aware porcelain-v2
+   status command;
+3. writes a complete non-`.git` filesystem manifest using the same `lstat`
+   algorithm as `VerifierExecutionEnvelope`;
+4. runs `CompiledSourceGate`; and
+5. proves the complete worktree manifest contains no `.resolve` generated
+   state and equals the approved final-HEAD tree.
+
+The parent reserves one process-launch unit and starts the delivery child
+through `goal_plan_supervisor.py`. After resolving typed values, exact child
+argv is:
+
+```text
+<each token of attractor_runner_argv_prefix>
+run
+<repo-relative-adapted-deliver-pr-dot>
+--provider
+<compiled-provider>
+--cwd
+.
+--logs-root
+<absolute delivery_state_root/runs/<attempt>/<process-launch>/attractor-run>
+--on-human-gate
+fail
+--param delivery_attempt=<1-or-2>
+--param process_run_id=<plan-id>/<run-id>/delivery/pr/<process-launch>
+--param delivery_state_root=<absolute delivery_state_root>
+--param delivery_result_path=<absolute delivery_state_root/runs/<attempt>/delivery-result.json>
+--param delivery_ledger_path=<absolute delivery_state_root/attempts.jsonl>
+--param delivery_branch=<validated-delivery-branch>
+--param expected_head_sha=<exact frozen final HEAD>
+--param github_repo=<owner/repo>
+--param product_base_sha=<full product base SHA>
+--param execution_source_sha=<full execution source SHA>
+--param provider=<compiled-provider>
+--param attractor_runner_argv_prefix_sha256=<full prefix hash>
+```
+
+The launch contract forbids extra/reordered argv and binds the exact adapted
+delivery DOT hash, runner prefix/module/source/provider, `delivery_worktree`
+CWD, external delivery roots, closed environment, final HEAD, and result
+schema. Delivery has no adaptive `Attempt` node and consumes no
+`max_total_attempts`; each supervisor start/restart consumes
+`max_process_launches`.
+
+`delivery-result.json` uses schema `goal-plan.delivery-result/v1` and binds
+delivery attempt, process-run/launch IDs, both source SHAs, exact expected HEAD,
+runner-prefix/provider hashes, external ledger/result/log paths, push/open
+action, candidate PR URL, and child disposition. It is not remote proof and
+cannot override supervisor exit or parent query evidence.
+
+After an authoritative zero-exit supervisor result, the parent reruns the exact
+HEAD and full status commands, rebuilds the complete non-`.git` filesystem
+manifest, and reruns `CompiledSourceGate`. Expected/pre/post HEAD must equal the
+frozen final HEAD, pre/post status must both be clean, pre/post manifests must
+be identical, all compiled-source checks must pass, and no `.resolve` path may
+be newly created or changed relative to final HEAD. Postconditions run even
+after nonzero exit, timeout, or cancellation.
+Any local mutation, generated-state leak, missing supervisor result, teardown
+failure, or stale registration is `INFRA_FAILURE`, even if a PR exists.
 
 Delivery has a hard limit of two attempts total for the run, including across
 crash recovery. Before any network mutation, each attempt appends a durable
-`started` entry to the run root's `delivery/attempts.jsonl`. Every ledger entry
-uses schema version `goal-plan.delivery-attempt/v1` and records:
+`started` entry to `delivery_state_root/attempts.jsonl`. Every ledger entry
+uses schema version `goal-plan.delivery-attempt/v2` and records:
 
-- `schema_version` with exact value `goal-plan.delivery-attempt/v1`;
+- `schema_version` with exact value `goal-plan.delivery-attempt/v2`;
 - `attempt` as integer `1` or `2`;
 - `product_base_sha` and `execution_source_sha`;
+- `provider`, `attractor_runner_argv_prefix_sha256`, and `process_run_id`;
 - `compiled_source_manifest_sha256`;
 - `branch` as the delivery branch;
 - `expected_head_sha` as the exact expected head SHA;
@@ -2005,17 +2461,18 @@ uses schema version `goal-plan.delivery-attempt/v1` and records:
 - `verified` as a boolean; and
 - `failure_reason`, if any.
 
-Before each attempt, delivery queries the remote for an existing PR whose head
-is the recorded branch at the exact expected head SHA. If one exists, the
-attempt does not create another PR; it proceeds directly to independent
-verification. If none exists, the proven delivery subgraph may push/open the
-PR. In both cases, the attempt succeeds only after a separate remote query
-confirms that the PR exists and that its head SHA exactly equals the ledger's
-expected head SHA. The delivery actor's own report is never sufficient.
+Before each attempt, the parent queries the remote for an existing PR whose head
+is the recorded branch at exact expected HEAD. If one exists, the child performs
+no duplicate open operation. If none exists, the adapted delivery child may
+push/open the PR. In both cases, after local postconditions the parent performs
+a separate authenticated remote query and requires the PR to exist with remote
+head SHA exactly equal to the frozen final HEAD. Child output, delivery-result
+JSON, and `OpenPR` self-report are never sufficient.
 
-Immediately before any delivery query or mutation, `CompiledSourceGate` must
-pass at the exact expected integration HEAD and both source SHAs must match the
-ledger. Delivery evidence and the PR report preserve the known compiled-plan
+Immediately before and after any delivery query/mutation, both source SHAs,
+runner/provider binding, final-sweep evidence,
+`final-aggregate-after-sweep`, and delivery ledger must match the frozen final
+HEAD. Delivery evidence and the PR report preserve the known compiled-plan
 delta separately from the lane-produced delta.
 
 An incomplete ledger entry discovered during recovery counts as an attempt and
@@ -2023,8 +2480,9 @@ is reconciled against remote state before another attempt can start. No third
 attempt is possible. If neither attempt obtains independent exact-head
 verification, the integrated branch, verifier/review evidence, and ledger are
 preserved, and the finalizer emits `GOAL_PLAN:INFRA_FAILURE`; the pipeline does
-not claim `COMPLETE`. Delivery attempts cannot consume or reset lane-convergence
-budget.
+not claim `COMPLETE`. Delivery network attempts cannot consume/reset adaptive
+attempt budget, and delivery process launches cannot exceed
+`max_process_launches`.
 
 ## Reusable Precedent
 
@@ -2035,14 +2493,14 @@ Implementation should copy these proven shapes rather than inventing new ones:
 | Attractor bundle `examples/patterns/task-runner.dot` | `goal_lane.dot`'s attempt -> deterministic verify -> triage/diagnose -> critique -> curated feedback convergence skeleton, plus explicit budget/postmortem behavior. |
 | `pipelines/pr_review/pr_review.dot` | `shape=component` fan-out, `shape=tripleoctagon` fan-in, file-backed cross-branch results, and explicit missing-artifact/crashed-lane detection. |
 | `pipelines/resolve_expert_builder/resolve_expert_builder.dot` | One run-wide corrective-work ceiling that cannot be replenished by entering another fix loop, and evidence-rich exhaustion reporting. |
-| Existing `subgraphs/deliver_pr.dot` | Commit/push/PR delivery with downstream checks of real remote state. Copy it unchanged first, then add exact-head verification in the parent pipeline rather than rebuilding delivery. |
+| Existing `subgraphs/deliver_pr.dot` | Reuse its commit/push/PR and downstream real-remote-state topology, but adapt every state/evidence path to external `delivery_state_root`, run it as a supervised child in a clean disposable final-HEAD worktree, and retain independent parent exact-head verification. |
 | Existing `goaltractor` composition behavior | Design-time materialization of arbitrary approved plans as static DOT. Reuse it as the composition front end; do not copy its intelligence into runtime. |
 | The bounded CWD, convergence, and macro-control probes | Evidence for the process boundary, external correction cycle, and real-exit ledger requirement. They inform production tests but are not copied or shipped as production pipelines. |
 
 ## Anticipated File Changes
 
 This repository implements one canonical, statically compiled member of the
-family, the reusable local subgraphs, and the deterministic per-lane reaper
+family, the reusable local subgraphs, and the deterministic per-child reaper
 support that `goaltractor` copies into arbitrary real plan directories. It does
 not add a generic root graph, compiler, or runtime scheduler. The expected
 footprint is:
@@ -2052,6 +2510,7 @@ pipelines/goal_plan_smoke/goal_plan_smoke.dot
 pipelines/goal_plan_smoke/plan.json
 pipelines/goal_plan_smoke/goal_plan_smoke.md
 pipelines/goal_plan_smoke/subgraphs/goal_lane.dot
+pipelines/goal_plan_smoke/subgraphs/integration_correction.dot
 pipelines/goal_plan_smoke/subgraphs/deliver_pr.dot
 pipelines/goal_plan_smoke/python/goal_plan_runtime.py
 pipelines/goal_plan_smoke/python/goal_plan_supervisor.py
@@ -2064,10 +2523,12 @@ README.md
 admission, compiled-source manifests/gates, ownership-pattern rejection,
 candidate-verification worktree lifecycle, the shared
 `VerifierExecutionEnvelope`, external-root safety, run-budget
-reservation/reconciliation, and delta reporting. DOT nodes call that module
-rather than duplicating shell logic. `goal_plan_supervisor.py` remains the single
-home for the per-lane reaper, authoritative wait-status capture, Linux process
-identity, control-client schemas, and closed tokens.
+process-launch/adaptive-attempt reservation/reconciliation, runner-prefix/
+provider preflight, engine-step admission, delivery-worktree envelope, and
+delta reporting. DOT nodes call that module rather than duplicating shell
+logic. `goal_plan_supervisor.py` remains the single home for the lane,
+correction, and delivery reaper, authoritative wait-status capture, Linux
+process identity, long-poll/control-client schemas, and closed tokens.
 
 The smoke exemplar proves orchestration rather than product behavior. In a
 temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
@@ -2076,6 +2537,9 @@ third fixture file. Each fixture lane runs as a separately supervised child
 Attractor process. Its graph is fixed and self-contained. The existing
 `goaltractor` remains the composition front end that materializes arbitrary
 real plans to the same directory and contract; it is not reimplemented here.
+The canonical compiled `provider` is `anthropic`; the smoke runs headless with
+`approval_mode=preapproved`, `human_gate_transport=none`, and external
+`state_root`, `worktree_root`, and `delivery_state_root`.
 
 This design-document revision does not implement those files.
 
@@ -2084,63 +2548,101 @@ This design-document revision does not implement those files.
 Verification follows the repository's live-run gradient because this is
 orchestration behavior, not a library-only change.
 
+### Verification matrix
+
+| Claim | Verification level | Required proof |
+|---|---|---|
+| Adaptive attempts and process launches are separate | Unit + live fault injection | Flocked v2 ledger shows `ReserveGlobalAttempt` consumed at verifier classification while supervisor restart changes only `max_process_launches`. |
+| Final proof order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep`. |
+| Long polling cannot exhaust engine steps prematurely | Static arithmetic + timed live run | Recomputed branch inequality, parent total-step inequality, exact 30-second poll argv, identity checks, and observed deadline-capped waits. |
+| Delivery preserves verified source | Live Git/remote probe | Disposable final-HEAD worktree has equal pre/post HEAD/status/full-filesystem/source records, no generated `.resolve` delta, external delivery evidence, and parent-observed PR exact head. |
+| Runner/provider identity cannot drift | Admission/recovery faults | Both prefix forms pass; PATH/shell/identity/flag/credential faults and provider change on resume fail before mutation. |
+| Approval modes are operationally honest | Standalone + hosted admission probes | Preapproved headless passes; required console and host interviewer pass; required unattended headless fails. |
+| DOT remains inspectable | Graphviz + lint | Every DOT renders to a non-empty PNG with recorded hashes and passes strict lint; any render failure is loud. |
+| Python implementation is clean without cache mutation | Static + unit | `python_check`, system `python3 -m pytest`, clean diff, and no changed managed-cache path. |
+
 ### Static checks
 
-1. Parse and render every DOT file with Graphviz.
-2. Run `attractor lint` on the entry graph and both subgraphs.
-3. Audit the implementation against every item in `docs/RUBRIC.md`.
-4. Confirm all deterministic routes use observed state and explicit failure
+1. Parse and render the parent, lane, correction, and delivery DOT files with
+   Graphviz using fail-loud commands such as
+   `dot -Tpng INPUT.dot -o OUTPUT.png`. Preserve exact argv, exit status,
+   stdout/stderr, source SHA-256, PNG SHA-256, and nonzero output size as render
+   evidence. A missing `dot`, nonzero exit, empty PNG, or missing evidence is a
+   verification failure; rendering is never optional.
+2. Run the immutable runner prefix's `lint --strict` on the entry graph and all
+   three subgraphs.
+3. Run `python_check` on both checked-in Python implementation files and their
+   tests, then run the tests with system Python exactly as
+   `python3 -m pytest pipelines/goal_plan_smoke/python/tests -q`. Do not use,
+   patch, or write any interpreter/module beneath `~/.amplifier/cache` or another
+   managed Amplifier cache.
+4. Audit the implementation against every item in `docs/RUBRIC.md`.
+5. Confirm all deterministic routes use observed state and explicit failure
    edges; no LLM judgment gate uses `shape=diamond`.
-5. Confirm every terminal is reachable and routes explicitly to the exit.
-6. Confirm the README and companion guide describe the actual graph.
-7. Validate the aggregate-verifier evidence schema, exit/token normalization,
-   shared envelope schema/hash/token map, verifier-hash guard, shared
-   fresh-review schema, finalizer token map, and two-attempt delivery ledger
-   against the contracts above.
-8. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
+6. Confirm every terminal is reachable and routes explicitly to the exit.
+7. Confirm the README and companion guide describe the actual graph.
+8. Validate the aggregate-verifier evidence schema, all verification kinds,
+   exit/token normalization, shared envelope schema/hash/token map,
+   verifier-hash guard, fresh-review schema, finalizer token map, and
+   two-attempt delivery ledger.
+9. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
    graph/plan correspondence, both target-repository identity modes, and typed
    runtime-input rejection cases.
-9. Prove the graph contains no manifest-driven scheduler: lane, wave,
-   dependency, integration-order, and budget dispatch all remain explicit DOT
-   nodes, edges, and constants.
-10. Prove lane verifier-definition hashes include all three symbolic CWD
+10. Validate the only two permitted `attractor_runner_argv_prefix` forms,
+    canonical prefix hash, executable/module/source identity, `doctor`,
+    required run flags, exact compiled provider support/credential, explicit
+    `--provider` on every child argv, and immutable provider/prefix on resume.
+11. Recompute `poll_wait_seconds=30`, `engine_step_multiplier=50`,
+    `branch_nonpoll_steps`, `branch_node_count`, `max_poll_cycles`, each strict
+    branch inequality, and parent total-step inequality from DOT.
+12. Prove the graph contains no manifest-driven scheduler: lane, wave,
+    dependency, integration-order, process-launch budget, adaptive-attempt
+    budget, and correction dispatch remain explicit DOT nodes/edges/constants.
+13. Prove lane verifier-definition hashes include all three symbolic CWD
     policies and no absolute paths; aggregate hashes retain only
     `integration_worktree`; every invocation records and validates its resolved
     `realpath` separately.
-11. Validate `product_base_sha`, the non-self-referential containing-commit
-    binding for exact `execution_source_sha`, their graph attributes and
-    ancestry, and separate compiled-plan/lane-produced reporting ranges.
-12. Validate every lane's child DOT hash, exact ordered argv/typed-parameter
-    schema, closed environment policy, `process_run_id` template,
-    reaper/intent/result hashes, expected evidence schema, child wall budget, and
-    static launch/monitor node correspondence.
-13. Validate ownership and integration-seam schemas reject every pattern that
-    can match `pipelines/PLAN_SLUG/**`; validate complete manifest path-set,
-    mode, length, and byte comparisons at every `CompiledSourceGate`.
-14. Unit-test exact reaper argv/intent schemas, supervisor/child procfs identity,
-    ledger/ack ordering, direct-child wait-status normalization, log hashes,
+14. Validate `product_base_sha`, the non-self-referential containing-commit
+    binding for exact `execution_source_sha`, their graph attributes/ancestry,
+    and separate compiled-plan/lane-produced reporting ranges.
+15. Validate lane/correction/delivery child DOT hashes, exact closed
+    prefix-plus-argv schemas, provider, environments, `process_run_id` template,
+    reaper/intent/result hashes, evidence schemas, wall budgets, and static
+    launch/long-poll node correspondence.
+16. Validate `max_total_attempts` counts only `ReserveGlobalAttempt` records
+    consumed at verifier classification, while supervisor starts/restarts count
+    only against `max_process_launches`.
+17. Validate ownership/integration-seam schemas reject every pattern matching
+    `pipelines/PLAN_SLUG/**`; validate manifest path-set/mode/length/byte
+    comparisons at every `CompiledSourceGate`.
+18. Unit-test exact reaper argv/intent schemas, supervisor/child procfs identity,
+    ledger/ack ordering, direct-child wait-status normalization, exact
+    `--wait-seconds 30` long-poll/deadline cap, log hashes,
     timeout/cancellation/group cleanup, control-client schemas/tokens,
-    pre-ledger `/proc` discovery, and result atomicity in
-    `goal_plan_supervisor.py`.
-15. Unit-test the envelope's immutable expected-HEAD binding, canonical
-    pre/post HEAD and porcelain-v2 ignored-aware status commands, complete
-    pre/post worktree manifests, exact output-root argv/environment,
-    parent-generated output manifest, pre/post compiled-source gates,
-    discarded-result behavior, token mapping, and recovery classification in
-    `goal_plan_runtime.py`.
-16. Unit-test `fcntl.flock` reservation serialization, atomic replace,
-    exactly-once consumption/release, active process-run tracking,
-    `CLOCK_BOOTTIME` deadline closure, boot-ID failure, and restart
-    reconciliation.
-17. Unit-test `XDG_STATE_HOME` and `$HOME/.local/state` derivation,
-    repo/common-dir/worktree/root ancestor-descendant and symlink rejection,
-    and a read-only preapproval admission that writes only external state.
+    pre-ledger `/proc` discovery, and result atomicity.
+19. Unit-test verifier and delivery envelopes' immutable expected-HEAD binding,
+    pre/post HEAD/status/full-filesystem/source gates, exact external output
+    roots, `.resolve` rejection, discarded-result behavior, token mapping,
+    teardown, and recovery classification.
+20. Unit-test `fcntl.flock` serialization and atomic replacement for separate
+    process-launch and adaptive-attempt maps; `ReserveGlobalAttempt` tuple
+    identity; exact-once verifier-bound consumption; conservative crash
+    consumption/release; active process-run tracking; all budget ceilings;
+    `CLOCK_BOOTTIME` deadline closure; boot-ID failure; and restart recovery.
+21. Unit-test all three root-safety relationships, preapproved headless success,
+    required+console/host-interviewer success, required+unattended rejection,
+    and read-only preapproval admission that writes only external state.
+22. Run `git diff --check`, assert only the planned implementation footprint is
+    modified, and explicitly fail if any changed path resolves beneath a managed
+    cache.
 
 ### Primary live smoke scenario
 
 Run the canonical `goal_plan_smoke` pipeline against a temporary,
 GitHub-backed Git repository with a known aggregate verifier and three fixed
-fixture lanes:
+fixture lanes. Its immutable `attractor_runner_argv_prefix` uses one permitted
+absolute form, its compiled `provider` is `anthropic`, and admission proves the
+Anthropic credential before the headless `preapproved` run:
 
 - `lane_a` and `lane_b` each produce one fixture file in disjoint owned paths
   and run concurrently in Wave 1 as separate child Attractor processes launched
@@ -2164,9 +2666,11 @@ The live smoke passes only if direct observation proves:
    literal `product_base_sha`, exact containing `execution_source_sha`, their
    ancestry, and the complete compiled-source manifest before mutation.
 2. Typed runtime inputs are bound; `state_root` resolves under
-   `$XDG_STATE_HOME` or the external user-state fallback; `worktree_root` is a
-   separate safe external root; ancestor/descendant checks pass; and only
-   external admission evidence is written before approval/preapproval.
+   `$XDG_STATE_HOME` or the external user-state fallback; `worktree_root` and
+   `delivery_state_root` are separate safe external roots; all pairwise
+   ancestor/descendant checks pass; `approval_mode=preapproved`,
+   `human_gate_transport=none`, and parent/children use the compiled headless
+   gate flags; only external admission evidence is written before preapproval.
 3. The integration worktree and prepared Wave 1 branches begin at exact
    `execution_source_sha`; a later-wave lane begins at a parent-verified
    integration HEAD descended from it. Product reporting separately names the
@@ -2175,47 +2679,57 @@ The live smoke passes only if direct observation proves:
    worktrees. Process and child evidence show that each OS CWD and Attractor
    root CWD is its assigned worktree and that its box-session relative writes
    remain there.
-5. Every lane has a reserved attempt, atomic launch intent, accountable live
-   reaper identity, ledger/ack, poll/reconcile records, canonical process-run
-   token in supervisor and child argv/env, and authoritative supervisor result
-   with raw wait status, normalized exit/signal, cleanup proof, and log hashes.
+5. Every lane has a separately reserved process launch, atomic launch intent,
+   accountable live reaper identity, ledger/ack, exact `--wait-seconds 30`
+   long-poll/reconcile records, canonical process-run token and exact
+   prefix/provider in child argv/env, and authoritative supervisor result with
+   raw wait status, normalized exit/signal, cleanup proof, and log hashes.
 6. `lane_b`'s first failure is visible and causes a corrective cycle rather
    than a silent pass or blind restart.
-7. The correction is genuinely dependent on the changed verifier feedback: a
+7. Before each lane/correction adaptive attempt, `ReserveGlobalAttempt` binds
+   lane/correction ID, `process_run_id`, local attempt, and verifier hash. Its
+   reservation is consumed exactly once at verifier classification; process
+   launches do not change `max_total_attempts`.
+8. The correction is genuinely dependent on the changed verifier feedback: a
    control run with unchanged/withheld feedback remains red, while the changed
    feedback produces a different candidate hash and later green evidence.
-8. Parent verification creates a clean detached
+9. Parent verification creates a clean detached
    `candidate_verification_worktree` at the exact candidate SHA, runs the
    shared envelope only there, proves expected/pre/post HEAD equality and clean
    pre/post status, records both compiled-source checks, then
    removes/reconciles it with separately durable teardown evidence.
-9. Ownership checks pass, reject an out-of-scope write, and categorically
+10. Ownership checks pass, reject an out-of-scope write, and categorically
    reject any compiled-pipeline write or integration seam.
-10. Integration occurs in stable order, with an
+11. Integration occurs in stable order, with an
     `aggregate_after_merge` envelope after each merge. Its immutable expected,
     pre-, and post-HEADs are equal; pre/post porcelain-v2 status records and
     complete ignored-aware worktree manifests match; both compiled-source
     checks pass; all verifier outputs are contained beneath its output root; and
     its aggregate token agrees with the envelope verdict.
-11. `lane_c` starts only after both dependencies are integrated and green.
-12. Cross-lane `ITERATE` invokes one `IntegrationCorrection` on the integration
-   branch, never the old lane branches; its write set is limited to the
-   responsible lanes' ownership union plus declared integration seams.
-13. Correction invalidates prior proof for the affected closure, passes
-    `CompiledSourceGate`, then reruns all three closure lane verifiers through
-    separate `affected_closure_lane` envelopes at current integration HEAD
-    before an aggregate envelope and coherence gate pass.
-14. The final sweep runs every lane verifier through a `final_sweep_lane`
-    envelope at one exact final integration HEAD; the `final_aggregate`
-    envelope and fresh-review record name that SHA and both source SHAs.
-15. The pre-finalization and pre-delivery compiled-source gates match the
+12. `lane_c` starts only after both dependencies are integrated and green.
+13. Cross-lane `ITERATE` reserves one process launch and invokes one supervised
+    `IntegrationCorrection` child on the integration branch, never old lane
+    branches; its write set is limited to responsible ownership plus seams.
+14. Correction invalidates prior proof, then at one current HEAD runs all
+    affected-closure lane envelopes, `affected_closure_aggregate`,
+    `pre_coherence_aggregate`, and a fresh coherence review in that order.
+15. After coherence passes, the final sweep runs every lane verifier through a
+    `final_sweep_lane` envelope at one frozen final HEAD, followed by
+    `final-aggregate-after-sweep`; both and the coherence record name that exact
+    SHA and both source SHAs.
+16. The pre-finalization and pre-delivery compiled-source gates match the
     admission manifest.
-16. The delivery ledger records no more than two attempts, both source SHAs,
-    and the manifest hash, and the remote PR
-    exists with a head SHA equal to its exact expected head.
-17. `result.json` reports both delta ranges; `result.json`,
+17. Delivery runs through a separately supervised child in a clean disposable
+    final-HEAD worktree. Pre/post HEAD, full status, complete non-`.git`
+    filesystem manifests, and source gates remain equal/green; every generated
+    file is beneath `delivery_state_root`, and no new/changed `.resolve` entry
+    appears relative to final HEAD.
+18. The external delivery ledger records no more than two attempts, both source
+    SHAs, runner/provider/process identities, and manifest hash; the parent's
+    independent remote query observes a PR head equal to exact final HEAD.
+19. `result.json` reports both delta ranges; `result.json`,
     `goal_plan.status`, and the last-line token agree on `COMPLETE` only after
-    all sixteen preceding observations hold.
+    all eighteen preceding observations hold.
 
 ### Fault and recovery probes
 
@@ -2237,10 +2751,13 @@ The implementation is not ready until live probes also demonstrate:
   plus absent child and missing result is also infrastructure failure;
 - crash before ledger/ack exercises bounded `/proc` discovery by exact
   `process_run_id` in supervisor argv/environment: one supervisor is adopted,
-  an orphan child is terminated, zero matches follows consumed-reservation
-  rules, and ambiguous duplicate tokens are never signalled;
-- `poll` distinguishes running, terminal-result, supervisor-gone, and infra;
-  parent cancellation uses only `terminate` with an approved reason token;
+  an orphan child is terminated, zero matches releases only a proven
+  never-started process-launch reservation, and ambiguous duplicate tokens are
+  never signalled;
+- `poll --wait-seconds 30` distinguishes running, terminal-result,
+  supervisor-gone, and infra, validates identity before/after its internal
+  long-poll, and never exceeds remaining child/run deadline; parent cancellation
+  uses only `terminate` with an approved reason token;
 - timeout and cancellation perform supervisor-owned TERM -> grace -> KILL,
   reap the direct child, empty the whole child group, and write result atomically;
 - killing the reaper while it writes result cannot expose a partial valid JSON;
@@ -2280,13 +2797,20 @@ The implementation is not ready until live probes also demonstrate:
   `verifier_output_root` fails admission/envelope integrity; a normal verifier's
   output-root manifest contains all logs, caches, temp files, coverage, and
   reports;
-- two simultaneous launch reservations serialize under `fcntl.flock`, receive
-  distinct reservation IDs, and never exceed `max_total_attempts` while the
-  child processes themselves still overlap;
-- a crash after `RESERVED` but before `launch`, a crash after process creation
-  but before ack, and duplicate consumption are reconciled exactly once; only
-  proven no-launch reservations release, and conflicting consumption is
-  `INFRA_FAILURE`;
+- simultaneous process-launch reservations serialize under `fcntl.flock`,
+  receive distinct IDs, never exceed `max_process_launches`, and do not change
+  `max_total_attempts` while child processes still overlap;
+- simultaneous lane/correction `ReserveGlobalAttempt` calls bind distinct
+  subject/process/local-attempt/verifier tuples and never exceed
+  `max_total_attempts`; each consumes exactly once only when its verifier record
+  is classified;
+- process crash after reservation but before creation releases only with proof
+  of no process; crash after creation consumes. Adaptive crash after reservation
+  releases only with proof no attempt started; any start/ambiguity writes a
+  synthetic crash classification and consumes conservatively;
+- exhausting `max_process_launches` prevents another supervisor start/restart
+  without borrowing an adaptive attempt, while one surviving child may consume
+  multiple adaptive attempts;
 - when `CLOCK_BOOTTIME` reaches the deadline with active children, the ledger
   closes, every matching active process group is terminated through
   `terminate --reason global_deadline`, active lanes become
@@ -2294,17 +2818,20 @@ The implementation is not ready until live probes also demonstrate:
   `BLOCKED-global-deadline`, and no future retry reserves;
 - a reboot/boot-ID mismatch or invalid/decreasing boottime during budget
   recovery is `INFRA_FAILURE`, not a refreshed deadline;
-- preapproval admission snapshots target Git refs, branch/worktree list, Git
-  common-directory metadata, target-tree status, and `worktree_root`; after
-  external manifest/render persistence those observations are unchanged and
-  `worktree_root` still does not exist;
-- state/worktree roots equal to or ancestor/descendant of the target repository,
-  Git common directory, compiled source, any worktree, or each other are
-  rejected, including symlink aliases; unset `XDG_STATE_HOME` uses only the
-  external `$HOME/.local/state` fallback;
+- preapproved headless admission snapshots target Git refs, branch/worktree
+  list, Git common-directory metadata, target-tree status, `worktree_root`, and
+  `delivery_state_root`; after external manifest/render persistence those
+  observations are unchanged and neither mutable root exists;
+- `approval_mode=required` succeeds with attached `--on-human-gate console` or
+  host interviewer and is rejected before mutation when unattended headless;
+- state/worktree/delivery roots equal to or ancestor/descendant of the target
+  repository, Git common directory, compiled source, any worktree, or each
+  other are rejected, including symlink aliases; unset `XDG_STATE_HOME` uses
+  only the external `$HOME/.local/state` fallback;
 - two consecutive runs leave source DOT, scripts, and committed fixtures
   byte-clean, with every generated log, event, checkpoint, feedback, and result
-  beneath `state_root/lanes/<lane-id>/`;
+  beneath the appropriate external `state_root`/`delivery_state_root`; no
+  `.resolve` appears in any verified worktree;
 - deleting, adding, mode-changing, or byte-changing any compiled-source entry
   is detected after child exit, before candidate verification, after merge,
   after integration correction, during restart, and before
@@ -2318,9 +2845,11 @@ The implementation is not ready until live probes also demonstrate:
   routes evidence back to the responsible lane;
 - a `plan.json` byte change, DOT/plan lane mismatch, relative runtime path,
   wrong `product_base_sha`, non-containing or non-descendant
-  `execution_source_sha`, argv/param order mismatch, output-path escape,
-  incompatible reused `run_id`, non-Linux platform, or mode mismatch fails
-  admission before mutation;
+  `execution_source_sha`, invalid runner-prefix form/hash/module/source,
+  failed doctor/missing required flag, unsupported/missing-credential provider,
+  provider change on resume, argv/param order mismatch, output-path escape,
+  engine-step inequality, incompatible reused `run_id`, non-Linux platform, or
+  mode/approval-transport mismatch fails admission before mutation;
 - HTTPS, `ssh://`, and scp-like forms for the same fetch remote normalize to
   the same `host[:port]/path`, while a host, non-default-port, path-case, or
   repository-path mismatch fails remote identity admission;
@@ -2342,16 +2871,26 @@ The implementation is not ready until live probes also demonstrate:
 - a multi-owner coherence `ITERATE` creates one integration-branch correction,
   rejects a write outside the ownership union plus integration seams, computes
   the full transitive-dependent closure, rejects every compiled-source write,
-  runs `CompiledSourceGate`, and invalidates its old evidence;
+  runs as a supervised correction child with per-attempt
+  `ReserveGlobalAttempt`, runs `CompiledSourceGate`, and invalidates old
+  evidence;
 - a red affected-closure or final-sweep lane verifier routes back to
   `IntegrationCorrection`, while correction-budget exhaustion records named
   residuals and never resumes old lane branches;
+- every correction proof route runs affected-closure lane envelopes, the
+  affected-closure aggregate, the pre-coherence aggregate, and coherence at one
+  HEAD; coherence `PASS` then requires a fresh all-lane sweep and
+  `final-aggregate-after-sweep` at that same final HEAD;
 - restarting after an integration-correction commit resumes closure proof at
   current integration HEAD rather than duplicating the correction;
 - restarting after a lane commit but before integration reconciles the commit
   without duplicate work or duplicate merge;
-- restarting after remote PR creation discovers the existing PR and verifies
-  its head instead of opening another;
+- a delivery child runs under the accountable supervisor in a clean disposable
+  final-HEAD worktree, preserves pre/post HEAD/status/full-filesystem/source
+  gates, writes generated state only below `delivery_state_root`, and is
+  rejected if it creates `.resolve`;
+- restarting after remote PR creation discovers the existing PR and the parent
+  independently verifies its exact final head instead of opening another;
 - two unverifiable delivery attempts preserve the integrated branch and end
   with `GOAL_PLAN:INFRA_FAILURE`, with no third attempt; and
 - an unavailable or untrustworthy verifier/git/remote substrate reaches
