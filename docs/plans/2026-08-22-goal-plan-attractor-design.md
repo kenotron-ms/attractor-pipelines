@@ -173,7 +173,12 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
   merge, and remote PR state.
 - Record every post-approval lane, integration, candidate-verification, and
   delivery worktree in `run-owned-worktrees.json`; reject foreign paths and
-  clean up only exact recorded run-owned worktrees.
+  when current `FULL` authority permits Git cleanup, clean up only exact
+  recorded run-owned worktrees.
+- Recompute pre-terminal mutation authority from the current parent-runner,
+  target/source-identity, and compiled-source gates. Grant `FULL` only when all
+  are green; otherwise grant `EXTERNAL_ONLY`, leave every Git/repository
+  resource untouched, and record it as unresolved infrastructure evidence.
 - Route every intended terminal state through `PreTerminalCleanup`, let that
   phase choose the final status from real process/worktree state, and only then
   publish durable terminal result/status/token/carrier evidence.
@@ -288,7 +293,7 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `provider` | Non-empty compiled provider ID. Every parent-spawned lane, correction, and delivery runner argv contains exact `--provider <provider>`; the value is immutable across restart/resume. |
 | `integration_correction_child` | Immutable child-pipeline path/hash, exact prefix/provider/argv contract, `integration_worktree` CWD policy, positive `max_child_seconds`, result schema, and process-supervision contract for bounded integration correction. |
 | `delivery_child` | Required only for `delivery_mode: "pr"`; immutable adapted `deliver_pr.dot` path/hash, exact prefix/provider/argv contract, `delivery_worktree` CWD policy, positive `max_child_seconds`, external-state policy, delivery-result schema, and process-supervision contract. Forbidden for `delivery_mode: "none"`. |
-| `pre_terminal_cleanup` | Object binding the checked-in `goal_plan_runtime.py` path/hash, admitted absolute interpreter identity, exact `pre-terminal-cleanup` argv schemas, bounded identity-safe process-reconciliation policy, run-owned-worktree lifecycle rules including `PRESERVED_RESIDUAL`, evidence schema `goal-plan.pre-terminal-cleanup/v1`, final-status/token mapping, and `definition_sha256`. |
+| `pre_terminal_cleanup` | Object binding the checked-in `goal_plan_runtime.py` path/hash, admitted absolute interpreter identity, exact `pre-terminal-cleanup` argv schemas, fresh parent-runner/target-source/compiled-source gate policy, explicit cleanup-record fields `parent_binding_verdict` and `mutation_authority`, bounded identity-safe process-reconciliation policy, authority-scoped run-owned-worktree lifecycle rules including `PRESERVED_RESIDUAL`, required gate-evidence hashes, permitted/attempted/skipped action records, unresolved-resource evidence, cleanup-verdict/final-status mapping, evidence schema `goal-plan.pre-terminal-cleanup/v1`, token mapping, and `definition_sha256`. |
 | `engine_step_budget` | Object with exact positive integers `poll_wait_seconds: 30` and `engine_step_multiplier: 50`; compiled parent node/step totals; and, for every lane, correction, and delivery branch, `branch_nonpoll_steps`, `branch_node_count`, and `max_poll_cycles`. |
 | `global_budgets` | Object with positive integer `max_total_attempts` for verification-bearing adaptive attempts only, positive integer `max_process_launches` for supervisor starts/restarts, positive integer `max_integration_corrections` for supervised correction-child launches, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v2`, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, correction-reservation state contract, and budget-ledger implementation hash. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
@@ -781,7 +786,12 @@ worktrees, not a relaxation for arbitrary descendants. Root safety never
 reapplies the pre-approval blanket prohibition to the run-owned worktrees it has
 just created.
 
-Lifecycle recovery is exact. A `CREATING` entry with no path/registration may
+Lifecycle recovery is exact and mutation-authority-gated. Every cleanup
+recovery or retry first reruns the current parent-runner, target/source-identity,
+and compiled-source gates; it may never infer authority from a prior cleanup
+record or reuse a prior `mutation_authority: "FULL"`. Ordinary lifecycle
+reconciliation may mutate Git only after the same current gates grant `FULL`.
+A `CREATING` entry with no path/registration may
 retry the same `git worktree add` only when durable command evidence proves add
 never began; if the exact path and registration exist, recovery must validate
 the expected common directory, HEAD, and branch/detached state before marking
@@ -887,10 +897,13 @@ before `PreTerminalCleanup`. Every parent-executed `CompiledSourceGate` first
 requires this binding gate to pass.
 
 A parent-binding mismatch is `INFRA_FAILURE` and disables repository mutation
-for that parent invocation. The parent may atomically close external evidence
-and identity-safely reconcile or stop a child only when the full recorded
-process identity remains valid; it may not alter Git refs, registrations, or
-worktree paths from the mismatched invocation.
+for that parent invocation. The same restriction applies when target/source
+identity or compiled-source binding is red or unknown. Pre-terminal cleanup then
+records `mutation_authority: "EXTERNAL_ONLY"`: it may atomically close external
+evidence and identity-safely reconcile or stop a supervisor/child process group
+only when the full recorded procfs identity remains valid, but it may not alter
+target-repository files, refs, branches, Git registrations, worktree paths, or
+Git common-directory state.
 
 The deterministic `CompiledSourceGate` compares both the complete path set and
 every entry's mode, length, and bytes against the admission manifest. It emits
@@ -997,12 +1010,22 @@ Start
             -> name exact preserved residual worktrees -> intended RESIDUALS_READY
        -> untrustworthy substrate -> intended INFRA_FAILURE
        -> rejected/cancelled before mutation -> intended ABORTED
-  -> ParentRunnerBindingGate + CompiledSourceGate before terminal cleanup
-  -> PreTerminalCleanup(intended status)
-       -> reconcile/stop identity-valid child supervisors and process groups
-       -> remove or explicitly preserve exact run-owned worktrees by status
-       -> verify registry/filesystem/worktree-list mapping and foreign-path absence
-       -> choose final status; cleanup fault downgrades non-INFRA intent to INFRA_FAILURE
+  -> Fresh CleanupAuthorityGate before terminal cleanup
+       -> recompute ParentRunnerBindingGate + target/source identity
+          + CompiledSourceGate; hash current evidence
+       -> all green: parent_binding_verdict=PASS, mutation_authority=FULL
+       -> any red/unknown: mutation_authority=EXTERNAL_ONLY
+          + intended/final INFRA_FAILURE
+  -> PreTerminalCleanup(intended status, current authority)
+       -> both authorities may reconcile/stop only fully procfs-identity-valid
+          child supervisors and process groups
+       -> FULL: perform bounded identity-matched Git cleanup/preservation
+          according to COMPLETE/RESIDUALS/ABORTED/INFRA policy
+       -> EXTERNAL_ONLY: write external evidence, skip every Git/repository
+          action, and retain all worktrees/registrations as unresolved evidence
+       -> bind permitted/attempted/skipped actions, unresolved resources,
+          gate hashes, cleanup verdict, and chosen final status
+       -> cleanup fault or restricted authority yields INFRA_FAILURE
   -> DurableTerminalFinalizer(final status)
        -> atomically write result.json and goal_plan.status
        -> emit exactly one terminal token
@@ -1762,7 +1785,7 @@ evidence, and exact candidate disposition. It is a parent routing hint only.
 | Optional qualitative lane critique | Independent LLM gate plus deterministic artifact classifier | Some acceptance criteria cannot be reduced to a command; the reviewer must be outside the worker context, and its versioned artifact must be schema-valid and tied to the exact commit. |
 | Ownership diff, commit existence, ancestry, clean-state checks | Deterministic nodes | A worker cannot attest its own git side effects. |
 | Merge/cherry-pick, rollback of a failed candidate, merge journal | Deterministic nodes | Integration is state mutation with exact success criteria. |
-| Pre-terminal process reconciliation, run-owned worktree removal/preservation, foreign-path proof, and final-status choice | Deterministic `PreTerminalCleanup` | Cleanup can invalidate intended success, so it must finish before any durable terminal publication. |
+| Pre-terminal authority derivation, process reconciliation, authority-scoped run-owned worktree removal/preservation, foreign-path proof, and final-status choice | Deterministic `PreTerminalCleanup` | Cleanup can invalidate intended success. It receives `FULL` only from fresh green parent-runner, target/source, and compiled-source gates; red/unknown binding restricts it to external evidence plus fully procfs-identity-validated process termination before any durable terminal publication. |
 | Cross-lane coherence review | Fresh independent LLM gate plus the same deterministic artifact classifier | Semantic conflicts can survive lane-local mechanical checks. The shared review interface ties the verdict to final HEAD and routes correction to named lane IDs. |
 | PR existence and exact-head verification | Deterministic remote query | `OpenPR` cannot certify its own external side effect. |
 
@@ -2474,12 +2497,14 @@ The gate cannot relabel residual work as `COMPLETE`. No partial work is
 automatically delivered. If any worktree must remain for residual inspection,
 the gate must name its exact run-owned registry entry, residual ID, reason,
 evidence paths, expected current identity, and identity-safe recovery/removal
-commands in the residual-preservation manifest. `PreTerminalCleanup` preserves
-only those named entries as `PRESERVED_RESIDUAL` and cleans every other
-run-owned worktree. Selecting no preserved worktrees is valid and still yields
-`RESIDUALS_READY` after all entries are removed. An operator stop after
-repository mutation remains an evidence-backed residual disposition; `ABORTED`
-is reserved for rejection or cancellation before mutation.
+commands in the residual-preservation manifest. With current
+`mutation_authority: "FULL"`, `PreTerminalCleanup` preserves only those named
+entries as `PRESERVED_RESIDUAL` and cleans every other run-owned worktree.
+Selecting no preserved worktrees is valid and still yields `RESIDUALS_READY`
+after all entries are removed. `EXTERNAL_ONLY` cannot establish this terminal:
+it leaves every worktree untouched and finalizes `INFRA_FAILURE`. An operator
+stop after repository mutation remains an evidence-backed residual disposition;
+`ABORTED` is reserved for rejection or cancellation before mutation.
 
 There are no routine gates between waves.
 
@@ -2551,10 +2576,13 @@ The run persists:
 - final-sweep lane-verifier records bound to final integration HEAD;
 - `final-aggregate-after-sweep` record bound to that same final HEAD;
 - terminal classification;
-- `PreTerminalCleanup` intent, invocation, bounded process reconciliation,
+- `PreTerminalCleanup` intent, invocation, fresh
+  `parent_binding_verdict`, target/source-identity and compiled-source verdicts,
+  `mutation_authority`, gate evidence paths/hashes, permitted actions, attempted
+  actions, skipped Git actions, bounded process reconciliation,
   residual-preservation manifest, cleanup journal, final registry/filesystem/Git
-  worktree-list projection, unresolved infrastructure resources, chosen final
-  status, and evidence hash;
+  worktree-list projection, unresolved infrastructure resources, final cleanup
+  verdict, chosen final status, and evidence hash;
 - versioned `result.json`; and
 - the versioned delivery-attempt ledger, external `delivery_state_root`,
   disposable delivery-worktree lifecycle and pre/post envelope, supervised
@@ -2569,11 +2597,15 @@ state; they are not the source of truth.
 On restart, the graph compares state with reality:
 
 Before rule 1, the launcher changes into the durable canonical `target_repo`
-before `exec`; the new parent invocation must pass
-`ParentRunnerBindingGate`, append a hash-chained invocation record, and match
-the original prefix/provider/CWD/DOT/hash/logs/source bindings. Until that
-passes, recovery may write only below external `state_root` and may perform no
-Git/ref/worktree mutation.
+before `exec`; the new parent invocation must rerun
+`ParentRunnerBindingGate`, target/source-identity proof, and
+`CompiledSourceGate`, append a hash-chained invocation record, and match the
+original prefix/provider/CWD/DOT/hash/logs/source bindings. Only a current
+all-green set grants `mutation_authority: "FULL"`. A red or unknown gate grants
+`EXTERNAL_ONLY`: recovery may write only below external `state_root` and may
+terminate only a fully procfs-identity-validated supervisor/child process group.
+It performs no target-repository-file, ref, branch, Git-registration,
+worktree-path, or Git-common-directory mutation.
 
 1. Re-resolve `state_root`, `worktree_root`, and conditional
    `delivery_state_root`, reject symlink drift, and require equality with the
@@ -2691,18 +2723,26 @@ Git/ref/worktree mutation.
     state at its exact expected head if delivery may already have occurred;
     never open a duplicate merely because local state is incomplete.
 28. If a durable intended-status or partial `PreTerminalCleanup` journal exists
-    but no valid `result.json` exists, resume only
-    `PreTerminalCleanup`: revalidate the current parent binding, process
-    identities, registry, residual manifest, filesystem, and Git worktree list;
-    idempotently finish exact lifecycle transitions; choose the final status;
-    and only then run the finalizer. Do not re-enter product work or delivery.
+    but no valid `result.json` exists, resume only `PreTerminalCleanup`. Every
+    retry creates a new cleanup-attempt record and recomputes current
+    `ParentRunnerBindingGate`, target/source-identity, and
+    `CompiledSourceGate` evidence before any action. A prior
+    `mutation_authority: "FULL"` is historical evidence only and is rejected
+    when the current gate set is red or unknown. Current `FULL` may
+    idempotently finish exact process and Git lifecycle transitions; current
+    `EXTERNAL_ONLY` may finish external evidence and fully
+    procfs-identity-validated process termination only, records every Git action
+    as skipped, leaves worktrees/refs/registrations unresolved, and chooses
+    `INFRA_FAILURE`. Do not re-enter product work or delivery.
 29. If valid durable terminal `result.json`, `goal_plan.status`, and terminal
-    token evidence exist, verify they match the cleanup record's chosen status
-    and perform no post-terminal cleanup or repository mutation. If matching
-    CLI carrier evidence is absent, resume only the idempotent carrier outcome
-    from that final status; do not rewrite result/status/token or rerun cleanup.
-    A mismatch is an externally reported infrastructure inconsistency, never a
-    reason to rewrite a prior `COMPLETE` in place.
+    token evidence exist, verify they match the cleanup record's chosen status,
+    `parent_binding_verdict`, `mutation_authority`, current-gate evidence hashes,
+    and cleanup verdict, and perform no post-terminal cleanup or repository
+    mutation. If matching CLI carrier evidence is absent, resume only the
+    idempotent carrier outcome from that final status; do not rewrite
+    result/status/token or rerun cleanup. A mismatch is an externally reported
+    infrastructure inconsistency, never a reason to rewrite a prior `COMPLETE`
+    in place.
 
 Reconciliation is idempotent. It skips work only when durable evidence and real
 state agree. Ambiguous or contradictory infrastructure state fails loudly as
@@ -2712,21 +2752,56 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Both source SHAs, the immutable parent/child/supervisor runner bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and `PreTerminalCleanup` proves no live supervisor/child process group, no foreign path, and every run-owned lane/candidate/delivery/integration worktree and Git registration is `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
-| `RESIDUALS_READY` | All lanes are terminal or dependency-blocked and every residual has evidence. `PreTerminalCleanup` proves no live process group, marks only explicitly named residual worktrees `PRESERVED_RESIDUAL` with evidence/recovery commands, removes every other run-owned worktree/registration, and finds no unidentified or foreign path. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | Any external-root/approval boundary, parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. `PreTerminalCleanup` has completed its bounded identity-safe best effort and names every unresolved resource. | No delivery. |
-| `ABORTED` | The plan was rejected or cancelled before mutation, and `PreTerminalCleanup` proves no run-owned process, worktree, Git registration, `worktree_root`, or `delivery_state_root` mutation exists. | No delivery. |
+| `COMPLETE` | Both source SHAs, the immutable parent/child/supervisor runner bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and `PreTerminalCleanup` records `mutation_authority: "FULL"`, proves no live supervisor/child process group or foreign path, and marks every run-owned lane/candidate/delivery/integration worktree and Git registration `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
+| `RESIDUALS_READY` | All lanes are terminal or dependency-blocked and every residual has evidence. Under current `FULL` authority, `PreTerminalCleanup` proves no live process group, marks only explicitly named residual worktrees `PRESERVED_RESIDUAL` with evidence/recovery commands, removes every other run-owned worktree/registration, and finds no unidentified or foreign path. | Never auto-delivers; requires residual disposition. |
+| `INFRA_FAILURE` | Any external-root/approval boundary, parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. `PreTerminalCleanup` records either `FULL` or `EXTERNAL_ONLY`, performs only the bounded actions that authority permits, and names every unresolved resource. Red/unknown parent, target/source, or compiled-source binding always yields `EXTERNAL_ONLY` and leaves all Git/repository resources untouched. | No delivery. |
+| `ABORTED` | The plan was rejected or cancelled before mutation, current cleanup authority is `FULL`, and `PreTerminalCleanup` proves no run-owned process, worktree, Git registration, `worktree_root`, or `delivery_state_root` mutation exists. A red/unknown binding yields `INFRA_FAILURE`, not `ABORTED`. | No delivery. |
 
 ### `PreTerminalCleanup` and durable finalizer machine contract
 
 Every intended terminal route first enters the explicit deterministic
 `PreTerminalCleanup` phase. The phase runs after the final
-`ParentRunnerBindingGate` and `CompiledSourceGate`, before durable terminal
-finalization, and before any terminal token, `goal_plan.status`,
-`result.json`, or CLI carrier outcome is published.
-Both gates must pass for intended `COMPLETE`, `RESIDUALS_READY`, or `ABORTED`.
-A red gate routes intended `INFRA_FAILURE` into the restricted bounded cleanup
-path with the red evidence; it does not authorize Git/worktree mutation.
+cleanup-authority decision, before durable terminal finalization, and before any
+terminal token, `goal_plan.status`, `result.json`, or CLI carrier outcome is
+published.
+
+Every cleanup attempt freshly recomputes and durably hashes:
+
+1. `ParentRunnerBindingGate`, including the current parent procfs/CWD,
+   runner/DOT/argv/provider/logs-root, and invocation-record binding;
+2. target/source identity, including canonical target Git top-level/common
+   directory, selected remote/history-anchor proof, `product_base_sha`,
+   `execution_source_sha`, ancestry, and containing-commit binding; and
+3. `CompiledSourceGate` against the execution source and every current
+   non-`REMOVED` run-owned worktree that still exists.
+
+The checks remain dependency-ordered. A red/unknown parent-runner gate prevents
+target-bound downstream gate execution; each blocked current verdict is
+recorded `UNKNOWN` with its prerequisite evidence rather than bypassing the red
+gate.
+
+The cleanup record's required `parent_binding_verdict` is exactly `PASS`,
+`RED`, or `UNKNOWN` for item 1. Separate
+`target_source_binding_verdict` and `compiled_source_verdict` fields use the
+same enum. Missing, unreadable, stale, or incomplete current evidence is
+`UNKNOWN`, never a reason to trust a prior pass.
+
+The required `mutation_authority` is derived, not supplied:
+
+- `FULL` only when all three current verdicts are exactly `PASS`. It permits
+  the bounded, identity-matched status-specific Git worktree/ref/registration
+  actions below.
+- `EXTERNAL_ONLY` whenever any current verdict is `RED` or `UNKNOWN`. It may
+  write only external state/evidence and may terminate only supervisor/child
+  process groups whose complete canonical procfs identity matches durable
+  process evidence. It must not modify target-repository files, refs, branches,
+  Git registrations, worktree paths, or Git common-directory state. Every
+  run-owned or foreign worktree remains untouched and is recorded as unresolved
+  external evidence. The chosen final status is always `INFRA_FAILURE`.
+
+No prior cleanup record, lifecycle state, or prior `FULL` authority can satisfy
+this decision. A later retry with a freshly all-green gate set may receive
+`FULL`; a current red/unknown set never does.
 
 The DOT invokes the admitted checked-in runtime with this exact ordered command:
 
@@ -2739,8 +2814,10 @@ pre-terminal-cleanup
 --state-root <absolute-state-root>
 --worktree-root <absolute-worktree-root>
 --run-owned-worktrees <absolute-state-root/run-owned-worktrees.json>
+--cleanup-attempt <positive-decimal>
+--gate-evidence-root <absolute-state-root/cleanup/gates/CLEANUP_ATTEMPT>
 --intended-status <COMPLETE|RESIDUALS_READY|INFRA_FAILURE|ABORTED>
---output <absolute-state-root/cleanup/pre-terminal-cleanup.json>
+--output <absolute-state-root/cleanup/attempts/CLEANUP_ATTEMPT.json>
 ```
 
 For intended `RESIDUALS_READY`, exact
@@ -2748,11 +2825,16 @@ For intended `RESIDUALS_READY`, exact
 <absolute-state-root/cleanup/residual-preservation.json>` is appended after
 `--intended-status` and before `--output`; that option is forbidden for every
 other intended status. The command rejects reordered, missing, extra, relative,
-or hash-unbound arguments. Its script/interpreter identity, suffix schemas,
+or hash-unbound arguments. It does not accept `--mutation-authority`; the
+runtime derives authority only from the current attempt's new gate records
+beneath `--gate-evidence-root`. Its script/interpreter identity, suffix schemas,
 evidence schema `goal-plan.pre-terminal-cleanup/v1`, and token map are part of
-`plan.json.pre_terminal_cleanup`.
+`plan.json.pre_terminal_cleanup`. Each attempt output is immutable once
+atomically published; the finalizer consumes the highest current attempt whose
+ordinal, gate paths/hashes, authority, and journal predecessor hash all validate.
 
-The status-specific cleanup rules are normative:
+The status-specific cleanup rules are normative. Every Git/worktree action in
+these rules is reachable only with `mutation_authority: "FULL"`:
 
 - **Intended `COMPLETE`:** reconcile every process-launch intent, ledger, ack,
   and result; request termination only through the immutable supervisor control
@@ -2779,24 +2861,51 @@ The status-specific cleanup rules are normative:
   gating terminal state, not a cleanup fault. Any unidentified or foreign path,
   dirty non-residual worktree, non-residual removal/prune failure, or mismatch
   between manifest and registry chooses `INFRA_FAILURE`.
-- **Intended `INFRA_FAILURE`:** perform bounded best-effort cleanup. Reconcile
-  known process state; signal only a PID/process group whose complete canonical
-  identity matches the durable record; attempt non-force removal only for exact
-  clean identity-matched run-owned worktrees; never signal an unverified PID and
-  never delete an unrecorded/foreign path. Persist every unresolved process,
-  worktree, registration, dirty path, ambiguous identity, attempted command,
-  and recovery command. Cleanup faults do not change the already-infrastructure
-  final status, but they must remain visible in terminal evidence.
+- **Intended `INFRA_FAILURE` with `FULL`:** perform bounded best-effort cleanup.
+  Reconcile known process state; signal only a supervisor/child process group
+  whose complete canonical identity matches the durable record; attempt
+  non-force removal only for exact clean identity-matched run-owned worktrees;
+  never signal an unverified PID and never delete an unrecorded/foreign path.
+  Persist every unresolved process, worktree, registration, dirty path,
+  ambiguous identity, attempted command, and recovery command.
+- **Intended `INFRA_FAILURE` with `EXTERNAL_ONLY`:** reconcile external process
+  evidence and, when complete procfs identity is valid, terminate the matching
+  supervisor/child process group. Do not run `git`, remove/rename/write a
+  worktree path, change a branch/ref/registration, or touch target-repository or
+  Git-common-directory state. Record all otherwise applicable Git actions in
+  `skipped_git_actions`; record every run-owned and foreign worktree,
+  registration, ref, branch, and path as an unresolved resource with
+  operator-facing evidence. Cleanliness or apparent run ownership never widens
+  this authority.
 
-`PreTerminalCleanup` atomically writes intended status, chosen final status,
-current parent invocation hash, every process reconciliation/termination
-result, pre/post registry and worktree-list projections, worktree lifecycle
-transitions, preserved-residual manifest/hash, foreign-path scan, unresolved
-resources, exact commands/outputs, and its evidence hash. Its last non-empty
-stdout line is exactly
+`PreTerminalCleanup` atomically writes one
+`goal-plan.pre-terminal-cleanup/v1` record with at least:
+
+| Field | Contract |
+|---|---|
+| `schema_version`, `cleanup_attempt`, `intended_status` | Exact schema, positive attempt ordinal, and requested intended terminal status. |
+| `parent_binding_verdict` | Exact current `PASS`, `RED`, or `UNKNOWN`; never copied from an earlier attempt. |
+| `target_source_binding_verdict`, `compiled_source_verdict` | Exact current `PASS`, `RED`, or `UNKNOWN` for the other two authority gates. |
+| `mutation_authority` | Exact derived `FULL` or `EXTERNAL_ONLY`; `FULL` iff all three current verdicts are `PASS`. |
+| `gate_evidence` | Current attempt's parent, target/source, and compiled-source record paths and canonical SHA-256 values. Unreadable/missing evidence records null hash plus the observation error and forces `UNKNOWN`. |
+| `permitted_actions` | Closed ordered action descriptors allowed by the derived authority and intended-status policy, including exact resource identities. |
+| `attempted_actions` | Every attempted process or Git action with exact argv/operation, resource identity, output/evidence path, exit/result, and before/after observation. |
+| `skipped_git_actions` | Every otherwise-applicable Git/repository/worktree action omitted because authority is `EXTERNAL_ONLY`, with resource identity and gate reason. Empty only when no action was skipped. |
+| `process_reconciliation_results` | Every identity check, termination attempt, and group-empty result. |
+| `registry_and_worktree_projections` | Pre/post registry, filesystem, and Git worktree-list evidence when readable; observation alone does not permit mutation. |
+| `preserved_residual_manifest` | Path/hash and bound entries for current `FULL` residual cleanup, otherwise null. |
+| `unresolved_resources` | Every unresolved process, worktree, registration, ref, branch, path, foreign resource, dirty state, ambiguous identity, and operator recovery command/evidence. |
+| `final_cleanup_verdict` | Exact `FULL_COMPLETE`, `EXTERNAL_ONLY_COMPLETE`, or `INCOMPLETE`. The middle value means the restricted policy completed, not that Git resources were cleaned. |
+| `chosen_final_status` | The intended status only for a green `FULL_COMPLETE` status-specific cleanup; otherwise exact `INFRA_FAILURE`. |
+| `record_sha256` | Canonical hash binding all fields above plus current parent invocation hash and exact commands/outputs. |
+
+Cleanup faults under either authority do not change the already-infrastructure
+status, but remain visible in terminal evidence. `EXTERNAL_ONLY_COMPLETE` always
+maps to `INFRA_FAILURE`; `INCOMPLETE` always maps to `INFRA_FAILURE`.
+The cleanup record's last non-empty stdout line is exactly
 `PRE_TERMINAL_CLEANUP:<CHOSEN_FINAL_STATUS>`. A missing, malformed, or
 incomplete cleanup record is itself `INFRA_FAILURE`; the graph reruns/reconciles
-cleanup rather than publishing a terminal.
+cleanup with a fresh authority decision rather than publishing a terminal.
 
 Only after that record is durable does the deterministic finalizer atomically
 write the run root's versioned `result.json` with, at minimum:
@@ -2824,8 +2933,12 @@ write the run root's versioned `result.json` with, at minimum:
 - `run_owned_worktrees_path`, `run_owned_worktrees_sha256`, and final lifecycle
   state for every recorded worktree;
 - `pre_terminal_cleanup_path`, `pre_terminal_cleanup_sha256`,
-  `intended_status`, `unresolved_resource_evidence`, and
-  `preserved_residual_worktrees`;
+  `intended_status`, `parent_binding_verdict`,
+  `target_source_binding_verdict`, `compiled_source_verdict`,
+  `mutation_authority`, `cleanup_gate_evidence_hashes`,
+  `cleanup_permitted_actions`, `cleanup_attempted_actions`,
+  `cleanup_skipped_git_actions`, `final_cleanup_verdict`,
+  `unresolved_resource_evidence`, and `preserved_residual_worktrees`;
 - `verifier_envelope_evidence_paths`;
 - `integration_correction_records`, including every `correction_round_id`,
   `process_run_id`, and terminal correction-reservation state;
@@ -2876,10 +2989,12 @@ The intended-`COMPLETE` path is the only automatic-delivery path. A run becomes
 eligible only after fresh coherence, the final all-lane sweep,
 `final-aggregate-after-sweep`, and `CompiledSourceGate` all pass at one exact
 final HEAD. When delivery is enabled, independent remote verification produces
-only intended `COMPLETE`; actual `COMPLETE` is emitted only after
-`PreTerminalCleanup` also removes the delivery worktree and every other
-run-owned worktree/registration and proves no live process group or foreign
-path.
+only intended `COMPLETE`; actual `COMPLETE` is emitted only after a fresh
+cleanup-authority decision grants `FULL` and `PreTerminalCleanup` also removes
+the delivery worktree and every other run-owned worktree/registration and proves
+no live process group or foreign path. Red/unknown binding grants
+`EXTERNAL_ONLY`, leaves those Git resources untouched, and finalizes
+`INFRA_FAILURE`.
 
 The implementation starts from the proven portable `deliver_pr.dot` topology,
 as required by `AGENTS.md` and `docs/RUBRIC.md` section 5, but adapts every
@@ -2960,9 +3075,11 @@ after nonzero exit, timeout, or cancellation.
 Any local mutation, generated-state leak, missing supervisor result, or stale
 registration is `INFRA_FAILURE`, even if a PR exists. The validated delivery
 worktree remains an exact `ACTIVE` run-owned entry until
-`PreTerminalCleanup`; a non-force removal, prune, or mapping failure there
-changes intended `COMPLETE` to final `INFRA_FAILURE` before any terminal
-publication.
+`PreTerminalCleanup`. With `FULL`, a non-force removal, prune, or mapping
+failure there changes intended `COMPLETE` to final `INFRA_FAILURE` before any
+terminal publication. With `EXTERNAL_ONLY`, removal/prune is skipped, the
+worktree/registration remains unresolved evidence, and final status is
+`INFRA_FAILURE`.
 
 Delivery has a hard limit of two attempts total for the run, including across
 crash recovery. Before any network mutation, each attempt appends a durable
@@ -3087,7 +3204,7 @@ orchestration behavior, not a library-only change.
 | Long polling cannot exhaust engine steps prematurely | Static arithmetic + timed live run | Recomputed branch inequality, parent total-step inequality, exact 30-second poll argv, identity checks, and observed deadline-capped waits. |
 | Delivery preserves verified source | Live Git/remote probe | Disposable final-HEAD worktree has equal pre/post HEAD/status/full-filesystem/source records, no generated `.resolve` delta, external delivery evidence, and parent-observed PR exact head. |
 | Child-runner, supervisor-runner, and provider identity cannot drift | Admission/recovery faults | Both allowed forms for each prefix pass; PATH/shell/executable/interpreter/script/hash/environment/CLI/schema/subcommand/flag/credential faults and either prefix/provider change on resume fail before mutation. |
-| Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; complete removes all run-owned worktrees; residual preserves only named `PRESERVED_RESIDUAL` entries; aborted proves no mutation; infrastructure cleanup is bounded and identity-safe; and no terminal is published first. |
+| Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; fresh all-green parent/target-source/compiled gates grant `FULL`; red/unknown binding grants `EXTERNAL_ONLY`; complete removes exact run-owned worktrees only under `FULL`; residual preserves only named `PRESERVED_RESIDUAL` entries under `FULL`; restricted cleanup touches no Git state, may stop only fully procfs-identity-valid process groups, records skipped/unresolved resources, and publishes no terminal first. |
 | Approval modes are operationally honest | Standalone admission probes | Preapproved unattended headless passes; required attached standalone console/TTY passes; required without TTY or on unattended/hosted headless execution fails before mutation. |
 | DOT remains inspectable | Graphviz + lint | Every DOT renders to a non-empty PNG with recorded hashes and passes strict lint; any render failure is loud. |
 | Python implementation is clean without cache mutation | Static + unit | `python_check`, system `python3 -m pytest`, clean diff, and no changed managed-cache path. |
@@ -3187,12 +3304,16 @@ orchestration behavior, not a library-only change.
     observed/execution-source/compiled-manifest hashes agree; argv prefix,
     provider, process identity, logs root, and resume hash chain are exact; and
     every mismatch fails before repository mutation.
-24. Validate the exact `pre-terminal-cleanup` command schemas, status-specific
-    process/worktree rules, `PRESERVED_RESIDUAL` evidence/recovery contract,
-    all-`REMOVED` complete mapping, pre-mutation aborted proof, bounded
-    infrastructure cleanup, cleanup-resume idempotence, chosen-final-status
-    token, and strict ordering before `result.json`, `goal_plan.status`,
-    terminal token, and CLI carrier publication.
+24. Validate the exact `pre-terminal-cleanup` command schemas; fresh
+    `parent_binding_verdict`, target/source, and compiled-source gate records and
+    hashes; derived `mutation_authority`; status-specific process/worktree rules;
+    `PRESERVED_RESIDUAL` evidence/recovery contract; all-`REMOVED` complete
+    mapping; pre-mutation aborted proof; bounded `FULL` infrastructure cleanup;
+    external-only process/evidence allowlist and Git denylist; permitted,
+    attempted, skipped, and unresolved action records; rejection of stale prior
+    `FULL` on retry; final cleanup verdict/chosen-status token; and strict
+    ordering before `result.json`, `goal_plan.status`, terminal token, and CLI
+    carrier publication.
 
 ### Primary live smoke scenario
 
@@ -3287,9 +3408,10 @@ The live smoke passes only if direct observation proves:
     `final_sweep_lane` envelope at one frozen final HEAD, followed by
     `final-aggregate-after-sweep`; both and the coherence record name that exact
     SHA and both source SHAs.
-16. The pre-delivery and pre-`PreTerminalCleanup`
-    `ParentRunnerBindingGate`/compiled-source gates match immutable admission
-    evidence.
+16. The pre-delivery and pre-`PreTerminalCleanup` parent-runner,
+    target/source-identity, and compiled-source gates freshly match immutable
+    admission evidence; the cleanup record binds their hashes,
+    `parent_binding_verdict: "PASS"`, and `mutation_authority: "FULL"`.
 17. Delivery runs through a separately supervised child in a clean disposable
     final-HEAD worktree. Pre/post HEAD, full status, complete non-`.git`
     filesystem manifests, and source gates remain equal/green; every generated
@@ -3298,10 +3420,13 @@ The live smoke passes only if direct observation proves:
 18. The external delivery ledger records no more than two attempts, both source
     SHAs, runner/provider/process identities, and manifest hash; the parent's
     independent remote query observes a PR head equal to exact final HEAD.
-19. `PreTerminalCleanup` reconciles every supervisor/process group to terminal,
-    removes lane/candidate/delivery/integration worktrees without force,
+19. Under the current `FULL` authority, `PreTerminalCleanup` reconciles every
+    supervisor/process group to terminal, removes exact
+    lane/candidate/delivery/integration worktrees without force,
     prunes/reconciles registrations, proves the complete run-owned mapping is
-    `REMOVED`, finds no foreign path, and durably chooses `COMPLETE`.
+    `REMOVED`, finds no foreign path, records permitted/attempted/skipped actions
+    and no unresolved resource, and durably chooses `FULL_COMPLETE` plus
+    `COMPLETE`.
 20. Only after item 19, `result.json` reports both delta ranges and cleanup
     evidence; `result.json`, `goal_plan.status`, the last-line token, and CLI
     carrier outcome agree on `COMPLETE` only after all nineteen preceding
@@ -3437,27 +3562,52 @@ The implementation is not ready until live probes also demonstrate:
 - creating an unrecorded file/worktree beneath `worktree_root`, registering a
   foreign worktree there, moving a recorded worktree outside it, changing a
   recorded branch/detached SHA/common directory, or deleting its registration
-  yields `INFRA_FAILURE`; intended-infrastructure cleanup leaves every
-  unrecorded/foreign path and unverified process untouched and removes/signals
-  only exact identity-validated resources;
-- intended `COMPLETE` with a live supervisor/group, dirty run-owned worktree,
-  non-force removal failure, prune/registration failure, non-`REMOVED` mapping,
-  or foreign path is changed by `PreTerminalCleanup` to final
-  `INFRA_FAILURE` before any `result.json`, status, token, or carrier outcome;
-- intended pre-mutation `ABORTED` finalizes only when no process/worktree/root
-  mutation exists; an injected process intent, registry entry, worktree,
-  registration, or created mutable root changes it to `INFRA_FAILURE`;
-- intended `RESIDUALS_READY` preserves only explicitly named worktrees as
-  `PRESERVED_RESIDUAL` with exact evidence and recovery commands, removes all
-  others, treats intentional preservation as green, and changes any
-  unidentified/dirty non-residual or removal failure to `INFRA_FAILURE`;
-- intended `INFRA_FAILURE` performs bounded best-effort identity-safe cleanup,
-  never signals a PID with mismatched/unreadable identity, and records every
-  unresolved resource and recovery command before finalization;
+  yields `INFRA_FAILURE`; `FULL` intended-infrastructure cleanup may remove only
+  an exact clean identity-validated run-owned worktree, while
+  `EXTERNAL_ONLY` leaves every run-owned/foreign path, ref, registration,
+  branch, and Git common-directory state untouched;
+- a red/unknown current parent, target/source, or compiled-source binding with
+  an otherwise clean, exact run-owned worktree records `parent_binding_verdict`,
+  `mutation_authority: "EXTERNAL_ONLY"`, the skipped removal/prune actions, and
+  unresolved path/registration evidence; direct filesystem and
+  `git worktree list --porcelain` observations prove the worktree was not
+  removed;
+- the same red/unknown binding may terminate one fully
+  procfs-identity-validated supervisor/child process group and prove it empty,
+  but before/after target-tree, ref, branch, registration, worktree-path, and
+  Git-common-directory observations prove no Git/repository mutation occurred;
+- a current all-green parent/target-source/compiled gate set grants `FULL` and
+  removes one exact recorded clean run-owned worktree without force, reconciles
+  only its exact registration, proves path/registration absence, and records
+  its lifecycle as `REMOVED`;
+- a crash-left cleanup record with prior `mutation_authority: "FULL"` followed
+  by a current red/unknown gate is resumed as a new `EXTERNAL_ONLY` attempt;
+  the stale authority is rejected, every pending Git action is skipped, and the
+  final status is `INFRA_FAILURE`;
+- under current `FULL`, intended `COMPLETE` with a live supervisor/group, dirty
+  run-owned worktree, non-force removal failure, prune/registration failure,
+  non-`REMOVED` mapping, or foreign path is changed by `PreTerminalCleanup` to
+  final `INFRA_FAILURE` before any `result.json`, status, token, or carrier
+  outcome;
+- under current `FULL`, intended pre-mutation `ABORTED` finalizes only when no
+  process/worktree/root mutation exists; an injected process intent, registry
+  entry, worktree, registration, or created mutable root changes it to
+  `INFRA_FAILURE`;
+- under current `FULL`, intended `RESIDUALS_READY` preserves only explicitly
+  named worktrees as `PRESERVED_RESIDUAL` with exact evidence and recovery
+  commands, removes all others, treats intentional preservation as green, and
+  changes any unidentified/dirty non-residual or removal failure to
+  `INFRA_FAILURE`;
+- intended `INFRA_FAILURE` with `FULL` performs bounded best-effort exact
+  identity-matched Git/process cleanup; with `EXTERNAL_ONLY` it performs only
+  external evidence writes and fully procfs-identity-validated process-group
+  termination, skips all Git actions, and records every unresolved resource and
+  recovery command before finalization;
 - crashing during `PreTerminalCleanup` resumes the exact cleanup journal
-  idempotently and publishes no terminal first; after durable terminal
-  publication, no cleanup command runs and an already-written `COMPLETE` can
-  never be downgraded by post-terminal work;
+  idempotently only after recomputing current authority and publishes no
+  terminal first; stale prior `FULL` never authorizes a retry. After durable
+  terminal publication, no cleanup command runs and an already-written
+  `COMPLETE` can never be downgraded by post-terminal work;
 - two consecutive runs leave source DOT, scripts, and committed fixtures
   byte-clean, with every generated log, event, checkpoint, feedback, and result
   beneath the appropriate external `state_root`/`delivery_state_root`; no
@@ -3465,8 +3615,9 @@ The implementation is not ready until live probes also demonstrate:
 - deleting, adding, mode-changing, or byte-changing any compiled-source entry
   is detected after child exit, before candidate verification, after merge,
   after integration correction, during restart, before delivery, and before
-  `PreTerminalCleanup`; every case reaches `INFRA_FAILURE` without lane
-  correction;
+  `PreTerminalCleanup`; a current pre-cleanup mismatch grants only
+  `EXTERNAL_ONLY`, and every case reaches `INFRA_FAILURE` without lane
+  correction or Git cleanup;
 - an impossible verifier exhausts its lane budget, produces a postmortem,
   blocks dependents by name, reaches `RESIDUALS_READY`, and opens no automatic
   PR;
