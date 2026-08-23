@@ -49,3 +49,11 @@ After committing all real work, write ignored worktree-root `DONE.json` as the f
 ```
 
 The `head` and `session_id` must be real. Do not commit `DONE.json`.
+
+## RESUME 1
+
+- Prior session `51ce17a4-92a6-46eb-83bc-fe8e2bdd3cf6` hit wall timeout 2700s, exit 124, no DONE.
+- Treat commits `98389df7fdd1914e914a72682ec9128a3abfad52`, `2729b2e201bee0f371b6b3fa80fb8d10066cf625`, and rescue `597aada4451bc628344a7ad862e6aa06ff2f7018` as this lane's own prior work; do not redo them.
+- Read those diffs and run fresh focused tests/static checks first.
+- Finish remaining failures/contracts, verify the history-anchor commit changes only the guide, push actual branch if possible, then write matching DONE.json.
+- This is RESUME 1 of max 2; original acceptance and wall-bound semantics remain unchanged.
