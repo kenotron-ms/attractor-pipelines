@@ -143,8 +143,18 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
   compiled provider, and runner prefix to remain bound to that repository and
   `execution_source_sha`.
 - Execute every supervisor start and control operation from one separately
-  immutable `supervisor_runner_argv_prefix`; no supervisor operation uses PATH,
-  a shell command string, or an unbound interpreter/script.
+  immutable external `trusted_supervisor_argv_prefix`; no supervisor operation
+  uses PATH, a shell command string, or a target-repository interpreter/script.
+- During the first green admission, before any repository mutation, prove the
+  checked-out `goal_plan_runtime.py` and `goal_plan_supervisor.py` bytes against
+  both `execution_source_sha` and the compiled-source manifest, then materialize
+  byte-exact, non-writable copies from those Git blobs beneath external
+  `state_root` and bind their exact Git/interpreter/executable identities.
+- After that admission, execute every safety-critical gate, budget/process/
+  worktree control, cleanup, finalizer, and recovery operation only through the
+  external `trusted_runtime_argv_prefix` or
+  `trusted_supervisor_argv_prefix`; target-repository runtime files remain
+  source evidence and are never a safety-critical executable.
 - Separate the approved product baseline from the later execution-source commit
   that contains the complete compiled pipeline, and bind both identities through
   every runtime and evidence boundary.
@@ -170,15 +180,19 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
   whose generated state is rooted only at external `delivery_state_root`, then
   independently verify that the remote PR points at the exact integrated HEAD.
 - Recover by reconciling durable state with real git, worktree, verifier,
-  merge, and remote PR state.
+  merge, and remote PR state, but only after validating or deterministically
+  rehydrating the exact external trusted-runtime binding from Git blobs at
+  `execution_source_sha`.
 - Record every post-approval lane, integration, candidate-verification, and
   delivery worktree in `run-owned-worktrees.json`; reject foreign paths and
   when current `FULL` authority permits Git cleanup, clean up only exact
   recorded run-owned worktrees.
 - Recompute pre-terminal mutation authority from the current parent-runner,
-  target/source-identity, and compiled-source gates. Grant `FULL` only when all
-  are green; otherwise grant `EXTERNAL_ONLY`, leave every Git/repository
-  resource untouched, and record it as unresolved infrastructure evidence.
+  trusted-runtime, target/source-identity, and compiled-source gates. Grant
+  `FULL` only when all are green; grant `EXTERNAL_ONLY` only when the external
+  trusted runtime remains green but a repository/source gate is red; otherwise
+  grant `NONE`, perform no Git mutation or general signalling, and stop as
+  infrastructure-blocked.
 - Route every intended terminal state through `PreTerminalCleanup`, let that
   phase choose the final status from real process/worktree state, and only then
   publish durable terminal result/status/token/carrier evidence.
@@ -260,6 +274,7 @@ pipelines/PLAN_SLUG/
     goal_lane.dot
     deliver_pr.dot             # present only when delivery_mode is pr
   python/
+    goal_plan_runtime.py
     goal_plan_supervisor.py
 ```
 
@@ -273,7 +288,7 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 
 | Field | Type and invariant |
 |---|---|
-| `schema_version` | String with exact value `goal-plan.plan/v2`. |
+| `schema_version` | String with exact value `goal-plan.plan/v3`. |
 | `plan_id` | Slug string equal to `PLAN_SLUG`; stable across runs of the same compiled plan. |
 | `source_request` | Non-empty string containing the originating request or its durable reference. |
 | `target_repo` | Object with `vcs: "git"`, `identity_mode: "remote"` or `"history_anchor"`, and the mode-specific fields defined below. |
@@ -287,15 +302,15 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `aggregate_verifier` | Aggregate-verifier contract defined below. |
 | `attractor_runner_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/path/to/attractor"]` or `["/absolute/path/to/python", "-m", "amplifier_module_pipeline_runner.cli"]`. PATH lookup, `/usr/bin/env`, relative executables, wrapper shell strings, and extra prefix tokens are forbidden. |
 | `attractor_runner_identity` | Object binding the prefix's canonical JSON SHA-256, executable realpath/hash, exact module name, module-source realpath/hash, expected `doctor` contract, and required `run` flags. |
-| `parent_runner_invocation` | Object with exact schema `goal-plan.parent-runner-invocation-definition/v1` binding the parent to the same runner prefix/identity and compiled `provider`; symbolic `os_cwd_policy: "target_repo"`; literal `runner_cwd_arg: "."`; exact parent DOT path `pipelines/PLAN_SLUG/PLAN_SLUG.dot`; `parent_dot_hash_policy: "execution_source_blob_and_compiled_manifest"`; exact parent logs-root policy `state_root/parent-attractor-run`; canonical Linux process-identity policy; immutable evidence schema `goal-plan.parent-runner-invocation/v1`; and `definition_sha256`. It embeds no parent-DOT digest, avoiding a `plan_sha256`/parent-DOT hash cycle; admission derives the expected digest from `execution_source_sha` and the compiled-source manifest. |
-| `supervisor_runner_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/path/to/supervisor-executable"]` or `["/absolute/path/to/python", "/absolute/path/resolved/from/pipelines/PLAN_SLUG/python/goal_plan_supervisor.py"]`. PATH lookup, `/usr/bin/env`, relative executables/scripts, `-m`, shell strings, wrappers with unbound targets, and extra prefix tokens are forbidden. |
-| `supervisor_runner_identity` | Object binding canonical prefix SHA-256; executable/interpreter realpath and byte hash; repository-relative supervisor script path plus exact execution-source blob hash and resolved absolute path/hash for the Python form; the closed environment-key/value-hash schema; exact CLI version; supported process-supervision, intent, ledger, ack, result, poll, termination, reconciliation, and self-check schema versions; and the exact `self-check`, `run`, `poll`, `terminate`, and `reconcile` suffix schemas. |
+| `parent_runner_invocation` | Object with exact schema `goal-plan.parent-runner-invocation-definition/v2` binding the parent to the same runner prefix/identity and compiled `provider`; symbolic `os_cwd_policy: "target_repo"`; literal `runner_cwd_arg: "."`; exact parent DOT path `pipelines/PLAN_SLUG/PLAN_SLUG.dot`; `parent_dot_hash_policy: "execution_source_blob_and_compiled_manifest"`; exact parent logs-root policy `state_root/parent-attractor-run`; required runtime-bundle hash and trusted-runtime binding path/hash inputs; canonical Linux process-identity policy; immutable evidence schema `goal-plan.parent-runner-invocation/v2`; and `definition_sha256`. It embeds no parent-DOT digest, avoiding a `plan_sha256`/parent-DOT hash cycle; admission derives the expected digest from `execution_source_sha` and the compiled-source manifest. |
+| `trusted_runtime_definition` | Object with exact schema `goal-plan.trusted-runtime-definition/v1`; repository-relative runtime and supervisor source paths, Git blob IDs, modes, lengths, and SHA-256 values expected at `execution_source_sha`; canonical `runtime_bundle_hash` derivation; exact absolute `trusted_git_argv_prefix` and `trusted_interpreter_argv_prefix`; executable/interpreter realpaths, file hashes, and required permission policies; closed Git `rev-parse`/`cat-file blob` materialization suffixes; external directory/binding paths; atomic write/fsync/non-writable/reread rules; trusted binding schema; exact runtime and supervisor suffix schemas; and `definition_sha256`. PATH lookup, `/usr/bin/env`, relative executables/scripts, `-m`, shell strings, wrappers with unbound targets, and extra prefix tokens are forbidden. |
+| `trusted_runtime_binding_policy` | Object requiring exact external path `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`, binding schema `goal-plan.trusted-runtime-binding/v1`, immutable exact `trusted_runtime_argv_prefix` and `trusted_supervisor_argv_prefix`, per-invocation validation policy, no in-run replacement/rotation policy, deterministic prelaunch/recovery rehydration policy, safety-critical command allowlist, separately validated supervisor-only termination exception, and failure token/evidence mapping. |
 | `provider` | Non-empty compiled provider ID. Every parent-spawned lane, correction, and delivery runner argv contains exact `--provider <provider>`; the value is immutable across restart/resume. |
 | `integration_correction_child` | Immutable child-pipeline path/hash, exact prefix/provider/argv contract, `integration_worktree` CWD policy, positive `max_child_seconds`, result schema, and process-supervision contract for bounded integration correction. |
 | `delivery_child` | Required only for `delivery_mode: "pr"`; immutable adapted `deliver_pr.dot` path/hash, exact prefix/provider/argv contract, `delivery_worktree` CWD policy, positive `max_child_seconds`, external-state policy, delivery-result schema, and process-supervision contract. Forbidden for `delivery_mode: "none"`. |
-| `pre_terminal_cleanup` | Object binding the checked-in `goal_plan_runtime.py` path/hash, admitted absolute interpreter identity, exact `pre-terminal-cleanup` argv schemas, fresh parent-runner/target-source/compiled-source gate policy, explicit cleanup-record fields `parent_binding_verdict` and `mutation_authority`, bounded identity-safe process-reconciliation policy, authority-scoped run-owned-worktree lifecycle rules including `PRESERVED_RESIDUAL`, required gate-evidence hashes, permitted/attempted/skipped action records, unresolved-resource evidence, cleanup-verdict/final-status mapping, evidence schema `goal-plan.pre-terminal-cleanup/v1`, token mapping, and `definition_sha256`. |
+| `pre_terminal_cleanup` | Object binding the external trusted-runtime definition/binding hashes, exact `trusted_runtime_argv_prefix + pre-terminal-cleanup` argv schemas, fresh trusted-runtime/parent-runner/target-source/compiled-source gate policy, explicit cleanup-record fields `trusted_runtime_binding_verdict`, `parent_binding_verdict`, and `mutation_authority`, bounded identity-safe process-reconciliation policy, authority-scoped run-owned-worktree lifecycle rules including `PRESERVED_RESIDUAL`, required gate-evidence hashes, permitted/attempted/skipped action records, unresolved-resource evidence, cleanup-verdict/final-status mapping, evidence schema `goal-plan.pre-terminal-cleanup/v2`, token mapping, and `definition_sha256`. It forbids execution of the target-repository runtime copy. |
 | `engine_step_budget` | Object with exact positive integers `poll_wait_seconds: 30` and `engine_step_multiplier: 50`; compiled parent node/step totals; and, for every lane, correction, and delivery branch, `branch_nonpoll_steps`, `branch_node_count`, and `max_poll_cycles`. |
-| `global_budgets` | Object with positive integer `max_total_attempts` for verification-bearing adaptive attempts only, positive integer `max_process_launches` for supervisor starts/restarts, positive integer `max_integration_corrections` for supervised correction-child launches, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v2`, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, correction-reservation state contract, and budget-ledger implementation hash. |
+| `global_budgets` | Object with positive integer `max_total_attempts` for verification-bearing adaptive attempts only, positive integer `max_process_launches` for supervisor starts/restarts, positive integer `max_integration_corrections` for supervised correction-child launches, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v3`, locked trusted-runtime binding identity, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, correction-reservation state contract, and budget-ledger implementation hash. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
 | `delivery_mode` | Enum string `none` or `pr`. |
 
@@ -398,7 +413,7 @@ worktree mutation.
 
 Every initial start and resume writes a new immutable, atomically-created
 `state_root/admission/parent-runner-invocations/NNNN.json` record with schema
-`goal-plan.parent-runner-invocation/v1`. The record contains:
+`goal-plan.parent-runner-invocation/v2`. The record contains:
 
 - the exact parent `attractor_runner_argv_prefix`, prefix hash, runner
   executable/module/source identity, and compiled provider;
@@ -409,6 +424,8 @@ Every initial start and resume writes a new immutable, atomically-created
 - repository-relative and absolute parent DOT paths, exact observed DOT
   SHA-256, execution-source blob SHA-256, and compiled-manifest entry/hash;
 - exact `execution_source_sha`;
+- exact `runtime_bundle_hash`, external `trusted_runtime_binding_path`, binding
+  SHA-256, and trusted runtime/supervisor prefix SHA-256 values;
 - exact absolute parent `--logs-root`, which must equal
   `state_root/parent-attractor-run`;
 - the canonical Linux parent process identity, including boot ID, PID,
@@ -419,9 +436,10 @@ Every initial start and resume writes a new immutable, atomically-created
 The record is append-only and never rewritten. A resume may have a new parent
 process identity and ordinal, but every static binding, CWD equality, DOT
 path/hash, logs root, provider, prefix, target repository, and
-`execution_source_sha` must match the compiled plan and durable run state before
-reconciliation can mutate anything. A mismatch is terminal infrastructure
-failure for that invocation and authorizes no repository mutation.
+`execution_source_sha`, runtime-bundle hash, and trusted-runtime binding must
+match the compiled plan and durable run state before reconciliation can mutate
+anything. A mismatch is terminal infrastructure failure for that invocation and
+authorizes no repository mutation.
 
 Each `lanes` entry contains:
 
@@ -437,7 +455,7 @@ Each `lanes` entry contains:
 | `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
 | `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v2`, and a hash binding those immutable values. |
 | `budgets` | Object with positive integer `max_attempts` for local verification-bearing adaptive attempts and positive integer `max_child_seconds`. Process launches are not attempts. |
-| `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v3"`, `platform: "linux"`, `mode: "per_child_reaper"`, exact `supervisor_runner_argv_prefix` and prefix hash, bound `supervisor_runner_identity`, exact positive integer `poll_wait_seconds: 30`, `pre_ledger_reconciliation_timeout_seconds`, and `term_grace_seconds`; canonical supervisor/child procfs identity requirements; deterministic intent/ledger/ack/result paths; exact closed suffixes for self-check/run/poll/terminate/reconcile; control-client schemas/tokens; and supervisor-definition hash. |
+| `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v4"`, `platform: "linux"`, `mode: "per_child_reaper"`, exact external `trusted_supervisor_argv_prefix` and prefix hash from the immutable trusted-runtime binding, bound supervisor/interpreter/runtime identity, per-invocation binding validation, exact positive integer `poll_wait_seconds: 30`, `pre_ledger_reconciliation_timeout_seconds`, and `term_grace_seconds`; canonical supervisor/child procfs identity requirements; deterministic intent/ledger/ack/result paths; exact closed suffixes for self-check/run/poll/terminate/reconcile; control-client schemas/tokens; and supervisor-definition hash. |
 
 The composition layer owns decomposition, collision analysis, all typed values
 above, and plan approval or explicit preapproval. It writes `plan.json`
@@ -483,6 +501,10 @@ fail
 --param candidate_branch=<validated lane branch name>
 --param product_base_sha=<full product base SHA>
 --param execution_source_sha=<full execution source SHA>
+--param runtime_bundle_hash=<full trusted runtime bundle hash>
+--param trusted_runtime_binding_path=<absolute trusted-runtime-binding.json>
+--param trusted_runtime_argv_prefix_sha256=<full external runtime prefix hash>
+--param trusted_supervisor_argv_prefix_sha256=<full external supervisor prefix hash>
 --param provider=<compiled-provider>
 --param attractor_runner_argv_prefix_sha256=<full prefix hash>
 --param lane_verifier_definition_sha256=<full verifier contract hash>
@@ -497,7 +519,10 @@ immutable compiled `provider`; `--on-human-gate fail` prevents an unattended
 child from inventing approval. `--logs-root` and every path-valued `--param` are
 absolute, `realpath`-canonicalized, and must resolve beneath that lane's
 run-scoped `state_root/lanes/<lane-id>/`, except the two exact shared budget
-paths beneath `state_root/budgets/`; none may resolve beneath immutable source.
+paths beneath `state_root/budgets/` and the one exact immutable
+`trusted_runtime_binding_path` beneath
+`state_root/trusted-runtime/<runtime-bundle-hash>/`; none may resolve beneath
+immutable source.
 No additional child parameter is permitted unless a new compiled-plan revision
 adds it to this ordered schema and changes the launch-contract hash.
 
@@ -508,12 +533,13 @@ the complete key set and value/value-hash representation. The immutable
 launch-contract hash covers the exact runner-prefix tokens/hash, executable and
 module/source identity, compiled provider, ordered argv template, typed
 parameter schema, environment policy, child DOT hash, symbolic `lane_worktree`
-CWD policy, shared budget-ledger paths, and expected lane-result schema.
+CWD policy, shared budget-ledger paths, trusted-runtime binding/bundle/prefix
+hashes, and expected lane-result schema.
 
 At launch, the parent records the prefix hash, resolved executable and module
 source realpaths/hashes, provider, exact argv, environment hash, lane-worktree
-realpath, `process_run_id`, and a `launch_command_sha256` over their canonical
-serialization. Plan/DOT
+realpath, `process_run_id`, trusted-runtime binding path/hash, runtime-bundle
+hash, and a `launch_command_sha256` over their canonical serialization. Plan/DOT
 correspondence validates the immutable template and parameter ordering;
 runtime admission and the process ledger bind the resolved values. Extra argv,
 environment keys, parameter reordering, or path escape is `INFRA_FAILURE`.
@@ -549,9 +575,15 @@ fall back to writing generated state beside `goal_lane.dot`.
   policy, literal `--cwd .`, exact parent DOT path and
   execution-source/compiled-manifest hash policy, parent logs-root policy, and
   parent invocation evidence schema;
-- exact `supervisor_runner_argv_prefix` hash, executable/interpreter/script
-  identity, CLI/schema versions, environment schema, self-check contract, and
-  every closed subcommand suffix;
+- trusted-runtime definition/binding schema and hashes, runtime-bundle-hash
+  derivation, exact source path/blob/mode/length/hash pairs, compile-bound
+  Git/interpreter prefixes and identities, external path/permission/hash policy,
+  and first-admission/rehydration contract;
+- exact external `trusted_runtime_argv_prefix` and
+  `trusted_supervisor_argv_prefix` hashes, executable/interpreter/script
+  identities, CLI/schema versions, environment schema, self-check contract,
+  every closed safety-critical subcommand suffix, and parent tool-command
+  external-only policy;
 - the shared verifier-envelope definition hash, canonical commands, and
   read-only/external-output policies;
 - the aggregate-verifier definition hash;
@@ -569,49 +601,59 @@ exact SHA is the containing commit of those exact bytes, then freezes the exact
 value in run context and durable state. Thus plan/DOT bind the derivation and
 every runtime/evidence artifact binds the resolved SHA without self-reference.
 
-Admission runs before approval and before any mutation. It deterministically:
+Admission runs before approval and before any repository/process/worktree
+mutation. It has one launcher prelude followed by the parent graph, and the
+combined sequence is the first green admission:
 
-1. binds `canonical_target_repo`, then requires the already-started parent
-   process's `/proc/self/cwd` realpath and the runner's literal `--cwd .`
-   resolution to equal it; requires the invoked DOT realpath to equal
-   `<canonical_target_repo>/pipelines/PLAN_SLUG/PLAN_SLUG.dot`; and binds exact
-   parent prefix/identity, provider, argv, process identity, and logs root;
-2. locates the adjacent `plan.json`;
-3. recomputes its SHA-256 and requires equality with embedded
-   `plan_sha256`;
-4. schema-validates `plan.json`;
-5. proves the selected target-repository identity mode; and
-6. resolves `execution_source_sha` to the exact commit containing the invoked
-   byte-clean parent DOT and adjacent `plan.json`, and proves that commit also
-   contains the complete compiled pipeline directory;
-7. hashes the invoked parent DOT bytes; requires equality with the exact
-   execution-source blob; constructs the canonical compiled-source manifest;
-   and requires its parent-DOT path/mode/length/hash entry to equal that same
-   observation;
-8. parses the static DOT to require exact correspondence for lane IDs, waves,
-   dependency edges, integration order, budget values, aggregate-verifier hash,
-   both source-SHA contracts, child launch/monitor nodes, exact child argv/param
-   ordering, child DOT/command/supervision hashes, exact child-runner and
-   supervisor-runner prefixes/identities, provider bindings, engine-step values,
-   verifier-envelope hash and policies, correction-round expansion, approval
-   mode/transport requirements, delivery mode, and delivery-state policy;
-9. validates the child runner without PATH lookup: exact prefix form and canonical
-   prefix hash, executable realpath/hash, module name and source
-   realpath/hash, successful `<prefix> doctor`, required `run --help` flags
-   (`--provider`, `--cwd`, `--logs-root`, `--on-human-gate`, and `--param`),
-   support for the compiled provider, and its required credential;
-10. validates `supervisor_runner_argv_prefix` without PATH lookup: permitted
-   prefix form and canonical prefix hash; executable or interpreter realpath and
-   byte hash; for the Python form, exact repository-relative script path,
-   execution-source blob hash, resolved absolute script path, and byte hash;
-   closed environment schema/hash; and successful non-mutating
-   `<supervisor-prefix> self-check --format json`. The self-check must report the
-   exact compiled CLI version, all required supported schema versions, and exact
-   availability/signatures for `run`, `poll`, `terminate`, and `reconcile`; and
-11. atomically records the complete compiled-directory byte manifest and its
-   canonical hash under `state_root/admission/`, then atomically writes the
-   immutable parent-runner invocation record that references that durable
-   manifest entry/hash.
+1. The launcher binds `canonical_target_repo`, canonical external `state_root`,
+   exact parent DOT path, adjacent `plan.json`, parent runner prefix/provider/
+   logs-root contract, and the caller-supplied full `execution_source_sha`.
+2. Without executing repository code, it recomputes `plan_sha256`,
+   schema-validates `plan.json`, proves the selected target-repository identity,
+   resolves the containing execution-source commit, walks its complete compiled
+   pipeline tree, and constructs/persists the canonical external
+   `compiled-source-manifest.json`.
+3. It hashes the checked-out parent DOT and both checked-out runtime scripts,
+   requires exact execution-source blob and compiled-manifest equality, and
+   validates the compile-bound absolute Git/interpreter prefixes and
+   executable realpaths/hashes/permissions without PATH, `/usr/bin/env`, shell
+   lookup, or relative-path resolution.
+4. It extracts exact runtime/supervisor Git blobs, materializes/seals/rereads the
+   external trusted-runtime bundle, atomically writes the complete versioned
+   binding and command evidence, and derives exact `runtime_bundle_hash`,
+   `trusted_runtime_binding_path`, `trusted_runtime_argv_prefix`, and
+   `trusted_supervisor_argv_prefix`. No extracted code runs before this entire
+   step is green.
+5. The launcher changes its OS CWD to `canonical_target_repo` and `execve`s the
+   exact parent Attractor argv, including immutable runtime-bundle/binding
+   parameters. The first parent safety command uses only
+   `trusted_runtime_argv_prefix`, validates that external binding again, then
+   requires `/proc/self/cwd`, literal runner `--cwd .`, canonical target repo,
+   exact parent-DOT realpath, parent prefix/identity/provider/argv/process/logs
+   root, and launcher evidence to agree.
+6. The external trusted runtime independently recomputes the plan/DOT/
+   execution-source/compiled-manifest relationships and parses the static DOT
+   for exact lane IDs, waves, dependency edges, integration order, budgets,
+   verifier hashes, both source-SHA contracts, child launch/monitor nodes,
+   ordered argv/params, correction expansion, approval transport, delivery
+   policy, trusted-runtime definition/binding policy, and every safety-critical
+   external prefix-plus-suffix tool command.
+7. It validates the child runner without PATH lookup: exact prefix form/hash,
+   executable/module/source realpaths/hashes, successful `<prefix> doctor`,
+   required `run --help` flags, compiled provider support, and credential.
+8. It runs non-mutating external
+   `<trusted-runtime-prefix> self-check --format json` and
+   `<trusted-supervisor-prefix> self-check --format json`; both report exact
+   CLI, schema, suffix, permission, and binding support.
+9. It validates poll/branch/parent engine-step arithmetic, external roots,
+   approval mode/transport, environment schemas, and every no-mutation
+   precondition.
+10. It atomically finalizes admission/render/tool/materialization evidence under
+    external `state_root` and writes the immutable parent-runner invocation
+    record referencing the compiled-source manifest and exact trusted-runtime
+    binding path/hash.
+
+No step in this sequence executes either target-repository Python script.
 
 For the Python-module prefix, the absolute interpreter runs a deterministic
 `importlib.util.find_spec("amplifier_module_pipeline_runner.cli")` probe and the
@@ -622,12 +664,13 @@ probe in that interpreter. The observed executable/module/source identities
 must equal `attractor_runner_identity`; a console wrapper whose target cannot be
 resolved deterministically is rejected.
 
-For the supervisor executable form, preflight hashes the exact executable bytes
-and records its realpath. For the Python form, it separately hashes and records
-the absolute interpreter and the checked-in script bytes at the immutable
-repository-relative path. The self-check is read-only: it writes no file,
-launches no child, and emits one canonical JSON object on stdout. Any prefix,
-identity, script, environment-schema, CLI-version, supported-schema, or
+The target-repository runtime and supervisor files are source observations
+during this first admission; they are never executed by the parent. The
+external trusted-runtime copies are the only Python forms permitted to
+self-check or execute. Each self-check is read-only: it writes no file, launches
+no child, and emits one canonical JSON object on stdout. Any Git/interpreter
+prefix, executable identity, source blob, checked-out byte, materialized byte,
+permission, environment-schema, CLI-version, supported-schema, or
 subcommand-signature mismatch fails admission before approval or mutation.
 
 A parent CWD/`--cwd`/DOT-realpath mismatch, parent DOT byte/hash mismatch,
@@ -647,6 +690,8 @@ Each compiled family member accepts only these runtime inputs:
 | `execution_source_sha` | Required full Git commit SHA. It must be the containing commit of the exact invoked parent DOT and adjacent `plan.json`, contain every immutable compiled source file, descend from `product_base_sha`, and satisfy the complete byte-manifest gate. The invoked DOT realpath and observed bytes/hash must equal the exact parent-DOT path/blob and compiled-manifest entry for this commit. |
 | `run_id` | Required slug unique within the plan's run directory. |
 | `state_root` | Effective value is a required absolute external path. The caller may omit it only to derive the canonical external user-state default defined below; it is never inside the target repository. |
+| `runtime_bundle_hash` | Required launcher-derived full SHA-256 from `plan.json.trusted_runtime_definition` and exact `execution_source_sha`. It is not user-selectable and must equal both the trusted-runtime directory name and binding field. |
+| `trusted_runtime_binding_path` | Required launcher-derived canonical absolute path equal to `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`. It is not a general path override; any other spelling, symlink, or location is rejected before the parent starts. |
 | `worktree_root` | Required absolute external path dedicated to this run's lane, integration, candidate-verification, and delivery worktrees. It is separate from `state_root`. |
 | `delivery_state_root` | Required absolute external path when `delivery_mode` is `pr`; forbidden when delivery is `none`. It contains delivery child logs, checkpoints, events, ledgers, and evidence and is separate from `state_root`, `worktree_root`, and every Git repository/worktree. |
 | `approval_mode` | Required enum `required` or `preapproved`; must equal the compiled plan value. |
@@ -675,6 +720,8 @@ fail
 --param execution_source_sha=<full-containing-sha>
 --param run_id=<run-id>
 --param state_root=<absolute-state-root>
+--param runtime_bundle_hash=<full-trusted-runtime-bundle-hash>
+--param trusted_runtime_binding_path=<absolute-state-root>/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
 --param worktree_root=<absolute-worktree-root>
 --param delivery_state_root=<absolute-delivery-state-root>
 --param approval_mode=preapproved
@@ -711,9 +758,9 @@ The parent `--logs-root` is not a caller-selected alternate location. It must
 realpath to exact `state_root/parent-attractor-run`. Before approval or
 preapproval can advance, the parent persists the immutable invocation record
 containing prefix/provider/cwd/DOT/hash, OS CWD, target repository,
-`execution_source_sha`, process identity, and logs root. A missing or
-inconsistent record is `INFRA_FAILURE` and the parent performs no repository
-mutation.
+`execution_source_sha`, process identity, logs root, runtime-bundle hash, and
+trusted-runtime binding path/hash. A missing or inconsistent record is
+`INFRA_FAILURE` and the parent performs no repository mutation.
 
 If `state_root` is omitted, preflight derives:
 
@@ -787,10 +834,13 @@ reapplies the pre-approval blanket prohibition to the run-owned worktrees it has
 just created.
 
 Lifecycle recovery is exact and mutation-authority-gated. Every cleanup
-recovery or retry first reruns the current parent-runner, target/source-identity,
-and compiled-source gates; it may never infer authority from a prior cleanup
-record or reuse a prior `mutation_authority: "FULL"`. Ordinary lifecycle
-reconciliation may mutate Git only after the same current gates grant `FULL`.
+recovery or retry first validates the external trusted-runtime binding, enters
+through exact `trusted_runtime_argv_prefix`, and reruns the current
+parent-runner, target/source-identity, and compiled-source gates; it may never
+infer authority from a prior cleanup record or reuse a prior
+`mutation_authority: "FULL"`. Ordinary lifecycle reconciliation may mutate Git
+only after the same current trusted-runtime plus repository/source gates grant
+`FULL`.
 A `CREATING` entry with no path/registration may
 retry the same `git worktree add` only when durable command evidence proves add
 never began; if the exact path and registration exist, recovery must validate
@@ -812,8 +862,9 @@ mismatches,
 `required` approval without attached standalone console/TTY evidence,
 `required` approval in unattended or hosted headless execution, failed
 remote/history-anchor identity proofs, reused `run_id` with incompatible state,
-an invalid child-runner or supervisor-runner identity/self-check/command
-preflight, an invalid provider/credential/doctor/flag preflight, an invalid
+an invalid child-runner or trusted-runtime/supervisor binding, identity,
+self-check, command, permission, or materialization preflight, an invalid
+provider/credential/doctor/flag preflight, an invalid
 `product_base_sha`, or an `execution_source_sha` that does not contain the exact
 compiled program being invoked. A `preapproved` standalone run is explicitly
 valid in unattended headless execution.
@@ -878,9 +929,9 @@ lexicographically sorted entry for every regular file containing:
 
 Symlinks, submodules, untracked entries, non-regular files, duplicate normalized
 paths, and case-colliding paths are rejected. The manifest includes
-`plan.json`, parent DOT, lane/correction child DOTs, supervisor code, verifier
-definitions, delivery subgraph when present, and every other
-compiled-directory byte. Its
+`plan.json`, parent DOT, lane/correction child DOTs, both runtime/supervisor
+source files, verifier definitions, delivery subgraph when present, and every
+other compiled-directory byte. Its
 `manifest_sha256` covers the canonical JSON excluding only that hash field.
 The manifest itself lives under `state_root`, so it does not create a
 self-hashing source cycle.
@@ -894,16 +945,20 @@ immutable invocation record. It runs during admission, before the first
 repository mutation, on every resume before reconciliation may mutate, before
 every dependency-wave/correction/delivery mutation phase, and immediately
 before `PreTerminalCleanup`. Every parent-executed `CompiledSourceGate` first
-requires this binding gate to pass.
+requires `TrustedRuntimeBindingGate` and this parent binding gate to pass, and
+the gate command itself is invoked only through the external trusted runtime.
 
 A parent-binding mismatch is `INFRA_FAILURE` and disables repository mutation
 for that parent invocation. The same restriction applies when target/source
-identity or compiled-source binding is red or unknown. Pre-terminal cleanup then
+identity or compiled-source binding is red or unknown. When the external
+trusted-runtime binding is still independently green, pre-terminal cleanup
 records `mutation_authority: "EXTERNAL_ONLY"`: it may atomically close external
 evidence and identity-safely reconcile or stop a supervisor/child process group
 only when the full recorded procfs identity remains valid, but it may not alter
 target-repository files, refs, branches, Git registrations, worktree paths, or
-Git common-directory state.
+Git common-directory state. If the external trusted-runtime binding is red,
+unknown, missing, or permission-mismatched, authority is `NONE`; no general
+cleanup/finalizer action or signal is attempted.
 
 The deterministic `CompiledSourceGate` compares both the complete path set and
 every entry's mode, length, and bytes against the admission manifest. It emits
@@ -926,11 +981,224 @@ Any missing, added, mode-changed, or byte-changed compiled-source entry is
 retry loop. Composition additionally rejects any lane `owned_paths` or
 `integration_seams` pattern that could match `pipelines/PLAN_SLUG/**`.
 
+### External trusted-runtime bootstrap and binding
+
+The target-repository copies of `goal_plan_runtime.py` and
+`goal_plan_supervisor.py` are immutable compiled source, but they are not a
+stable terminal safety root: the very source mismatch that needs cleanup could
+make those paths unreadable, changed, or absent. The first green admission
+therefore treats the checked-out files as data, not executables, and creates one
+external trusted-runtime bundle before any repository, ref, worktree, process,
+`worktree_root`, or `delivery_state_root` mutation.
+
+The trusted-runtime bundle path is exactly:
+
+```text
+state_root/trusted-runtime/<runtime-bundle-hash>/
+  goal_plan_runtime.py
+  goal_plan_supervisor.py
+  trusted-runtime-binding.json
+```
+
+`runtime-bundle-hash` is the SHA-256 of canonical JSON containing the trusted
+runtime definition version, exact `execution_source_sha`, both
+repository-relative source paths, Git blob IDs, Git modes, byte lengths, and
+content SHA-256 values, plus the trusted Git and interpreter prefix tokens,
+prefix hashes, executable realpaths, executable byte hashes, permission
+policies, and closed runtime/supervisor suffix-schema hashes. It contains no
+working-tree absolute path, so the same approved execution source and toolchain
+produce the same bundle identity across worktrees.
+
+#### First-admission materialization
+
+The launcher performs the trusted-runtime portion of first admission before
+starting any parent DOT command that can mutate the repository. It is the same
+already-bound launching process that canonicalizes `target_repo`, changes CWD,
+and starts the parent CLI; the checked-out runtime is never used to bootstrap
+itself. It performs this exact sequence:
+
+1. Validate the absolute `trusted_git_argv_prefix` and
+   `trusted_interpreter_argv_prefix` from `plan.json`: each prefix, canonical
+   JSON hash, executable realpath, exact executable bytes/hash, `lstat` type,
+   owner/group/mode, and executable permission must match the compiled
+   definition. The Git and interpreter executable must not be group- or
+   world-writable. No PATH lookup, `/usr/bin/env`, shell command, relative
+   executable, symlink operand, or module lookup is allowed.
+2. With the exact absolute Git prefix and `shell=False`, run the two closed
+   object queries for each source:
+
+   ```text
+   <trusted-git-prefix> --git-dir <canonical-git-common-dir> rev-parse --verify <execution_source_sha>:<repo-relative-source-path>
+   <trusted-git-prefix> --git-dir <canonical-git-common-dir> cat-file blob <expected-blob-id>
+   ```
+
+   The first stdout must be the exact expected blob ID from
+   `plan.json.trusted_runtime_definition`; the second stdout is the source byte
+   stream. Extra/reordered arguments, another Git common directory, another
+   object ID, text decoding/newline conversion, filters, checkout, archive, or
+   working-tree reads are forbidden.
+3. Independently open the two checked-out source paths with no symlink
+   traversal, require regular files at the exact compiled paths, and compare
+   Git mode, byte length, and SHA-256 with both the just-read Git blob and the
+   corresponding `compiled-source-manifest.json` entry. This proves the current
+   checkout is green, but those reads are not used as materialization input.
+4. Create a unique sibling staging directory beneath
+   `state_root/trusted-runtime/` with mode `0700`. For each blob, write the exact
+   `cat-file blob` stdout bytes to a same-directory `O_CREAT|O_EXCL|O_NOFOLLOW`
+   temporary file, fsync the file, atomically rename it to the fixed basename,
+   fsync the staging directory, set mode `0444`, and reread/hash/length-verify
+   the final file. No data byte is sourced from a later working-tree read.
+5. Canonically write `trusted-runtime-binding.json` through the same
+   create/fsync/atomic-rename/fsync sequence, set all three files to `0444`,
+   set the staging directory to `0555`, fsync it, atomically install it at the
+   exact bundle-hash directory with no-replace semantics, and fsync
+   `state_root/trusted-runtime/`. An already-existing final directory is accepted
+   only after complete binding/path/type/permission/hash validation; it is never
+   overwritten in place.
+6. Reread the installed binding and every installed file using
+   `O_NOFOLLOW`, require the bundle directory and all three files to have no
+   write bits, revalidate every realpath/mode/length/hash and both tool
+   executable identities, then execute the two external non-mutating
+   self-checks. Extracted code is never executed before every byte, path,
+   permission, interpreter, and binding check passes.
+
+Every Git command receives a closed environment and has bounded stderr/stdout
+capture. Admission persists exact argv, cwd, environment hash, executable
+realpath/hash, exit code, stderr path/hash, stdout byte length/hash, expected and
+observed blob ID, destination path, fsync/rename/chmod observations, and final
+reread hash as materialization command evidence. A command or durability check
+that cannot be proved is `INFRA_FAILURE` before repository mutation.
+
+#### `trusted-runtime-binding.json`
+
+The binding uses exact schema `goal-plan.trusted-runtime-binding/v1` and contains:
+
+| Field | Contract |
+|---|---|
+| `schema_version`, `created_at` | Exact schema and RFC 3339 UTC creation timestamp. |
+| `execution_source_sha`, `runtime_bundle_hash`, `trusted_runtime_definition_sha256` | Exact admitted source and compiled definition identities. |
+| `source_blobs` | Ordered runtime/supervisor entries with role, repository-relative source path, Git blob ID, Git mode, byte length, and SHA-256. |
+| `external_files` | Ordered runtime/supervisor entries with fixed absolute path, `realpath`, `lstat` type/mode/uid/gid, byte length, and SHA-256. |
+| `trusted_git_argv_prefix`, `trusted_git_identity` | Exact absolute prefix, prefix hash, executable path/realpath, byte hash, mode/uid/gid, and closed environment hash used for object extraction. |
+| `trusted_interpreter_argv_prefix`, `trusted_interpreter_identity` | Exact absolute prefix, prefix hash, executable path/realpath, byte hash, mode/uid/gid, and executable-permission evidence. |
+| `trusted_runtime_argv_prefix` | Exact immutable list `[<interpreter-realpath>, <external-absolute-goal_plan_runtime.py>]` and canonical prefix SHA-256. |
+| `trusted_supervisor_argv_prefix` | Exact immutable list `[<interpreter-realpath>, <external-absolute-goal_plan_supervisor.py>]` and canonical prefix SHA-256. |
+| `materialization_commands` | For every `rev-parse` and `cat-file blob`, the exact absolute argv, cwd, environment hash, executable identity, exit code, stderr evidence, stdout length/hash, expected/observed blob identity, and destination-file fsync/rename/chmod/reread evidence. |
+| `binding_sha256` | SHA-256 of canonical JSON excluding only this field. |
+
+The binding is append-never and replace-never for a run. Non-safety work has no
+operation that changes its path, prefixes, hashes, permissions, or selected
+interpreter. A different interpreter or source revision requires a different
+runtime-bundle hash and a new run; it cannot rotate a live run's binding.
+
+#### Per-invocation validation and safety command boundary
+
+Before every safety-critical action, the caller validates the binding itself,
+the fixed bundle directory, both runtime files, the Git and interpreter
+executables, and the selected prefix. Validation requires exact absolute path
+and realpath, regular-file/directory type, recorded mode/uid/gid, no write bit on
+the bundle directory or its three files, interpreter/Git executable permission
+policy, byte length/hash, canonical prefix hash, definition hash, binding hash,
+and `execution_source_sha`. It opens files without symlink traversal and
+rechecks after command completion when the action can mutate Git, process, or
+terminal state.
+
+The safety-critical set is closed: parent/trusted-runtime/target-source/
+compiled-source binding gates; root and ownership gates; all Git, ref, branch,
+worktree, candidate-envelope, delivery-envelope, integration, rollback, budget,
+deadline, process-launch, process-poll, process-termination, process-reconcile,
+attempt-reservation/classification, `PreTerminalCleanup`, durable terminal
+finalizer, and recovery actions. Every such parent action is exact
+`trusted_runtime_argv_prefix + <closed suffix>`; every supervisor start or
+control action is exact
+`trusted_supervisor_argv_prefix + <closed run|poll|terminate|reconcile suffix>`.
+Child Attractor and verifier execution remain separately bound by their own
+contracts, but only the external trusted runtime may authorize or launch them.
+
+A missing, unreadable, changed, writable, path-drifted, permission-drifted, or
+hash-mismatched binding/runtime/interpreter/Git executable is `INFRA`. It grants
+`mutation_authority: "NONE"`, forbids Git/repository/worktree mutation, and
+forbids signalling. The only exception is process-safe termination through an
+exact external `trusted_supervisor_argv_prefix` whose interpreter, supervisor
+file, prefix, launch contract, durable process identity, and source hash remain
+independently valid against the already-durable process record; that narrow
+exception may terminate only the matching fully procfs-identity-valid process
+group and may not write a general cleanup/finalizer success record.
+
+#### Deterministic prelaunch and recovery rehydration
+
+Before a new parent launch or recovery graph begins, the launcher first validates
+the external trusted-runtime binding from durable `state_root`; recovery does
+this before opening or hashing any current target-repository runtime script. If
+the exact bundle directory is absent, the launcher may perform one deterministic
+rehydration from the durable approved plan snapshot and exact Git objects. It:
+
+1. validates the compile-bound absolute Git/interpreter prefixes and hashes from
+   the durable plan snapshot;
+2. resolves both expected paths at exact `execution_source_sha` to the expected
+   blob IDs through the closed absolute Git argv;
+3. extracts both exact blobs with `cat-file blob` into a new staging directory;
+4. verifies blob IDs, lengths, SHA-256 values, modes, tool identities, and
+   runtime-bundle-hash before executing any extracted code;
+5. recreates and seals the same versioned binding with the atomic/fsync/
+   no-write/reread procedure; and
+6. only after complete validation invokes the external self-check and starts
+   recovery through `trusted_runtime_argv_prefix`.
+
+Rehydration never reads source bytes from the current working copy, never
+executes current working-copy runtime code, and never overwrites or repairs a
+present-but-mismatching bundle. A present mismatch blocks action and requires
+operator custody of the suspect external directory. If exact blob,
+interpreter/Git executable identity, permissions, atomic durability, or final
+binding cannot be proved, the launcher writes only its own external
+infrastructure-blocked evidence, starts no recovery/cleanup/finalizer command,
+performs no Git mutation, and does not claim cleanup or terminal-finalizer
+completion.
+
+#### Parent DOT tool-command contract
+
+`trusted_runtime_binding_path` and `runtime_bundle_hash` are immutable parent
+context values established by the launcher and revalidated by admission. The
+parent DOT has no safety-critical `tool_command` whose executable operand is
+beneath `target_repo`. Its initial safety node and every later safety node use
+the exact ordered argv represented by:
+
+```text
+<each token of trusted_runtime_argv_prefix>
+<closed-runtime-subcommand>
+<closed ordered arguments for that node>
+--trusted-runtime-binding <absolute trusted-runtime-binding.json>
+```
+
+Supervisor nodes use the corresponding exact
+`trusted_supervisor_argv_prefix + closed suffix`. The generated DOT embeds the
+trusted-runtime definition hash, runtime-bundle hash derivation, suffix-schema
+hashes, and symbolic binding-path policy; admission resolves the exact external
+tokens and proves each rendered tool command token-for-token before it can run.
+No shell interpolation, PATH lookup, target-repository script operand, mutable
+context override, environment-selected executable, or unrecognized argument is
+permitted. A non-safety LLM/tool node cannot write the binding directory and
+cannot contribute or replace an argv prefix.
+
+The same rule applies inside lane, correction, and delivery child DOTs. Their
+launcher params carry the exact runtime-bundle hash, binding path, and external
+prefix hashes. `ReserveGlobalAttempt`, attempt classification, budget/deadline
+control, ownership/source gates, commit/ref operations, delivery Git/remote
+mutation, evidence finalization, and every other deterministic safety node
+executes only as `trusted_runtime_argv_prefix + closed child suffix`; supervisor
+control uses only `trusted_supervisor_argv_prefix`. Adaptive product work may
+write within its approved worktree ownership, but it has no command that can
+replace or rebind either trusted prefix.
+
 ### Top-level topology
 
 ```text
+Launcher preflight
+  -> validate or exact-blob rehydrate external trusted-runtime binding
+  -> reject before parent start if Git/interpreter/blob/binding proof is red
 Start
   -> Bind typed runtime inputs
+  -> TrustedRuntimeBindingGate on external bundle before reading target scripts
   -> Require launcher-started OS CWD realpath == canonical target_repo
   -> ParentRunnerBindingGate:
        /proc/self/cwd == runner --cwd . == canonical target_repo
@@ -940,8 +1208,12 @@ Start
      + conditional delivery_state_root
   -> Admission: validate plan/graph/repo + bind product_base_sha/execution_source_sha
   -> Persist immutable parent argv/prefix/provider/cwd/DOT/hash/process/logs evidence
+  -> Prove checked-out runtime/supervisor bytes == Git blobs == compiled manifest
+  -> Materialize/verify/seal trusted runtime from exact Git blob bytes
+  -> Persist immutable trusted-runtime-binding.json and command evidence
   -> Validate child runner prefix/module/source/doctor/flags + compiled provider credentials
-  -> Validate supervisor prefix/executable/interpreter/script/self-check/subcommands
+  -> Validate external trusted runtime/supervisor prefixes, permissions, hashes,
+     self-checks, and subcommands
   -> Validate poll/branch/parent engine-step arithmetic
   -> Persist manifest/render/admission evidence under external state_root only
   -> Reconcile durable state only after current parent invocation is fully bound
@@ -950,11 +1222,11 @@ Start
   -> Prepare integration + Wave 1 worktrees from execution_source_sha
   -> component fan-out
        -> reserve process launch(A) -> mint intent + launch contract(A)
-            -> exact supervisor prefix + run suffix -> Popen reaper(A) in own session -> require ack
+            -> exact trusted supervisor prefix + run suffix -> Popen reaper(A) in own session -> require ack
             -> long-poll(A, --wait-seconds 30) loop
             -> require authoritative supervisor-result(A) -> classify terminal A
        -> reserve process launch(B) -> mint intent + launch contract(B)
-            -> exact supervisor prefix + run suffix -> Popen reaper(B) in own session -> require ack
+            -> exact trusted supervisor prefix + run suffix -> Popen reaper(B) in own session -> require ack
             -> long-poll(B, --wait-seconds 30) loop
             -> require authoritative supervisor-result(B) -> classify terminal B
        -> missing ledger/ack -> reconcile intent via bounded /proc discovery
@@ -1011,12 +1283,17 @@ Start
        -> untrustworthy substrate -> intended INFRA_FAILURE
        -> rejected/cancelled before mutation -> intended ABORTED
   -> Fresh CleanupAuthorityGate before terminal cleanup
-       -> recompute ParentRunnerBindingGate + target/source identity
-          + CompiledSourceGate; hash current evidence
-       -> all green: parent_binding_verdict=PASS, mutation_authority=FULL
-       -> any red/unknown: mutation_authority=EXTERNAL_ONLY
+       -> recompute TrustedRuntimeBindingGate + ParentRunnerBindingGate
+          + target/source identity + CompiledSourceGate; hash current evidence
+       -> all green: trusted_runtime_binding_verdict=PASS,
+          parent_binding_verdict=PASS, mutation_authority=FULL
+       -> trusted runtime green but any repository/source gate red/unknown:
+          mutation_authority=EXTERNAL_ONLY
           + intended/final INFRA_FAILURE
-  -> PreTerminalCleanup(intended status, current authority)
+       -> trusted runtime red/unknown: mutation_authority=NONE
+          + infrastructure-blocked; no cleanup/finalizer completion claim
+  -> exact trusted_runtime_argv_prefix + PreTerminalCleanup(intended status,
+     current authority)
        -> both authorities may reconcile/stop only fully procfs-identity-valid
           child supervisors and process groups
        -> FULL: perform bounded identity-matched Git cleanup/preservation
@@ -1026,7 +1303,7 @@ Start
        -> bind permitted/attempted/skipped actions, unresolved resources,
           gate hashes, cleanup verdict, and chosen final status
        -> cleanup fault or restricted authority yields INFRA_FAILURE
-  -> DurableTerminalFinalizer(final status)
+  -> exact trusted_runtime_argv_prefix + DurableTerminalFinalizer(final status)
        -> atomically write result.json and goal_plan.status
        -> emit exactly one terminal token
   -> explicit terminal carrier publishes matching CLI outcome
@@ -1362,28 +1639,29 @@ consume `max_total_attempts`.
 
 The immutable supervisor prefix is distinct from the child Attractor runner.
 Every supervisor invocation is exactly the compiled
-`supervisor_runner_argv_prefix` followed by one of the closed suffixes below.
-No caller may substitute `goal_plan_supervisor.py`, a PATH-resolved executable,
-a shell command, or another interpreter directly.
+`trusted_supervisor_argv_prefix` from `trusted-runtime-binding.json` followed by
+one of the closed suffixes below.
+No caller may substitute the target-repository `goal_plan_supervisor.py`, a
+PATH-resolved executable, a shell command, or another interpreter directly.
 
 The non-mutating version/identity preflight is:
 
 ```text
-<each token of supervisor_runner_argv_prefix> self-check --format json
+<each token of trusted_supervisor_argv_prefix> self-check --format json
 ```
 
 The exact reaper interface is:
 
 ```text
-<each token of supervisor_runner_argv_prefix> run --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json>
+<each token of trusted_supervisor_argv_prefix> run --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json>
 ```
 
 The short-lived deterministic control-client interfaces are:
 
 ```text
-<each token of supervisor_runner_argv_prefix> poll --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --wait-seconds 30 --output <absolute poll-result.json>
-<each token of supervisor_runner_argv_prefix> terminate --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --reason <token> --output <absolute termination-result.json>
-<each token of supervisor_runner_argv_prefix> reconcile --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --output <absolute reconciliation-result.json>
+<each token of trusted_supervisor_argv_prefix> poll --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --wait-seconds 30 --output <absolute poll-result.json>
+<each token of trusted_supervisor_argv_prefix> terminate --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --reason <token> --output <absolute termination-result.json>
+<each token of trusted_supervisor_argv_prefix> reconcile --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --budget-ledger <absolute run-wide.json> --budget-lock <absolute run-wide.lock> --output <absolute reconciliation-result.json>
 ```
 
 The suffixes, option order, option cardinality, and accepted schema versions are
@@ -1402,29 +1680,31 @@ temporary files, fsync, atomic replace, and canonical JSON hashes.
 #### Launch intent and parent spawn
 
 After approval and an atomic process-launch reservation, the parent mints
-`launch-intent.json` with schema `goal-plan.launch-intent/v2` before starting
+`launch-intent.json` with schema `goal-plan.launch-intent/v3` before starting
 the supervisor. It contains:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.launch-intent/v2`. |
+| `schema_version` | Exact value `goal-plan.launch-intent/v3`. |
 | `process_kind`, `process_id`, `process_launch`, `process_run_id` | Exact approved lane/correction/delivery identity, positive process-launch ordinal, and canonical process-run ID. |
 | `launch_contract_path`, `launch_contract_sha256` | Absolute contract path and canonical hash. |
 | `process_launch_reservation_id` | Exact live process-launch reservation from the run-wide budget ledger; never an adaptive-attempt reservation. |
 | `correction_round_id` | Required canonical correction-round reservation ID for `process_kind: "correction"`; null otherwise. |
 | `attractor_runner_argv_prefix_sha256`, `provider` | Exact immutable compiled child-runner prefix hash and provider. |
-| `supervisor_runner_argv_prefix_sha256`, `supervisor_runner_identity` | Exact immutable supervisor prefix hash and executable/interpreter/script/CLI/schema identity observed during preflight. |
+| `trusted_runtime_binding_path`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash` | Exact external binding revalidated by the parent immediately before launch. |
+| `trusted_supervisor_argv_prefix_sha256`, `trusted_supervisor_identity` | Exact immutable external supervisor prefix hash and executable/interpreter/script/CLI/schema identity from the validated trusted-runtime binding. |
 | `supervisor_argv`, `supervisor_env`, `supervisor_cwd` | Exact prefix-plus-`run`-suffix argv, closed environment, and canonical lane, integration, or delivery worktree CWD. The argv and environment both contain exact `process_run_id`; environment key is `GOAL_PLAN_PROCESS_RUN_ID`. |
 | `ledger_path`, `ack_path`, `supervisor_result_path` | Exact deterministic absolute output paths. |
 | `identity_policy` | Exact value `goal-plan.linux-procfs-identity/v1`. |
 | `supervisor_command_sha256` | Canonical hash of executable/argv/env/CWD/process-run/contract/output identities. |
 
-The `goal-plan.process-launch-contract/v2` is immutable and contains exact
+The `goal-plan.process-launch-contract/v3` is immutable and contains exact
 process kind/ID, correction-round ID when applicable, child
 `attractor_runner_argv_prefix` tokens/hash,
 executable/module/source identity, provider, closed child argv/env/CWD,
 process-run ID, source identities, process-launch reservation,
-`supervisor_runner_argv_prefix` tokens/hash and identity, exact supervisor
+trusted-runtime binding path/hash and runtime-bundle hash,
+`trusted_supervisor_argv_prefix` tokens/hash and identity, exact supervisor
 `run` suffix/environment, log descriptors, child result/evidence paths, wall
 timeout, TERM grace, and child launch-command hash. Child argv includes exact
 `--provider`, `--param process_run_id=...`, and `--on-human-gate fail`; child
@@ -1449,15 +1729,17 @@ validation succeeds.
 
 #### Reaper lifecycle and authoritative result
 
-`run` validates intent, contract, process-launch reservation, correction-round
+`run` first revalidates its external trusted-runtime binding, interpreter, own
+supervisor file, and exact prefix, then validates intent, contract,
+process-launch reservation, correction-round
 reservation when applicable, child-runner prefix/module/source/provider,
-supervisor-runner prefix/executable/interpreter/script/CLI/schema identity,
+trusted-supervisor prefix/executable/interpreter/script/CLI/schema identity,
 hashes, paths, executable, CWD, environment, exact suffix, and output
 descriptors. Before launching the child, it atomically records its own canonical
-Linux procfs identity in `goal-plan.process-ledger/v3`. It then
+Linux procfs identity in `goal-plan.process-ledger/v4`. It then
 launches the child Attractor as its direct child in a distinct child process
 group, validates child PID/PGID/procfs identity, records child identity, and
-atomically writes/fsyncs ledger then `goal-plan.launch-ack/v3`. Creation of the
+atomically writes/fsyncs ledger then `goal-plan.launch-ack/v4`. Creation of the
 reaper or child consumes the process-launch reservation exactly once; only
 proof that no process was created permits `RELEASED_NO_PROCESS`.
 
@@ -1474,13 +1756,14 @@ alone owns:
 
 After child termination, it proves the child process group is empty, hashes the
 closed logs, and atomically writes `supervisor-result.json` with schema
-`goal-plan.supervisor-result/v2`:
+`goal-plan.supervisor-result/v3`:
 
 | Field | Contract |
 |---|---|
 | `schema_version`, `process_kind`, `process_id`, `process_run_id`, `process_launch_reservation_id`, `correction_round_id` | Exact run, process-launch, and optional correction-round identities. |
 | `attractor_runner_argv_prefix_sha256`, `provider` | Exact compiled runner/provider bindings observed by the supervisor. |
-| `supervisor_runner_argv_prefix_sha256`, `supervisor_runner_identity` | Exact compiled supervisor prefix and executable/interpreter/script/CLI/schema binding observed by the supervisor. |
+| `trusted_runtime_binding_path`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash` | External binding identity revalidated before supervisor action. |
+| `trusted_supervisor_argv_prefix_sha256`, `trusted_supervisor_identity` | Exact external supervisor prefix and executable/interpreter/script/CLI/schema binding revalidated and observed by the supervisor. |
 | `intent_sha256`, `launch_contract_sha256`, `ledger_sha256` | Exact bound artifact hashes. |
 | `supervisor_identity`, `final_child_identity` | Canonical validated Linux identities. |
 | `raw_wait_status` | Exact non-negative integer returned by `wait`/`waitpid`. |
@@ -1497,12 +1780,14 @@ wait status, or override normalized exit/signal/timeout classification.
 
 #### Control-client contracts
 
-Every client first proves its own argv is the exact immutable supervisor prefix
-plus the compiled control suffix, then validates the prefix/identity/environment,
-intent/contract hashes, and full supervisor and child procfs identities before
-observation or signalling. Result schemas reject unknown fields and share
-process-run ID, artifact hashes, observed boottime, identities, verdict, and
-failure reason.
+Every client first validates the external trusted-runtime binding and proves its
+own argv is the exact immutable trusted-supervisor prefix plus the compiled
+control suffix, then validates interpreter/supervisor path, permissions and
+hashes, prefix/identity/environment, intent/contract/binding hashes, and full
+supervisor and child procfs identities before observation or signalling. It
+rechecks the external identities after waiting and before any signal. Result
+schemas reject unknown fields and share process-run ID, binding/artifact hashes,
+observed boottime, identities, verdict, and failure reason.
 
 `poll` writes `goal-plan.supervisor-poll/v2`. Exact `--wait-seconds 30` is
 mandatory. The client validates intent, contract, budget ledger, supervisor and
@@ -1699,9 +1984,11 @@ Orient
                     -> pass -> ownership check -> commit check -> PASS candidate
 ```
 
-`ReserveGlobalAttempt` is deterministic checked-in code. Immediately before
-each adaptive `Attempt`, it opens the external flocked budget ledger and
-reserves by exact tuple:
+`ReserveGlobalAttempt` is deterministic code whose checked-in bytes are part of
+the compiled source, but the node executes only through the external
+`trusted_runtime_argv_prefix`. Immediately before each adaptive `Attempt`, that
+external command revalidates the binding, opens the external flocked budget
+ledger, and reserves by exact tuple:
 
 ```text
 (lane_or_correction_id, process_run_id, local_attempt, verifier_definition_sha256)
@@ -1785,7 +2072,7 @@ evidence, and exact candidate disposition. It is a parent routing hint only.
 | Optional qualitative lane critique | Independent LLM gate plus deterministic artifact classifier | Some acceptance criteria cannot be reduced to a command; the reviewer must be outside the worker context, and its versioned artifact must be schema-valid and tied to the exact commit. |
 | Ownership diff, commit existence, ancestry, clean-state checks | Deterministic nodes | A worker cannot attest its own git side effects. |
 | Merge/cherry-pick, rollback of a failed candidate, merge journal | Deterministic nodes | Integration is state mutation with exact success criteria. |
-| Pre-terminal authority derivation, process reconciliation, authority-scoped run-owned worktree removal/preservation, foreign-path proof, and final-status choice | Deterministic `PreTerminalCleanup` | Cleanup can invalidate intended success. It receives `FULL` only from fresh green parent-runner, target/source, and compiled-source gates; red/unknown binding restricts it to external evidence plus fully procfs-identity-validated process termination before any durable terminal publication. |
+| Trusted-runtime bootstrap, pre-terminal authority derivation, process reconciliation, authority-scoped run-owned worktree removal/preservation, foreign-path proof, and final-status choice | Deterministic launcher plus externally pinned `PreTerminalCleanup` | The launcher materializes exact Git blobs and validates the external binding before executing safety code. Cleanup receives `FULL` only from fresh green trusted-runtime, parent-runner, target/source, and compiled-source gates; a green trusted runtime plus red repository/source binding restricts it to `EXTERNAL_ONLY`; a red trusted runtime grants `NONE` and prohibits cleanup/finalizer completion. |
 | Cross-lane coherence review | Fresh independent LLM gate plus the same deterministic artifact classifier | Semantic conflicts can survive lane-local mechanical checks. The shared review interface ties the verdict to final HEAD and routes correction to named lane IDs. |
 | PR existence and exact-head verification | Deterministic remote query | `OpenPR` cannot certify its own external side effect. |
 
@@ -2079,6 +2366,10 @@ fail
 --param run_budget_lock_path=<absolute state_root/budgets/run-wide.lock>
 --param product_base_sha=<full product base SHA>
 --param execution_source_sha=<full execution source SHA>
+--param runtime_bundle_hash=<full trusted runtime bundle hash>
+--param trusted_runtime_binding_path=<absolute trusted-runtime-binding.json>
+--param trusted_runtime_argv_prefix_sha256=<full external runtime prefix hash>
+--param trusted_supervisor_argv_prefix_sha256=<full external supervisor prefix hash>
 --param provider=<compiled-provider>
 --param attractor_runner_argv_prefix_sha256=<full prefix hash>
 --param aggregate_verifier_definition_sha256=<full aggregate verifier hash>
@@ -2089,7 +2380,8 @@ No extra/reordered argv or parameter is accepted. The
 `correction_round_id=<plan-id>/<run-id>/correction/<ordinal>` and
 `process_run_id` must equal the two live ledger reservations. All generated
 child state is external, and the launch contract binds exact
-prefix/module/source/provider, supervisor prefix/identity,
+prefix/module/source/provider, trusted-runtime binding/bundle/prefix hashes,
+trusted-supervisor prefix/identity,
 integration-worktree CWD, correction DOT/hash, environment, budget paths, and
 result schema.
 
@@ -2235,7 +2527,7 @@ lane-attempt evidence exists.
 
 The parent mints an external run-wide budget ledger at
 `state_root/budgets/run-wide.json` with schema
-`goal-plan.run-budget/v2`. Every read-modify-write by the parent or any
+`goal-plan.run-budget/v3`. Every read-modify-write by the parent or any
 `ReserveGlobalAttempt` node opens the dedicated
 `state_root/budgets/run-wide.lock`, holds `fcntl.flock(LOCK_EX)`, rereads and
 validates the current ledger, writes a same-directory temporary file, fsyncs,
@@ -2246,8 +2538,8 @@ The ledger contains:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.run-budget/v2`. |
-| `plan_id`, `run_id`, `product_base_sha`, `execution_source_sha`, `provider`, `attractor_runner_argv_prefix_sha256`, `supervisor_runner_argv_prefix_sha256` | Exact immutable run, child-runner, and supervisor-runner identity. |
+| `schema_version` | Exact value `goal-plan.run-budget/v3`. |
+| `plan_id`, `run_id`, `product_base_sha`, `execution_source_sha`, `provider`, `attractor_runner_argv_prefix_sha256`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash`, `trusted_runtime_argv_prefix_sha256`, `trusted_supervisor_argv_prefix_sha256` | Exact immutable run, child-runner, external binding, safety-runtime, and external supervisor identities. |
 | `boot_id` | Exact Linux boot ID at run admission. |
 | `started_at_boottime`, `deadline_boottime` | `CLOCK_BOOTTIME` values captured with `clock_gettime`; deadline equals start plus `max_pipeline_seconds`. |
 | `max_pipeline_seconds`, `max_total_attempts`, `max_process_launches`, `max_integration_corrections` | Exact positive compiled limits. `max_total_attempts` excludes all process launches. |
@@ -2511,8 +2803,10 @@ There are no routine gates between waves.
 ## Durable State and Crash Recovery
 
 Recovery is a graph pattern, not an assumption about engine checkpoints. Every
-initial start and resume first satisfies the parent target-repository binding,
-persists its immutable invocation record, and only then begins deterministic
+initial start and resume first validates or exact-blob rehydrates the external
+trusted-runtime binding, enters recovery only through
+`trusted_runtime_argv_prefix`, then satisfies the parent target-repository
+binding and persists its immutable invocation record before deterministic
 reconciliation.
 
 ### Durable state
@@ -2520,13 +2814,20 @@ reconciliation.
 The run persists:
 
 - approved plan snapshot/hash and preapproval/approval evidence;
+- exact trusted-runtime definition/hash, runtime-bundle hash, external bundle
+  directory, versioned `trusted-runtime-binding.json` path/hash/content,
+  runtime/supervisor source path/blob/mode/length/hash entries, external
+  file/interpreter/Git executable path/realpath/mode/hash entries, exact
+  runtime/supervisor prefix tokens/hashes, materialization command evidence,
+  fsync/atomic-rename/chmod/reread evidence, and creation timestamp;
 - compiled-pipeline path, embedded `plan_sha256`, typed runtime inputs,
   immutable `attractor_runner_argv_prefix`/identity/hash,
   append-only parent-runner invocation records with exact argv/prefix/provider,
   `/proc/self/cwd`, runner-resolved `--cwd .`, canonical `target_repo`, parent
   DOT path/observed/execution-source/manifest hashes, parent process identity,
   `execution_source_sha`, and exact parent logs root,
-  `supervisor_runner_argv_prefix`/identity/hash/CLI/schema/self-check evidence,
+  `trusted_runtime_argv_prefix` and
+  `trusted_supervisor_argv_prefix`/identity/hash/CLI/schema/self-check evidence,
   compiled `provider`, provider credential preflight, doctor/flag evidence, and engine-step budget,
   selected target-repository identity mode and its remote-match or
   history-anchor proof, exact `product_base_sha`, exact
@@ -2577,9 +2878,10 @@ The run persists:
 - `final-aggregate-after-sweep` record bound to that same final HEAD;
 - terminal classification;
 - `PreTerminalCleanup` intent, invocation, fresh
-  `parent_binding_verdict`, target/source-identity and compiled-source verdicts,
-  `mutation_authority`, gate evidence paths/hashes, permitted actions, attempted
-  actions, skipped Git actions, bounded process reconciliation,
+  `trusted_runtime_binding_verdict`, `parent_binding_verdict`,
+  target/source-identity and compiled-source verdicts, `mutation_authority`,
+  gate evidence paths/hashes, permitted actions, attempted actions, skipped Git
+  actions, bounded process reconciliation,
   residual-preservation manifest, cleanup journal, final registry/filesystem/Git
   worktree-list projection, unresolved infrastructure resources, final cleanup
   verdict, chosen final status, and evidence hash;
@@ -2596,16 +2898,32 @@ state; they are not the source of truth.
 
 On restart, the graph compares state with reality:
 
-Before rule 1, the launcher changes into the durable canonical `target_repo`
-before `exec`; the new parent invocation must rerun
-`ParentRunnerBindingGate`, target/source-identity proof, and
-`CompiledSourceGate`, append a hash-chained invocation record, and match the
-original prefix/provider/CWD/DOT/hash/logs/source bindings. Only a current
-all-green set grants `mutation_authority: "FULL"`. A red or unknown gate grants
-`EXTERNAL_ONLY`: recovery may write only below external `state_root` and may
-terminate only a fully procfs-identity-validated supervisor/child process group.
-It performs no target-repository-file, ref, branch, Git-registration,
-worktree-path, or Git-common-directory mutation.
+Before opening any current target-repository runtime/supervisor script, the
+launcher validates the external trusted-runtime binding from durable
+`state_root`. If the exact bundle directory is absent, it may run only the
+deterministic closed-argv rehydration procedure from the durable approved plan
+snapshot and exact Git blobs at `execution_source_sha`. It never executes or
+materializes from current working-copy runtime bytes. A present mismatching
+bundle, or rehydration that cannot prove the exact blob, Git executable,
+interpreter, permission, fsync, and final binding identities, stops as
+infrastructure-blocked before the parent graph; no cleanup/finalizer completion
+is claimed.
+
+Only after the external binding is green does the launcher change into the
+durable canonical `target_repo`, `exec` the parent, and invoke recovery through
+exact `trusted_runtime_argv_prefix`. The new parent invocation reruns
+`TrustedRuntimeBindingGate`, `ParentRunnerBindingGate`, target/source-identity
+proof, and `CompiledSourceGate`, appends a hash-chained invocation record, and
+matches the original trusted-runtime/prefix/provider/CWD/DOT/hash/logs/source
+bindings. Only a current all-green set grants
+`mutation_authority: "FULL"`. A green trusted runtime plus red/unknown
+repository/source gate grants `EXTERNAL_ONLY`: recovery may write only below
+external `state_root` and may terminate only a fully
+procfs-identity-validated supervisor/child process group. It performs no
+target-repository-file, ref, branch, Git-registration, worktree-path, or
+Git-common-directory mutation. A red/unknown trusted runtime grants `NONE` and
+no recovery action starts, except the separately validated supervisor-only
+termination rule.
 
 1. Re-resolve `state_root`, `worktree_root`, and conditional
    `delivery_state_root`, reject symlink drift, and require equality with the
@@ -2641,13 +2959,16 @@ worktree-path, or Git-common-directory mutation.
    attempt-start evidence exists; consume a started/classified attempt exactly
    once, using a synthetic crash classification when it started but lacks a
    complete verifier record.
-7. Rerun admission against immutable `plan.json` and embedded `plan_sha256`,
+7. Through exact external `trusted_runtime_argv_prefix`, rerun admission against
+   immutable `plan.json` and embedded `plan_sha256`,
    including graph/plan correspondence, child-runner identity/doctor/flags,
-   supervisor prefix/executable/interpreter/script/environment identity,
-   non-mutating self-check, exact CLI/schema/subcommand support, provider/
-   credential, approval transport, and engine-step arithmetic. Both runner
-   prefixes and every bound identity/hash/version must equal durable state;
-   mismatch is `INFRA_FAILURE`, and resume cannot change them.
+   trusted runtime/supervisor prefix/executable/interpreter/external-script/
+   environment identity, binding permissions/hashes, non-mutating self-check,
+   exact CLI/schema/subcommand support, provider/credential, approval transport,
+   and engine-step arithmetic. Every runner prefix and bound
+   identity/hash/version must equal durable state; mismatch is
+   `INFRA_FAILURE`, and resume cannot change them. Current target-repository
+   runtime scripts are never executed, even when source binding is red.
 8. Re-prove the selected target-repository identity policy, source
    SHAs/ancestry, and compiled-source manifest.
 9. Run `CompiledSourceGate` against the execution source and every exact
@@ -2661,7 +2982,7 @@ worktree-path, or Git-common-directory mutation.
     force, prove path/registration absence, then mark `REMOVED`. Restart
     verification from worktree creation only when no envelope invocation began.
 11. For every intent missing ledger/ack, invoke exact
-    `supervisor_runner_argv_prefix + reconcile suffix`. Its bounded `/proc`
+    `trusted_supervisor_argv_prefix + reconcile suffix`. Its bounded `/proc`
     discovery adopts exactly one identity-valid live supervisor and consumes
     its process-launch reservation; an identity-valid orphan child is
     terminated and becomes `INFRA_FAILURE`; zero matches releases only a proven
@@ -2669,7 +2990,7 @@ worktree-path, or Git-common-directory mutation.
     reservation; multiple/ambiguous matches are never signalled and are
     `INFRA_FAILURE`.
 12. For every acknowledged nonterminal run, invoke exact
-    `supervisor_runner_argv_prefix + poll suffix` with `--wait-seconds 30` and
+    `trusted_supervisor_argv_prefix + poll suffix` with `--wait-seconds 30` and
     validate both identities before and after its bounded wait. At or beyond
     deadline, close the budget ledger first and invoke exact prefix plus
     `terminate --reason global_deadline` for every active process-run ID.
@@ -2723,22 +3044,26 @@ worktree-path, or Git-common-directory mutation.
     state at its exact expected head if delivery may already have occurred;
     never open a duplicate merely because local state is incomplete.
 28. If a durable intended-status or partial `PreTerminalCleanup` journal exists
-    but no valid `result.json` exists, resume only `PreTerminalCleanup`. Every
+    but no valid `result.json` exists, validate the external binding and resume
+    only `PreTerminalCleanup` through exact `trusted_runtime_argv_prefix`. Every
     retry creates a new cleanup-attempt record and recomputes current
-    `ParentRunnerBindingGate`, target/source-identity, and
-    `CompiledSourceGate` evidence before any action. A prior
+    `TrustedRuntimeBindingGate`, `ParentRunnerBindingGate`,
+    target/source-identity, and `CompiledSourceGate` evidence before any action.
+    A prior
     `mutation_authority: "FULL"` is historical evidence only and is rejected
     when the current gate set is red or unknown. Current `FULL` may
     idempotently finish exact process and Git lifecycle transitions; current
     `EXTERNAL_ONLY` may finish external evidence and fully
     procfs-identity-validated process termination only, records every Git action
     as skipped, leaves worktrees/refs/registrations unresolved, and chooses
-    `INFRA_FAILURE`. Do not re-enter product work or delivery.
+    `INFRA_FAILURE`. Current `NONE` starts no cleanup/finalizer and claims no
+    completion. Do not re-enter product work or delivery.
 29. If valid durable terminal `result.json`, `goal_plan.status`, and terminal
     token evidence exist, verify they match the cleanup record's chosen status,
-    `parent_binding_verdict`, `mutation_authority`, current-gate evidence hashes,
-    and cleanup verdict, and perform no post-terminal cleanup or repository
-    mutation. If matching CLI carrier evidence is absent, resume only the
+    `trusted_runtime_binding_verdict`, `parent_binding_verdict`,
+    `mutation_authority`, current-gate evidence hashes, and cleanup verdict, and
+    perform no post-terminal cleanup or repository mutation. If matching CLI
+    carrier evidence is absent, revalidate the binding and resume only the
     idempotent carrier outcome from that final status; do not rewrite
     result/status/token or rerun cleanup. A mismatch is an externally reported
     infrastructure inconsistency, never a reason to rewrite a prior `COMPLETE`
@@ -2752,9 +3077,9 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Both source SHAs, the immutable parent/child/supervisor runner bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and `PreTerminalCleanup` records `mutation_authority: "FULL"`, proves no live supervisor/child process group or foreign path, and marks every run-owned lane/candidate/delivery/integration worktree and Git registration `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
+| `COMPLETE` | Both source SHAs, the immutable external trusted-runtime/parent/child/supervisor bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and externally invoked `PreTerminalCleanup` records `mutation_authority: "FULL"`, proves no live supervisor/child process group or foreign path, and marks every run-owned lane/candidate/delivery/integration worktree and Git registration `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked and every residual has evidence. Under current `FULL` authority, `PreTerminalCleanup` proves no live process group, marks only explicitly named residual worktrees `PRESERVED_RESIDUAL` with evidence/recovery commands, removes every other run-owned worktree/registration, and finds no unidentified or foreign path. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | Any external-root/approval boundary, parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. `PreTerminalCleanup` records either `FULL` or `EXTERNAL_ONLY`, performs only the bounded actions that authority permits, and names every unresolved resource. Red/unknown parent, target/source, or compiled-source binding always yields `EXTERNAL_ONLY` and leaves all Git/repository resources untouched. | No delivery. |
+| `INFRA_FAILURE` | Any external-root/approval boundary, trusted-runtime/parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. With a green trusted-runtime binding, `PreTerminalCleanup` records `FULL` or `EXTERNAL_ONLY`, performs only bounded actions that authority permits, and names every unresolved resource. Red/unknown parent, target/source, or compiled-source binding yields `EXTERNAL_ONLY` and leaves all Git/repository resources untouched. Red/unknown trusted runtime yields `NONE`; the launcher reports infrastructure-blocked without claiming cleanup/finalizer completion. | No delivery. |
 | `ABORTED` | The plan was rejected or cancelled before mutation, current cleanup authority is `FULL`, and `PreTerminalCleanup` proves no run-owned process, worktree, Git registration, `worktree_root`, or `delivery_state_root` mutation exists. A red/unknown binding yields `INFRA_FAILURE`, not `ABORTED`. | No delivery. |
 
 ### `PreTerminalCleanup` and durable finalizer machine contract
@@ -2767,48 +3092,63 @@ published.
 
 Every cleanup attempt freshly recomputes and durably hashes:
 
-1. `ParentRunnerBindingGate`, including the current parent procfs/CWD,
+1. `TrustedRuntimeBindingGate`, including the binding path/schema/hash,
+   runtime-bundle hash, external runtime/supervisor path/type/mode/uid/gid/
+   length/hash, interpreter/Git executable path/realpath/mode/hash, and exact
+   runtime/supervisor prefix hashes;
+2. `ParentRunnerBindingGate`, including the current parent procfs/CWD,
    runner/DOT/argv/provider/logs-root, and invocation-record binding;
-2. target/source identity, including canonical target Git top-level/common
+3. target/source identity, including canonical target Git top-level/common
    directory, selected remote/history-anchor proof, `product_base_sha`,
    `execution_source_sha`, ancestry, and containing-commit binding; and
-3. `CompiledSourceGate` against the execution source and every current
+4. `CompiledSourceGate` against the execution source and every current
    non-`REMOVED` run-owned worktree that still exists.
 
-The checks remain dependency-ordered. A red/unknown parent-runner gate prevents
+The command cannot start unless item 1 is `PASS`. The checks remain
+dependency-ordered. A red/unknown parent-runner gate prevents
 target-bound downstream gate execution; each blocked current verdict is
 recorded `UNKNOWN` with its prerequisite evidence rather than bypassing the red
 gate.
 
-The cleanup record's required `parent_binding_verdict` is exactly `PASS`,
-`RED`, or `UNKNOWN` for item 1. Separate
+The cleanup record's required `trusted_runtime_binding_verdict` is exact `PASS`
+for the invocation. The required `parent_binding_verdict` is exactly `PASS`,
+`RED`, or `UNKNOWN` for item 2. Separate
 `target_source_binding_verdict` and `compiled_source_verdict` fields use the
 same enum. Missing, unreadable, stale, or incomplete current evidence is
 `UNKNOWN`, never a reason to trust a prior pass.
 
 The required `mutation_authority` is derived, not supplied:
 
-- `FULL` only when all three current verdicts are exactly `PASS`. It permits
+- `FULL` only when all four current verdicts are exactly `PASS`. It permits
   the bounded, identity-matched status-specific Git worktree/ref/registration
   actions below.
-- `EXTERNAL_ONLY` whenever any current verdict is `RED` or `UNKNOWN`. It may
+- `EXTERNAL_ONLY` only while `trusted_runtime_binding_verdict == PASS` and any
+  parent/target-source/compiled-source verdict is `RED` or `UNKNOWN`. It may
   write only external state/evidence and may terminate only supervisor/child
   process groups whose complete canonical procfs identity matches durable
   process evidence. It must not modify target-repository files, refs, branches,
   Git registrations, worktree paths, or Git common-directory state. Every
   run-owned or foreign worktree remains untouched and is recorded as unresolved
   external evidence. The chosen final status is always `INFRA_FAILURE`.
+- `NONE` when trusted-runtime validation is `RED` or `UNKNOWN` before
+  invocation, or becomes red during the attempt. It permits no Git mutation,
+  general signalling, cleanup publication, or terminal finalizer. Only the
+  separately still-valid trusted-supervisor termination exception may stop one
+  exact identity-valid process group. The launcher records
+  infrastructure-blocked evidence and makes no completion claim.
 
-No prior cleanup record, lifecycle state, or prior `FULL` authority can satisfy
-this decision. A later retry with a freshly all-green gate set may receive
+No prior cleanup record, lifecycle state, or prior `FULL`/`EXTERNAL_ONLY`
+authority can satisfy this decision. A later retry with a freshly green
+trusted-runtime binding and all-green repository/source gate set may receive
 `FULL`; a current red/unknown set never does.
 
-The DOT invokes the admitted checked-in runtime with this exact ordered command:
+The DOT invokes only the external pinned runtime with this exact ordered
+command:
 
 ```text
-<admitted-absolute-python>
-<canonical-target-repo>/pipelines/PLAN_SLUG/python/goal_plan_runtime.py
+<each token of trusted_runtime_argv_prefix>
 pre-terminal-cleanup
+--trusted-runtime-binding <absolute-state-root>/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
 --target-repo <canonical-target-repo>
 --execution-source-sha <full-execution-source-sha>
 --state-root <absolute-state-root>
@@ -2828,10 +3168,12 @@ other intended status. The command rejects reordered, missing, extra, relative,
 or hash-unbound arguments. It does not accept `--mutation-authority`; the
 runtime derives authority only from the current attempt's new gate records
 beneath `--gate-evidence-root`. Its script/interpreter identity, suffix schemas,
-evidence schema `goal-plan.pre-terminal-cleanup/v1`, and token map are part of
+evidence schema `goal-plan.pre-terminal-cleanup/v2`, and token map are part of
 `plan.json.pre_terminal_cleanup`. Each attempt output is immutable once
 atomically published; the finalizer consumes the highest current attempt whose
 ordinal, gate paths/hashes, authority, and journal predecessor hash all validate.
+No cleanup or finalization route contains the target-repository
+`goal_plan_runtime.py` path.
 
 The status-specific cleanup rules are normative. Every Git/worktree action in
 these rules is reachable only with `mutation_authority: "FULL"`:
@@ -2879,15 +3221,16 @@ these rules is reachable only with `mutation_authority: "FULL"`:
   this authority.
 
 `PreTerminalCleanup` atomically writes one
-`goal-plan.pre-terminal-cleanup/v1` record with at least:
+`goal-plan.pre-terminal-cleanup/v2` record with at least:
 
 | Field | Contract |
 |---|---|
 | `schema_version`, `cleanup_attempt`, `intended_status` | Exact schema, positive attempt ordinal, and requested intended terminal status. |
+| `trusted_runtime_binding_verdict`, `trusted_runtime_binding_path`, `trusted_runtime_binding_sha256` | Exact current external binding pass and immutable binding identity used to invoke this attempt. |
 | `parent_binding_verdict` | Exact current `PASS`, `RED`, or `UNKNOWN`; never copied from an earlier attempt. |
 | `target_source_binding_verdict`, `compiled_source_verdict` | Exact current `PASS`, `RED`, or `UNKNOWN` for the other two authority gates. |
-| `mutation_authority` | Exact derived `FULL` or `EXTERNAL_ONLY`; `FULL` iff all three current verdicts are `PASS`. |
-| `gate_evidence` | Current attempt's parent, target/source, and compiled-source record paths and canonical SHA-256 values. Unreadable/missing evidence records null hash plus the observation error and forces `UNKNOWN`. |
+| `mutation_authority` | Exact derived `FULL` or `EXTERNAL_ONLY`; a record cannot be published under `NONE`. `FULL` iff all four current verdicts are `PASS`; `EXTERNAL_ONLY` requires trusted runtime `PASS`. |
+| `gate_evidence` | Current attempt's trusted-runtime, parent, target/source, and compiled-source record paths and canonical SHA-256 values. Unreadable/missing repository/source evidence records null hash plus the observation error and forces `UNKNOWN`. |
 | `permitted_actions` | Closed ordered action descriptors allowed by the derived authority and intended-status policy, including exact resource identities. |
 | `attempted_actions` | Every attempted process or Git action with exact argv/operation, resource identity, output/evidence path, exit/result, and before/after observation. |
 | `skipped_git_actions` | Every otherwise-applicable Git/repository/worktree action omitted because authority is `EXTERNAL_ONLY`, with resource identity and gate reason. Empty only when no action was skipped. |
@@ -2899,7 +3242,8 @@ these rules is reachable only with `mutation_authority: "FULL"`:
 | `chosen_final_status` | The intended status only for a green `FULL_COMPLETE` status-specific cleanup; otherwise exact `INFRA_FAILURE`. |
 | `record_sha256` | Canonical hash binding all fields above plus current parent invocation hash and exact commands/outputs. |
 
-Cleanup faults under either authority do not change the already-infrastructure
+Cleanup faults under either executable authority do not change the
+already-infrastructure
 status, but remain visible in terminal evidence. `EXTERNAL_ONLY_COMPLETE` always
 maps to `INFRA_FAILURE`; `INCOMPLETE` always maps to `INFRA_FAILURE`.
 The cleanup record's last non-empty stdout line is exactly
@@ -2907,10 +3251,23 @@ The cleanup record's last non-empty stdout line is exactly
 incomplete cleanup record is itself `INFRA_FAILURE`; the graph reruns/reconciles
 cleanup with a fresh authority decision rather than publishing a terminal.
 
-Only after that record is durable does the deterministic finalizer atomically
-write the run root's versioned `result.json` with, at minimum:
+Only after that record is durable does the deterministic finalizer revalidate
+the external binding and execute this exact prefix/suffix:
 
-- `schema_version` with exact value `goal-plan.result/v2`;
+```text
+<each token of trusted_runtime_argv_prefix>
+terminal-finalize
+--trusted-runtime-binding <absolute trusted-runtime-binding.json>
+--pre-terminal-cleanup <absolute cleanup-attempt.json>
+--result <absolute-state-root>/result.json
+--status <absolute-state-root>/goal_plan.status
+--output <absolute-state-root>/terminal/finalizer.json
+```
+
+It rejects extra/reordered arguments and atomically writes the run root's
+versioned `result.json` with, at minimum:
+
+- `schema_version` with exact value `goal-plan.result/v3`;
 - `status` with exact value `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or
   `ABORTED`;
 - `plan_hash`;
@@ -2919,7 +3276,10 @@ write the run root's versioned `result.json` with, at minimum:
   compiled `provider`;
 - `parent_runner_invocation_definition_sha256`,
   `parent_runner_invocation_paths`, and current parent invocation evidence hash;
-- `supervisor_runner_argv_prefix_sha256` and bound
+- `trusted_runtime_binding_path`, `trusted_runtime_binding_sha256`,
+  `runtime_bundle_hash`, and materialization-command evidence paths/hashes;
+- `trusted_runtime_argv_prefix_sha256`,
+  `trusted_supervisor_argv_prefix_sha256`, and bound
   executable/interpreter/script/CLI/schema identity;
 - `compiled_source_manifest_path` and `compiled_source_manifest_sha256`;
 - `integrated_head_sha`, or `null` when no integration HEAD exists;
@@ -2933,7 +3293,8 @@ write the run root's versioned `result.json` with, at minimum:
 - `run_owned_worktrees_path`, `run_owned_worktrees_sha256`, and final lifecycle
   state for every recorded worktree;
 - `pre_terminal_cleanup_path`, `pre_terminal_cleanup_sha256`,
-  `intended_status`, `parent_binding_verdict`,
+  `intended_status`, `trusted_runtime_binding_verdict`,
+  `parent_binding_verdict`,
   `target_source_binding_verdict`, `compiled_source_verdict`,
   `mutation_authority`, `cleanup_gate_evidence_hashes`,
   `cleanup_permitted_actions`, `cleanup_attempted_actions`,
@@ -2969,6 +3330,13 @@ The finalizer completes its writes successfully so the graph can route on
 matching CLI outcome. `COMPLETE` is the only successful and deliverable outcome.
 The other three remain distinct non-success, evidence-bearing outcomes rather
 than aliases for a generic failure.
+
+If trusted-runtime validation fails before or during the finalizer, it writes no
+valid finalizer record and cannot claim `result.json`, status, token, cleanup, or
+finalizer completion. The launcher/carrier may report only
+`INFRASTRUCTURE_BLOCKED` with the external validation/rehydration evidence; it
+must not synthesize `GOAL_PLAN:INFRA_FAILURE` as though the durable terminal
+machine completed.
 
 There is no post-terminal repository/process/worktree cleanup phase. After
 `result.json`, `goal_plan.status`, terminal token, and carrier outcome are
@@ -3022,7 +3390,8 @@ Before child launch it:
    state and equals the approved final-HEAD tree.
 
 The parent reserves one process-launch unit and starts the delivery child with
-the exact immutable `supervisor_runner_argv_prefix + run suffix`. After
+the exact immutable external `trusted_supervisor_argv_prefix + run suffix`.
+After
 resolving typed values, exact child argv is:
 
 ```text
@@ -3047,14 +3416,19 @@ fail
 --param github_repo=<owner/repo>
 --param product_base_sha=<full product base SHA>
 --param execution_source_sha=<full execution source SHA>
+--param runtime_bundle_hash=<full trusted runtime bundle hash>
+--param trusted_runtime_binding_path=<absolute trusted-runtime-binding.json>
+--param trusted_runtime_argv_prefix_sha256=<full external runtime prefix hash>
+--param trusted_supervisor_argv_prefix_sha256=<full external supervisor prefix hash>
 --param provider=<compiled-provider>
 --param attractor_runner_argv_prefix_sha256=<full prefix hash>
 ```
 
 The launch contract forbids extra/reordered argv and binds the exact adapted
 delivery DOT hash, child-runner prefix/module/source/provider,
-supervisor-runner prefix/identity/suffix/environment, `delivery_worktree` CWD,
-external delivery roots, closed environment, final HEAD, and result schema.
+trusted-runtime binding/bundle/prefix hashes, trusted-supervisor
+prefix/identity/suffix/environment, `delivery_worktree` CWD, external delivery
+roots, closed environment, final HEAD, and result schema.
 Delivery has no adaptive `Attempt` node and consumes no
 `max_total_attempts`; each supervisor start/restart consumes
 `max_process_launches`.
@@ -3090,7 +3464,7 @@ uses schema version `goal-plan.delivery-attempt/v2` and records:
 - `attempt` as integer `1` or `2`;
 - `product_base_sha` and `execution_source_sha`;
 - `provider`, `attractor_runner_argv_prefix_sha256`,
-  `supervisor_runner_argv_prefix_sha256`, and `process_run_id`;
+  `trusted_supervisor_argv_prefix_sha256`, and `process_run_id`;
 - `compiled_source_manifest_sha256`;
 - `branch` as the delivery branch;
 - `expected_head_sha` as the exact expected head SHA;
@@ -3158,23 +3532,42 @@ pipelines/goal_plan_smoke/python/goal_plan_runtime.py
 pipelines/goal_plan_smoke/python/goal_plan_supervisor.py
 pipelines/goal_plan_smoke/python/tests/test_goal_plan_runtime.py
 pipelines/goal_plan_smoke/python/tests/test_goal_plan_supervisor.py
+pipelines/goal_plan_smoke/python/tests/test_goal_plan_trusted_runtime.py
 README.md
 ```
 
 `goal_plan_runtime.py` is the single deterministic home for source-SHA
 admission, parent target-repository/CWD/DOT invocation binding and immutable
-invocation evidence, compiled-source manifests/gates, ownership-pattern rejection,
+invocation evidence, trusted-runtime definition/binding validation and
+materialization primitives, compiled-source manifests/gates, ownership-pattern
+rejection,
 candidate-verification worktree lifecycle, the shared
 `VerifierExecutionEnvelope`, phase-split external-root safety,
 `run-owned-worktrees.json` lifecycle/recovery, run-budget
 process-launch/correction-round/adaptive-attempt reservation/reconciliation,
-child-runner/supervisor-runner/provider preflight, engine-step admission,
+child-runner/trusted-supervisor/provider preflight, engine-step admission,
 delivery-worktree envelope, `PreTerminalCleanup`, durable final-status
-selection, and delta reporting. DOT nodes call that module
-rather than duplicating shell logic. `goal_plan_supervisor.py` remains the
-single home for the lane, correction, and delivery reaper, immutable
+selection, and delta reporting. First admission validates its checked-in bytes
+as source data, while every parent safety-critical DOT node calls only its
+sealed external trusted-runtime copy rather than duplicating shell logic or
+executing the target-repository path. `goal_plan_supervisor.py` remains the
+single source home for the lane, correction, and delivery reaper, immutable
 self-check/CLI-schema report, authoritative wait-status capture, Linux process
-identity, long-poll/control-client schemas, and closed tokens.
+identity, long-poll/control-client schemas, and closed tokens; every runtime
+invocation uses its sealed external trusted-supervisor copy.
+
+The implementation also materializes run-scoped external artifacts, not checked
+in repository files:
+
+```text
+state_root/trusted-runtime/<runtime-bundle-hash>/goal_plan_runtime.py
+state_root/trusted-runtime/<runtime-bundle-hash>/goal_plan_supervisor.py
+state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
+```
+
+The launcher/CWD bootstrap gains the deterministic direct-Git-object
+materialization/rehydration sequence defined above. It contains no product
+scheduler or model logic.
 
 The smoke exemplar proves orchestration rather than product behavior. In a
 temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
@@ -3198,13 +3591,14 @@ orchestration behavior, not a library-only change.
 
 | Claim | Verification level | Required proof |
 |---|---|---|
-| Adaptive attempts, process launches, and correction rounds are separate | Unit + concurrent live fault injection | Flocked v2 ledger shows `ReserveGlobalAttempt` consumed at verifier classification, every supervised correction-child launch transitions its own `correction_round_id`, and every supervisor start changes `max_process_launches`; no counter borrows from another. |
+| Adaptive attempts, process launches, and correction rounds are separate | Unit + concurrent live fault injection | Flocked v3 ledger binds the trusted runtime and shows `ReserveGlobalAttempt` consumed at verifier classification, every supervised correction-child launch transitions its own `correction_round_id`, and every supervisor start changes `max_process_launches`; no counter borrows from another. |
 | Parent runner is bound to `target_repo` | Launcher/admission/recovery faults | Parent starts only after `chdir(realpath(target_repo))`; `/proc/self/cwd`, runner `--cwd .`, and canonical target repo are equal; parent DOT realpath is exact; observed/execution-source/manifest hashes agree; and immutable argv/prefix/provider/process/logs evidence is durable before mutation. |
+| Terminal runtime remains trustworthy after source failure | First-admission + live mutation/recovery faults | Checked-out runtime/supervisor bytes equal exact plan/manifest/Git blobs before mutation; sealed external copies and `trusted-runtime-binding.json` are atomically/fsync durably materialized from `cat-file blob`; every safety command revalidates and uses only external prefixes; source mutation reaches external-only final INFRA evidence, while external-copy/interpreter/hash drift blocks action. |
 | Final proof and cleanup order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep` -> optional delivery -> intended status -> `PreTerminalCleanup` -> durable terminal publication. |
 | Long polling cannot exhaust engine steps prematurely | Static arithmetic + timed live run | Recomputed branch inequality, parent total-step inequality, exact 30-second poll argv, identity checks, and observed deadline-capped waits. |
 | Delivery preserves verified source | Live Git/remote probe | Disposable final-HEAD worktree has equal pre/post HEAD/status/full-filesystem/source records, no generated `.resolve` delta, external delivery evidence, and parent-observed PR exact head. |
-| Child-runner, supervisor-runner, and provider identity cannot drift | Admission/recovery faults | Both allowed forms for each prefix pass; PATH/shell/executable/interpreter/script/hash/environment/CLI/schema/subcommand/flag/credential faults and either prefix/provider change on resume fail before mutation. |
-| Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; fresh all-green parent/target-source/compiled gates grant `FULL`; red/unknown binding grants `EXTERNAL_ONLY`; complete removes exact run-owned worktrees only under `FULL`; residual preserves only named `PRESERVED_RESIDUAL` entries under `FULL`; restricted cleanup touches no Git state, may stop only fully procfs-identity-valid process groups, records skipped/unresolved resources, and publishes no terminal first. |
+| Child-runner, trusted-supervisor, and provider identity cannot drift | Admission/recovery faults | Allowed child-runner forms and exact external trusted-supervisor prefix pass; PATH/shell/executable/interpreter/source-blob/external-script/hash/permission/environment/CLI/schema/subcommand/flag/credential faults and any binding/prefix/provider change on resume fail before mutation. |
+| Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; fresh all-green trusted-runtime/parent/target-source/compiled gates grant `FULL`; a green trusted runtime plus red repository/source binding grants `EXTERNAL_ONLY`; red trusted runtime grants `NONE`; complete removes exact run-owned worktrees only under `FULL`; residual preserves only named `PRESERVED_RESIDUAL` entries under `FULL`; restricted cleanup touches no Git state, may stop only fully procfs-identity-valid process groups, records skipped/unresolved resources, and publishes no terminal first. |
 | Approval modes are operationally honest | Standalone admission probes | Preapproved unattended headless passes; required attached standalone console/TTY passes; required without TTY or on unattended/hosted headless execution fails before mutation. |
 | DOT remains inspectable | Graphviz + lint | Every DOT renders to a non-empty PNG with recorded hashes and passes strict lint; any render failure is loud. |
 | Python implementation is clean without cache mutation | Static + unit | `python_check`, system `python3 -m pytest`, clean diff, and no changed managed-cache path. |
@@ -3234,17 +3628,24 @@ orchestration behavior, not a library-only change.
    verifier-hash guard, fresh-review schema, finalizer token map, and
    two-attempt delivery ledger.
 9. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
-   graph/plan correspondence, both target-repository identity modes, and typed
-   runtime-input rejection cases.
+   graph/plan correspondence, both target-repository identity modes,
+   `trusted_runtime_definition`, binding policy, exact runtime-bundle-hash
+   derivation, and typed runtime-input rejection cases.
 10. Validate the only two permitted `attractor_runner_argv_prefix` forms,
     canonical prefix hash, executable/module/source identity, `doctor`,
     required run flags, exact compiled provider support/credential, explicit
     `--provider` on every child argv, and immutable provider/prefix on resume.
-    Validate the only two permitted `supervisor_runner_argv_prefix` forms,
-    executable/interpreter realpath/hash, repository-relative and resolved
-    script path/hash, closed environment schema/hash, non-mutating self-check,
-    exact CLI/supported-schema versions and subcommand suffixes, and identical
-    binding on recovery.
+    Validate the compile-bound absolute Git/interpreter prefixes and hashes,
+    both source path/blob/mode/length/hash identities, exact `cat-file blob`
+    materialization argv/evidence, atomic writes/fsyncs/non-writable modes/final
+    rereads, complete `trusted-runtime-binding.json` schema/hash, exact external
+    `trusted_runtime_argv_prefix`, and exact external
+    `trusted_supervisor_argv_prefix` form from the binding,
+    executable/interpreter realpath/hash,
+    repository-relative source path/blob identity, external script path/hash and
+    non-writable permissions, closed environment schema/hash, non-mutating
+    self-check, exact CLI/supported-schema versions and subcommand suffixes, and
+    identical binding on recovery.
 11. Recompute `poll_wait_seconds=30`, `engine_step_multiplier=50`,
     `branch_nonpoll_steps`, `branch_node_count`, `max_poll_cycles`, each strict
     branch inequality, and parent total-step inequality from DOT.
@@ -3272,8 +3673,9 @@ orchestration behavior, not a library-only change.
 17. Validate ownership/integration-seam schemas reject every pattern matching
     `pipelines/PLAN_SLUG/**`; validate manifest path-set/mode/length/byte
     comparisons at every `CompiledSourceGate`.
-18. Unit-test supervisor self-check and exact prefix-plus-subcommand argv/intent
-    schemas, executable/interpreter/script/environment identity,
+18. Unit-test external trusted-supervisor self-check, per-invocation binding
+    validation, and exact prefix-plus-subcommand argv/intent schemas,
+    executable/interpreter/external-script/permission/environment identity,
     supervisor/child procfs identity, ledger/ack ordering, direct-child
     wait-status normalization, exact
     `--wait-seconds 30` long-poll/deadline cap, log hashes,
@@ -3291,27 +3693,36 @@ orchestration behavior, not a library-only change.
     `ReserveGlobalAttempt` tuple identity; exact-once verifier-bound consumption;
     active process-run tracking; all budget ceilings; `CLOCK_BOOTTIME` deadline
     closure; boot-ID failure; and restart recovery.
-21. Unit-test phase-split root safety, exact run-owned worktree registration and
-    recovery, preapproved headless success, required+attached-console/TTY
-    success, required+unattended-or-hosted-headless rejection, and read-only
-    preapproval admission that writes only external state.
+21. Unit-test first-admission checked-out-byte/blob/manifest equivalence,
+    direct-Git-object materialization, atomic/no-replace writes, fsync ordering,
+    non-writable permissions, final reread verification, complete
+    `trusted-runtime-binding.json`, per-invocation path/permission/hash checks,
+    absent-bundle rehydration, and present-mismatch refusal. Also unit-test
+    phase-split root safety, exact run-owned worktree registration and recovery,
+    preapproved headless success, required+attached-console/TTY success,
+    required+unattended-or-hosted-headless rejection, and read-only preapproval
+    admission that writes only external state.
 22. Run `git diff --check`, assert only the planned implementation footprint is
     modified, and explicitly fail if any changed path resolves beneath a managed
     cache.
 23. Validate the parent launch definition and every immutable invocation record:
-    launcher CWD changes before `exec`; `/proc/self/cwd`, runner `--cwd .`, and
-    canonical `target_repo` are equal; the parent DOT realpath is exact; its
-    observed/execution-source/compiled-manifest hashes agree; argv prefix,
-    provider, process identity, logs root, and resume hash chain are exact; and
-    every mismatch fails before repository mutation.
-24. Validate the exact `pre-terminal-cleanup` command schemas; fresh
-    `parent_binding_verdict`, target/source, and compiled-source gate records and
-    hashes; derived `mutation_authority`; status-specific process/worktree rules;
+    trusted-runtime validation/rehydration precedes parent start; launcher CWD
+    changes before `exec`; `/proc/self/cwd`, runner `--cwd .`, and canonical
+    `target_repo` are equal; the parent DOT realpath is exact; its
+    observed/execution-source/compiled-manifest hashes agree; external binding,
+    argv prefixes, provider, process identity, logs root, and resume hash chain
+    are exact; and every mismatch fails before repository mutation.
+24. Validate the exact external-prefix `pre-terminal-cleanup` and
+    `terminal-finalize` command schemas; fresh
+    `trusted_runtime_binding_verdict`, `parent_binding_verdict`, target/source,
+    and compiled-source gate records and hashes; derived `FULL`,
+    `EXTERNAL_ONLY`, or `NONE` authority; status-specific process/worktree rules;
     `PRESERVED_RESIDUAL` evidence/recovery contract; all-`REMOVED` complete
     mapping; pre-mutation aborted proof; bounded `FULL` infrastructure cleanup;
     external-only process/evidence allowlist and Git denylist; permitted,
     attempted, skipped, and unresolved action records; rejection of stale prior
-    `FULL` on retry; final cleanup verdict/chosen-status token; and strict
+    `FULL` on retry; final cleanup verdict/chosen-status token; refusal to claim
+    cleanup/finalizer completion when trusted-runtime binding is red; and strict
     ordering before `result.json`, `goal_plan.status`, terminal token, and CLI
     carrier publication.
 
@@ -3347,13 +3758,19 @@ The live smoke passes only if direct observation proves:
    argv/prefix/provider/process/logs evidence is durable; and the adjacent
    `plan.json` hash, graph/plan correspondence, normalized fetch-remote
    identity, both source SHAs/ancestry, child-runner binding, and supervisor
-   self-check all pass before mutation.
+   source identity all pass before mutation. The checked-out runtime/supervisor
+   files equal plan-declared Git blobs and compiled-manifest entries; exact blob
+   bytes are atomically materialized and sealed under `state_root`; the complete
+   versioned binding and materialization command evidence are durable; and both
+   external self-checks pass before mutation.
 2. Typed runtime inputs are bound; `state_root` resolves under
    `$XDG_STATE_HOME` or the external user-state fallback; `worktree_root` and
    `delivery_state_root` are separate safe external roots; strict preapproval
    overlap checks pass before mutation; `approval_mode=preapproved`,
    `human_gate_transport=none`, and parent/children use the compiled headless
-   gate flags; only external admission evidence is written before preapproval.
+   gate flags; `runtime_bundle_hash` and `trusted_runtime_binding_path` equal the
+   launcher-derived external binding; only external admission evidence is
+   written before preapproval.
 3. The integration worktree and prepared Wave 1 branches begin at exact
    `execution_source_sha`; a later-wave lane begins at a parent-verified
    integration HEAD descended from it. Every lane/integration/candidate/delivery
@@ -3408,9 +3825,10 @@ The live smoke passes only if direct observation proves:
     `final_sweep_lane` envelope at one frozen final HEAD, followed by
     `final-aggregate-after-sweep`; both and the coherence record name that exact
     SHA and both source SHAs.
-16. The pre-delivery and pre-`PreTerminalCleanup` parent-runner,
-    target/source-identity, and compiled-source gates freshly match immutable
-    admission evidence; the cleanup record binds their hashes,
+16. The pre-delivery and pre-`PreTerminalCleanup` trusted-runtime,
+    parent-runner, target/source-identity, and compiled-source gates freshly
+    match immutable admission evidence; the cleanup record binds their hashes,
+    `trusted_runtime_binding_verdict: "PASS"`,
     `parent_binding_verdict: "PASS"`, and `mutation_authority: "FULL"`.
 17. Delivery runs through a separately supervised child in a clean disposable
     final-HEAD worktree. Pre/post HEAD, full status, complete non-`.git`
@@ -3420,14 +3838,17 @@ The live smoke passes only if direct observation proves:
 18. The external delivery ledger records no more than two attempts, both source
     SHAs, runner/provider/process identities, and manifest hash; the parent's
     independent remote query observes a PR head equal to exact final HEAD.
-19. Under the current `FULL` authority, `PreTerminalCleanup` reconciles every
-    supervisor/process group to terminal, removes exact
+19. Under the current `FULL` authority, the exact external
+    `trusted_runtime_argv_prefix + pre-terminal-cleanup` invocation reconciles
+    every supervisor/process group to terminal, removes exact
     lane/candidate/delivery/integration worktrees without force,
     prunes/reconciles registrations, proves the complete run-owned mapping is
     `REMOVED`, finds no foreign path, records permitted/attempted/skipped actions
     and no unresolved resource, and durably chooses `FULL_COMPLETE` plus
     `COMPLETE`.
-20. Only after item 19, `result.json` reports both delta ranges and cleanup
+20. Only after item 19, the exact external
+    `trusted_runtime_argv_prefix + terminal-finalize` invocation writes
+    `result.json` with both delta ranges, trusted-runtime binding, and cleanup
     evidence; `result.json`, `goal_plan.status`, the last-line token, and CLI
     carrier outcome agree on `COMPLETE` only after all nineteen preceding
     observations hold.
@@ -3445,6 +3866,32 @@ The implementation is not ready until live probes also demonstrate:
   record yields `INFRA_FAILURE` before any repository mutation, with immutable
   external evidence for the observed OS CWD, CLI CWD, DOT realpath/hash,
   target repository, source SHA, process identity, and argv;
+- after green admission, byte-mutating or deleting the target-repository
+  `goal_plan_runtime.py` while leaving the external trusted bundle intact makes
+  the source gate red, invokes `PreTerminalCleanup` only through the exact
+  external `trusted_runtime_argv_prefix`, derives
+  `mutation_authority: "EXTERNAL_ONLY"`, performs no Git/worktree mutation, and
+  writes final `INFRA_FAILURE` cleanup/result/status/token evidence through the
+  externally pinned runtime; the same probe is repeated for
+  `goal_plan_supervisor.py`;
+- byte-mutating, permission-widening, path-replacing, or deleting the external
+  trusted runtime or supervisor copy makes the next per-invocation binding gate
+  red before action, grants `mutation_authority: "NONE"`, and performs no Git
+  mutation, general signalling, cleanup, or finalizer publication; only a
+  separately still-valid trusted-supervisor identity may exercise the narrow
+  exact-process termination exception;
+- with the external trusted-runtime directory absent and the current
+  target-repository runtime files deleted or mutated, recovery rehydration uses
+  the compile-bound absolute Git argv to extract the exact plan-declared blobs
+  from `execution_source_sha`, recreates byte-identical non-writable external
+  files and `trusted-runtime-binding.json`, verifies all hashes/permissions,
+  then starts recovery only through the recreated external prefix;
+- a wrong plan-declared blob ID, Git object whose bytes do not match the
+  expected hash, substituted interpreter realpath or bytes, wrong Git
+  executable hash, widened materialized-file permissions, or mismatched
+  runtime-bundle/binding hash fails prelaunch/rehydration before any extracted
+  code executes and records infrastructure-blocked without claiming
+  cleanup/finalizer completion;
 - a child that writes its expected artifact and then exits nonzero remains
   non-pass because the supervisor result preserves authoritative wait status;
 - parent crash while supervisor and child run leaves the reaper alive in its own
@@ -3566,24 +4013,26 @@ The implementation is not ready until live probes also demonstrate:
   an exact clean identity-validated run-owned worktree, while
   `EXTERNAL_ONLY` leaves every run-owned/foreign path, ref, registration,
   branch, and Git common-directory state untouched;
-- a red/unknown current parent, target/source, or compiled-source binding with
-  an otherwise clean, exact run-owned worktree records `parent_binding_verdict`,
-  `mutation_authority: "EXTERNAL_ONLY"`, the skipped removal/prune actions, and
-  unresolved path/registration evidence; direct filesystem and
+- with the external trusted runtime still green, a red/unknown current parent,
+  target/source, or compiled-source binding and an otherwise clean, exact
+  run-owned worktree records `trusted_runtime_binding_verdict: "PASS"`,
+  `parent_binding_verdict`, `mutation_authority: "EXTERNAL_ONLY"`, the skipped
+  removal/prune actions, and unresolved path/registration evidence; direct filesystem and
   `git worktree list --porcelain` observations prove the worktree was not
   removed;
-- the same red/unknown binding may terminate one fully
+- the same red/unknown repository/source binding may use the still-green
+  trusted supervisor prefix to terminate one fully
   procfs-identity-validated supervisor/child process group and prove it empty,
   but before/after target-tree, ref, branch, registration, worktree-path, and
   Git-common-directory observations prove no Git/repository mutation occurred;
-- a current all-green parent/target-source/compiled gate set grants `FULL` and
-  removes one exact recorded clean run-owned worktree without force, reconciles
-  only its exact registration, proves path/registration absence, and records
-  its lifecycle as `REMOVED`;
+- a current all-green trusted-runtime/parent/target-source/compiled gate set
+  grants `FULL` and removes one exact recorded clean run-owned worktree without
+  force, reconciles only its exact registration, proves path/registration
+  absence, and records its lifecycle as `REMOVED`;
 - a crash-left cleanup record with prior `mutation_authority: "FULL"` followed
-  by a current red/unknown gate is resumed as a new `EXTERNAL_ONLY` attempt;
-  the stale authority is rejected, every pending Git action is skipped, and the
-  final status is `INFRA_FAILURE`;
+  by a current green trusted runtime but red/unknown repository/source gate is
+  resumed as a new `EXTERNAL_ONLY` attempt; the stale authority is rejected,
+  every pending Git action is skipped, and the final status is `INFRA_FAILURE`;
 - under current `FULL`, intended `COMPLETE` with a live supervisor/group, dirty
   run-owned worktree, non-force removal failure, prune/registration failure,
   non-`REMOVED` mapping, or foreign path is changed by `PreTerminalCleanup` to
@@ -3615,9 +4064,9 @@ The implementation is not ready until live probes also demonstrate:
 - deleting, adding, mode-changing, or byte-changing any compiled-source entry
   is detected after child exit, before candidate verification, after merge,
   after integration correction, during restart, before delivery, and before
-  `PreTerminalCleanup`; a current pre-cleanup mismatch grants only
-  `EXTERNAL_ONLY`, and every case reaches `INFRA_FAILURE` without lane
-  correction or Git cleanup;
+  `PreTerminalCleanup`; while the external trusted runtime remains green, a
+  current pre-cleanup mismatch grants only `EXTERNAL_ONLY`, and every case
+  reaches `INFRA_FAILURE` without lane correction or Git cleanup;
 - an impossible verifier exhausts its lane budget, produces a postmortem,
   blocks dependents by name, reaches `RESIDUALS_READY`, and opens no automatic
   PR;
