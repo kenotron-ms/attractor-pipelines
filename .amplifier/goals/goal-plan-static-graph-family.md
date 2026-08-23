@@ -6,7 +6,7 @@ Produce the committed Wave-3 parent and child DOT family plus audited plan metad
 
 - Work only in `/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-impl-graphs`.
 - Branch: `goal-plan-impl/graphs`.
-- Base SHA: `BASE_SHA_AFTER_RUNTIME_MERGE` — replace and commit before launch.
+- Base SHA: `e832f6e` (merge commit landing Wave 2 runtime-substrate onto `goal-batch`, independently re-verified: 104/104 tests pass fresh at this SHA — the orchestrator will use the full 40-hex SHA when cutting the worktree).
 - Read `AGENTS.md`, primer, RUBRIC, final design, and existing proven graph precedents.
 - Own only:
   - `pipelines/goal_plan_smoke/goal_plan_smoke.dot`
@@ -43,7 +43,16 @@ Complete when all nine waves are terminal or all non-passing waves have conclusi
 ## Known
 
 - Source-backed Attractor runner and Anthropic/OpenAI credentials are available.
-- Graphviz is currently missing and must be installed by the orchestrator; until then render is a named blocker.
+- Graphviz remains unavailable. The orchestrator attempted installation before
+  this launch: no root/sudo is available in this environment (privilege
+  escalation is denied by the sandbox), and a non-root `apt-get download` +
+  `dpkg -x` extraction of the `graphviz` .deb produced a `dot` "binary" that is
+  actually a symlink to `../sbin/libgvc6-config-update` (a postinst trigger
+  helper, not extracted, not a working renderer) — a known Debian packaging
+  quirk that this extraction path cannot resolve without dpkg triggers/root.
+  Do not re-attempt installation; record `Wave 0 (static structure)`'s render
+  sub-step as `BLOCKED-graphviz-unavailable` with this evidence and proceed
+  with parser/lint/correspondence proof, which do not require Graphviz.
 
 ## Final act
 
