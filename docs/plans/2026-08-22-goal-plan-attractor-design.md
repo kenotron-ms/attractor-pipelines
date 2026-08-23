@@ -122,9 +122,9 @@ orchestration.
 - Preserve adaptive, feedback-informed goal pursuit inside each bounded lane.
 - Isolate concurrent lanes in separate git worktrees and separate headless
   child Attractor processes whose OS working directories are those worktrees.
-- Supervise every child through a durable process ledger, logs, timeouts,
-  short-lived non-daemon CLI operations, process-group cancellation, and
-  restart reconciliation.
+- Supervise every child through one accountable long-lived per-lane reaper,
+  durable intent/ledger/ack/result records, logs, timeouts, process-group
+  cancellation, and restart reconciliation.
 - Enforce concurrent run-wide attempts and deadline through one locked external
   budget ledger.
 - Separate the approved product baseline from the later execution-source commit
@@ -225,7 +225,7 @@ pipelines/PLAN_SLUG/
     goal_lane.dot
     deliver_pr.dot             # present only when delivery_mode is pr
   python/
-    process_supervisor.py
+    goal_plan_supervisor.py
 ```
 
 `plan.json` is versioned design-time and audit data. It is not a runtime
@@ -338,7 +338,7 @@ Each `lanes` entry contains:
 | `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
 | `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v1`, and a hash binding those immutable values. |
 | `budgets` | Object with positive integer `max_attempts` and positive integer `max_child_seconds`. |
-| `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v1"`, `platform: "linux"`, `mode: "supervised_process_group"`, repository-relative `supervisor_path`, exact `supervisor_sha256`, positive integer `poll_interval_seconds`, positive integer `term_grace_seconds`, canonical procfs identity requirements, durable log/ledger policies, and supervisor-definition hash. |
+| `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v2"`, `platform: "linux"`, `mode: "per_lane_reaper"`, repository-relative `supervisor_path`, exact `supervisor_sha256`, positive integer `poll_interval_seconds`, `pre_ledger_reconciliation_timeout_seconds`, and `term_grace_seconds`; canonical supervisor/child procfs identity requirements; deterministic intent/ledger/ack/result paths; control-client schemas/tokens; and supervisor-definition hash. |
 
 The composition layer owns decomposition, collision analysis, all typed values
 above, and plan approval or explicit preapproval. It writes `plan.json`
@@ -601,17 +601,21 @@ Start
   -> Create worktree_root; mint flock-protected run-wide budget/deadline ledger
   -> Prepare integration + Wave 1 worktrees from execution_source_sha
   -> component fan-out
-       -> reserve attempt(A) -> mint launch contract(A)
-            -> supervisor launch(A) -> require ack -> poll(A) loop -> classify terminal A
-       -> reserve attempt(B) -> mint launch contract(B)
-            -> supervisor launch(B) -> require ack -> poll(B) loop -> classify terminal B
-       -> missing launch ack -> supervisor reconcile -> adopt/terminal/INFRA
-       -> global deadline -> supervisor terminate all active groups
+       -> reserve attempt(A) -> mint intent + launch contract(A)
+            -> Popen reaper(A) in own session -> require ack -> poll(A) loop
+            -> require authoritative supervisor-result(A) -> classify terminal A
+       -> reserve attempt(B) -> mint intent + launch contract(B)
+            -> Popen reaper(B) in own session -> require ack -> poll(B) loop
+            -> require authoritative supervisor-result(B) -> classify terminal B
+       -> missing ledger/ack -> reconcile intent via bounded /proc discovery
+       -> vanished reaper without result -> terminate valid orphan child -> INFRA
+       -> global deadline -> control clients terminate all active reapers/groups
             -> active lanes BUDGET(global_deadline)
             -> unstarted lanes BLOCKED-global-deadline
   -> tripleoctagon fan-in
-  -> Collect child process records + artifacts
-       -> missing exit/artifact = CRASHED or INFRA, never PASS
+  -> Collect supervisor results + child artifacts
+       -> missing/invalid supervisor result = INFRA, never PASS
+       -> real child exit nonzero/signal/timeout = non-candidate even if artifacts exist
   -> CompiledSourceGate on every exited lane worktree
   -> For each candidate: CompiledSourceGate on candidate commit
        -> create clean detached candidate_verification_worktree at exact candidate SHA
@@ -917,153 +921,178 @@ integration correction and can never become `PASS`.
 
 ### Child launch and process-supervision contract
 
-`process_supervisor.py` is a deterministic, short-lived CLI utility. It is not
-a daemon, service, watcher, reaper, or long-lived parent. Every invocation
-performs one operation, atomically writes its requested result, emits one closed
-token, and exits.
+`goal_plan_supervisor.py` provides one accountable long-lived reaper process per
+lane launch. It is neither tmux nor a shared daemon/service. Each supervisor
+owns exactly one child Attractor, remains alive until that child is reaped and
+its authoritative result is durable, then exits.
 
-The exact interface is:
+The exact reaper interface is:
 
 ```text
-process-supervisor launch --contract <absolute launch-contract.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json>
-process-supervisor poll --ledger <absolute process-ledger.json> --result <absolute poll-result.json>
-process-supervisor terminate --ledger <absolute process-ledger.json> --reason <token> --result <absolute termination-result.json>
-process-supervisor reconcile --ledger <absolute process-ledger.json> --result <absolute reconciliation-result.json>
+goal_plan_supervisor.py run --contract <absolute launch-contract.json> --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json>
 ```
 
-The parent records each exact argv array as `supervisor_command`. All contract,
-ledger, acknowledgement, and result paths are absolute, beneath external
-`state_root`, and outside every Git worktree. There is no supervisor PID to
-monitor or adopt after a subcommand exits.
+The short-lived deterministic control-client interfaces are:
 
-#### Launch contract and non-daemon launch
+```text
+goal_plan_supervisor.py poll --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --output <absolute poll-result.json>
+goal_plan_supervisor.py terminate --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --reason <token> --output <absolute termination-result.json>
+goal_plan_supervisor.py reconcile --intent <absolute launch-intent.json> --ledger <absolute process-ledger.json> --ack <absolute launch-ack.json> --result <absolute supervisor-result.json> --output <absolute reconciliation-result.json>
+```
 
-After approval and after a successful run-wide attempt reservation, the parent
-mints `launch-contract.json` with schema
-`goal-plan.process-launch-contract/v1`. It contains:
+All paths are deterministic, absolute, beneath the lane's external state
+directory, and outside every Git worktree. All JSON writes use same-directory
+temporary files, fsync, atomic replace, and canonical JSON hashes.
+
+#### Launch intent and parent spawn
+
+After approval and an atomic run-budget reservation, the parent mints
+`launch-intent.json` with schema `goal-plan.launch-intent/v1` before starting
+the supervisor. It contains:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.process-launch-contract/v1`. |
+| `schema_version` | Exact value `goal-plan.launch-intent/v1`. |
 | `lane_id`, `launch_attempt`, `process_run_id` | Exact approved lane identity and canonical process-run ID. |
-| `product_base_sha`, `execution_source_sha`, `plan_hash` | Exact immutable run identities. |
-| `child_argv`, `child_env`, `child_cwd` | Exact child argv array, closed environment map, and canonical absolute lane-worktree path. |
-| `identity_policy` | Exact value `goal-plan.linux-procfs-identity/v1`. |
-| `stdout_path`, `stderr_path` | Separate absolute log paths beneath the lane attempt's external state directory. |
-| `child_result_path`, `child_evidence_paths` | Absolute expected terminal result and evidence paths beneath lane state. |
+| `launch_contract_path`, `launch_contract_sha256` | Absolute contract path and canonical hash. |
 | `budget_reservation_id` | Exact live reservation from the run-wide budget ledger. |
-| `wall_timeout_seconds`, `term_grace_seconds` | Approved positive bounds. |
-| `launch_command_sha256` | Canonical hash of child executable/argv/env/CWD/process-run/source/budget values. |
+| `supervisor_argv`, `supervisor_env`, `supervisor_cwd` | Exact expected reaper argv, closed environment, and canonical lane worktree CWD. The argv and environment both contain exact `process_run_id`; environment key is `GOAL_PLAN_PROCESS_RUN_ID`. |
+| `ledger_path`, `ack_path`, `supervisor_result_path` | Exact deterministic absolute output paths. |
+| `identity_policy` | Exact value `goal-plan.linux-procfs-identity/v1`. |
+| `supervisor_command_sha256` | Canonical hash of executable/argv/env/CWD/process-run/contract/output identities. |
 
-Every path is canonicalized before use. State/evidence/log/result paths must
-resolve beneath approved external `state_root`; `child_cwd` must resolve beneath
-approved external `worktree_root`; no other relation is valid.
+The existing `goal-plan.process-launch-contract/v1` remains immutable and
+contains exact child argv/env/CWD, process-run ID, source identities, budget
+reservation, log descriptors, child result/evidence paths, wall timeout, TERM
+grace, and child launch-command hash. Child argv includes exact
+`--param process_run_id=...`; child environment contains exact
+`GOAL_PLAN_PROCESS_RUN_ID`.
 
-`launch` validates the contract, active budget reservation, executable, output
-descriptors, path containment, and hashes. It opens stdout/stderr descriptors,
-then calls:
+The parent atomically persists the intent, then starts the reaper:
 
 ```python
 subprocess.Popen(
-    child_argv,
-    cwd=child_cwd,
-    env=child_env,
-    stdout=stdout_file,
-    stderr=stderr_file,
+    supervisor_argv,
+    cwd=supervisor_cwd,
+    env=supervisor_env,
     start_new_session=True,
 )
 ```
 
-After `Popen`, `launch` verifies PID, PGID, canonical procfs identity, executable
-realpath, observed cmdline hash, log descriptors, and process-group isolation.
-Only then does it atomically write and fsync:
+It records the provisional supervisor PID with the intent invocation evidence.
+This PID is not trusted until ledger/ack identity validation succeeds.
 
-1. `process-ledger.json`; then
-2. `launch-ack.json`.
+#### Reaper lifecycle and authoritative result
 
-The ledger uses schema `goal-plan.process-ledger/v1` and records the complete
-launch contract hash, source/budget identities, child PID/PGID/procfs identity,
-paths, timestamps, state, latest observation, termination request, and child
-result classification. The acknowledgement uses schema
-`goal-plan.process-launch-ack/v1` and records `process_run_id`, ledger hash,
-child identity, `acknowledged_at_boottime`, and verdict `LAUNCHED`.
+`run` validates intent, contract, reservation, hashes, paths, executable, CWD,
+and output descriptors. Before launching the child, it atomically records its
+own canonical Linux procfs identity in `goal-plan.process-ledger/v2`. It then
+launches the child Attractor as its direct child in a distinct child process
+group, validates child PID/PGID/procfs identity, records child identity, and
+atomically writes/fsyncs ledger then `goal-plan.launch-ack/v2`.
 
-`launch` then emits exactly `SUPERVISOR:LAUNCHED` and exits. Any validation,
-spawn, identity, descriptor, ledger, or acknowledgement failure emits exactly
-`SUPERVISOR:INFRA` and exits nonzero. If a child may have started before failure,
-the parent treats the missing acknowledgement as indeterminate and immediately
-calls `reconcile`; it never launches a replacement first.
+The reaper remains alive and calls `wait`/`waitpid` until child termination. It
+alone owns:
 
-#### Poll, terminate, and reconcile
+- child stdout/stderr descriptors;
+- wall-timeout enforcement;
+- forwarding parent-requested signals;
+- TERM -> compiled grace -> KILL;
+- child process-group cleanup;
+- child reaping and zombie prevention; and
+- authoritative raw OS wait-status capture.
 
-`poll` validates ledger schema/hash and the complete procfs identity before
-observing liveness. It atomically writes `goal-plan.process-poll-result/v1`
-containing process/run identity, observed state, child-result validation,
-boottime, and verdict, then emits exactly one of:
+After child termination, it proves the child process group is empty, hashes the
+closed logs, and atomically writes `supervisor-result.json` with schema
+`goal-plan.supervisor-result/v1`:
+
+| Field | Contract |
+|---|---|
+| `schema_version`, `process_run_id`, `budget_reservation_id` | Exact run identities. |
+| `intent_sha256`, `launch_contract_sha256`, `ledger_sha256` | Exact bound artifact hashes. |
+| `supervisor_identity`, `final_child_identity` | Canonical validated Linux identities. |
+| `raw_wait_status` | Exact non-negative integer returned by `wait`/`waitpid`. |
+| `normalized_exit_code` | Integer exit code when exited normally, otherwise null. |
+| `terminating_signal`, `core_dumped` | Signal integer/boolean when signalled, otherwise null/false. |
+| `timed_out`, `cancellation_reason` | Timeout flag and approved reason token or null. |
+| `stdout_sha256`, `stderr_sha256`, `child_group_empty` | Closed-log hashes and cleanup proof. |
+| `child_result_path`, `child_result_sha256`, `child_result_valid` | Child-written evidence reference only; never exit evidence. |
+| `completed_at_boottime`, `verdict` | Durable observation and exact `EXITED`, `SIGNALED`, `TIMED_OUT`, `CANCELLED`, or `INFRA`. |
+
+Only after this atomic result exists may `run` exit. Child-written result or
+evidence can never substitute for missing `supervisor-result.json`, alter raw
+wait status, or override normalized exit/signal/timeout classification.
+
+#### Control-client contracts
+
+Every client validates intent/contract hashes and full supervisor and child
+procfs identities before observation or signalling. Result schemas reject
+unknown fields and share process-run ID, artifact hashes, observed boottime,
+identities, verdict, and failure reason.
+
+`poll` writes `goal-plan.supervisor-poll/v1` and emits exactly:
 
 - `SUPERVISOR:POLL_RUNNING`;
-- `SUPERVISOR:POLL_TERMINAL`;
-- `SUPERVISOR:POLL_DISAPPEARED`; or
-- `SUPERVISOR:INFRA`.
+- `SUPERVISOR:POLL_TERMINAL` only for a complete valid supervisor result;
+- `SUPERVISOR:POLL_SUPERVISOR_GONE`; or
+- `SUPERVISOR:POLL_INFRA`.
 
-`POLL_TERMINAL` requires a schema-valid child terminal result bound to the
-ledger and process run. Process absence without such a result is
-`POLL_DISAPPEARED`, never success.
+`terminate` accepts only `global_deadline`, `lane_wall_timeout`,
+`lane_cancelled`, `parent_aborted`, or `recovery_cleanup`. It signals the
+identity-valid supervisor, which forwards/cleans/reaps its child, writes
+`goal-plan.supervisor-termination/v1`, and emits exactly:
 
-`terminate` accepts only compiled reason tokens
-`global_deadline`, `lane_wall_timeout`, `lane_cancelled`, `parent_aborted`, or
-`recovery_cleanup`.
-It validates full procfs identity, sends TERM to the verified process group,
-waits the compiled grace, revalidates identity, sends KILL if still live, and
-atomically writes `goal-plan.process-termination-result/v1`. It emits exactly:
-
-- `SUPERVISOR:TERMINATED`;
+- `SUPERVISOR:TERMINATION_REQUESTED`;
 - `SUPERVISOR:ALREADY_TERMINAL`; or
-- `SUPERVISOR:INFRA`.
+- `SUPERVISOR:TERMINATE_INFRA`.
 
-`reconcile` validates any ledger and child result against actual procfs/Git
-state, atomically writes `goal-plan.process-reconciliation-result/v1`, and emits
-exactly:
+`reconcile` writes `goal-plan.supervisor-reconciliation/v1` and emits exactly:
 
 - `SUPERVISOR:RECONCILED_RUNNING`;
 - `SUPERVISOR:RECONCILED_TERMINAL`;
-- `SUPERVISOR:RECONCILED_NO_CHILD`; or
-- `SUPERVISOR:INFRA`.
+- `SUPERVISOR:RECONCILED_INTERRUPTED_BEFORE_LAUNCH`; or
+- `SUPERVISOR:RECONCILE_INFRA`.
 
-All four result schemas share `schema_version`, `process_run_id`,
-`launch_command_sha256`, `ledger_path`, `ledger_sha256`, `observed_at_boottime`,
-`child_identity`, `verdict`, and `failure_reason`. Additional required fields
-are:
+#### Parent crash, supervisor crash, and pre-ledger discovery
 
-| Schema | Additional required fields |
-|---|---|
-| `goal-plan.process-launch-ack/v1` | `budget_reservation_id`, `child_pid`, `child_pgid`, `stdout_path`, `stderr_path`, `acknowledged_at_boottime`. |
-| `goal-plan.process-poll-result/v1` | `observed_liveness`, `child_result_path`, `child_result_sha256`, `child_result_valid`, `exit_code`, `terminal_disposition`. |
-| `goal-plan.process-termination-result/v1` | `reason`, `term_sent_at_boottime`, `kill_sent_at_boottime`, `identity_before_term`, `identity_before_kill`, `final_liveness`, `child_result_path`. Nullable timestamps are allowed only when the corresponding signal was unnecessary. |
-| `goal-plan.process-reconciliation-result/v1` | `ledger_present`, `ack_present`, `identity_match`, `observed_liveness`, `child_result_path`, `child_result_valid`, `reservation_transition`, `adopted`, `terminal_disposition`. |
+A parent graph/CLI crash does not terminate the reaper: it is in its own
+session/process group, continues waiting/reaping, and writes the authoritative
+result. On restart, the parent reconciles deterministic intent/ledger/ack/result
+paths and adopts only an identity-valid live supervisor or a complete valid
+supervisor result.
 
-`failure_reason` is null only for non-INFRA verdicts. Every schema rejects
-unknown fields and uses canonical JSON for its recorded SHA-256.
+If the supervisor disappears before a valid result, child evidence and process
+absence are never success. If the ledger identifies a live identity-valid child,
+the terminate client stops its process group and the run becomes
+`INFRA_FAILURE`. If the child is absent and no authoritative result exists, the
+run is `INFRA_FAILURE`. A live parent monitor detecting a vanished supervisor
+applies this rule immediately and never continues trusting an orphan child.
 
-When the live parent loses a `launch` invocation before a valid ack, it calls
-`reconcile --ledger ... --result ...`. A valid ledger plus matching live child
-is adopted into the monitor loop; a valid ledger plus terminal child result is
-collected; no valid ledger/identity is `INFRA_FAILURE`. A live process that
-cannot be proven to be the contracted child is never signalled. Parent
-cancellation always uses `terminate`; monitor polling always uses `poll`; no
-graph node treats CLI-process disappearance as lane completion.
+For intent-without-ledger/ack recovery, `reconcile` performs a bounded Linux
+procfs scan: at most one pass per second for the compiled
+`pre_ledger_reconciliation_timeout_seconds`, capped at 3 full scans. It scans
+`/proc/[0-9]*/cmdline` and `/proc/[0-9]*/environ` for the exact unique
+`process_run_id`, then validates executable realpath, command hash, boot ID,
+start ticks, PGID, CWD, contract path/hash, and
+`GOAL_PLAN_PROCESS_RUN_ID`.
 
-The parent monitor compares current `CLOCK_BOOTTIME` with both the run deadline
-and each launch contract's wall deadline before every `poll`. A lane wall expiry
-invokes `terminate --reason lane_wall_timeout`; a run deadline invokes
-`terminate --reason global_deadline`.
+- Exactly one matching live supervisor is adopted and required to finish
+  ledger/ack.
+- A matching orphan child without its supervisor is identity-validated,
+  terminated through the control path, and classified `INFRA_FAILURE`.
+- Zero matches with no result becomes
+  `INTERRUPTED_BEFORE_LAUNCH` only when the budget reservation remains
+  unconsumed; a consumed reservation is `INFRA_FAILURE`.
+- Multiple or ambiguous matches are `INFRA_FAILURE` and none is signalled until
+  identity becomes unambiguous.
 
-All JSON writes use same-directory temporary files, fsync, and atomic replace.
-Every subcommand validates all input and output paths before acting.
+The parent monitor checks run and lane deadlines before each `poll`.
+Cancellation and deadline handling always call `terminate`; no graph node
+treats supervisor or child disappearance as lane completion.
 
 #### Canonical Linux process identity
 
-For the child, the canonical identity token is:
+For both supervisor and child, the canonical identity token is:
 
 ```text
 linux:<boot_id>:<pid>:<starttime_ticks>
@@ -1079,15 +1108,14 @@ identity object also records and verifies:
 - `realpath` of `/proc/<pid>/exe`; and
 - the canonical `launch_command_sha256`.
 
-Before poll, terminate, or reconcile acts on a live PID, that short-lived CLI
-invocation rereads and exactly matches boot ID, PID start ticks, cmdline hash,
-PGID, executable realpath, and launch command hash. `kill -0` may be used only
-after this identity check and proves liveness only. Unreadable required procfs
-identity data or any mismatch writes stale-PID evidence and is
-`INFRA_FAILURE`; that PID or process group is never signalled or adopted.
+Before a control client observes or signals either PID, it rereads and exactly
+matches boot ID, PID start ticks, cmdline hash, PGID, executable realpath, CWD,
+process-run token, and command hash. `kill -0` proves only liveness after full
+identity validation. Mismatch/unreadable identity is `INFRA_FAILURE`; no
+ambiguous PID/group is signalled or adopted.
 
-Manual observation uses durable stdout/stderr logs, ledger history, child
-Attractor events, `process_run_id`, and optional child box-session IDs.
+Manual observation uses durable logs, ledger/ack/result history, child Attractor
+events, `process_run_id`, and optional child box-session IDs.
 
 ### Aggregate verifier contract
 
@@ -1399,17 +1427,18 @@ ordering-sensitive lanes are placed in different waves.
 Parallelism is therefore a consequence of proven independence, not a throughput
 pool. The wave's component branches are static: one launch plus one monitor loop
 per compiled lane ID. Fan-in waits for every child process to become terminal
-and then mechanically classifies real exit status, missing artifacts, stale
+and then mechanically classifies authoritative supervisor status, missing artifacts, stale
 identity, and clean terminal results before any integration begins.
 
 ## Parent Verification and Integration
 
 For each candidate lane in stable plan order, the parent:
 
-1. reads the child process exit and child evidence as candidate routing hints,
-   never as final proof;
-2. requires a zero child exit plus schema-valid, run-scoped lane evidence; a
-   nonzero or missing exit remains non-pass even when candidate artifacts exist;
+1. validates intent, ledger, ack, and authoritative supervisor result as one
+   process-run chain; child evidence remains only a routing hint;
+2. requires `normalized_exit_code == 0`, no signal/timeout/cancellation, empty
+   child group, valid log hashes, and schema-valid lane evidence; missing result
+   or nonzero/signal/timeout remains non-pass even when artifacts exist;
 3. resolves the exact candidate commit from Git rather than from prose;
 4. confirms the candidate and its integration base descend from
    `execution_source_sha`;
@@ -1567,7 +1596,7 @@ Each child launch also has one wall-clock limit, `max_child_seconds`, enforced b
 the deterministic process supervisor across the entire child Attractor run.
 That wall is a safety bound, not evidence of completion. When it fires, the
 supervisor performs TERM -> grace -> KILL against the verified child process
-group, persists the timeout and real exit status, and the parent classifies the
+group; the reaper persists authoritative timeout/wait status, and the parent classifies the
 lane `CRASHED` or `BUDGET_EXHAUSTED` according to whether trustworthy
 lane-attempt evidence exists.
 
@@ -1620,7 +1649,7 @@ occurs without that durable reservation.
 
 A reservation has one legal terminal transition:
 
-- `CONSUMED` when a valid launch ack/live child or integration-correction entry
+- `CONSUMED` when a valid reaper ack/live supervisor or integration-correction entry
   proves work began; or
 - `RELEASED_NO_LAUNCH` when reconciliation proves no child/correction began.
 
@@ -1644,7 +1673,7 @@ The parent checks boot identity and deadline before every reservation, process
 new reservations or retries.
 
 The parent then enumerates the ledger's active process-run IDs. For each, it
-calls the non-daemon `terminate` subcommand with reason `global_deadline` after
+calls the `terminate` control client with reason `global_deadline` after
 full identity validation. Every active lane becomes
 `BUDGET(global_deadline)`; every approved but unstarted lane whose work cannot
 run becomes exact `BLOCKED-global-deadline`; existing passing evidence is
@@ -1744,12 +1773,11 @@ The run persists:
 - worktree/branch/base/head mapping, including recorded `realpath` values for
   every lane worktree, disposable candidate-verification worktree, and the
   integration worktree;
-- per-lane launch contract, process ledger, launch ack, poll results,
-  termination results, and reconciliation results, including child canonical
-  Linux identity, cmdline hash, PGID, executable realpath,
-  environment/command/DOT hashes, budget reservation, `process_run_id`,
-  optional box-session IDs, log paths, observation times, and terminal child
-  result;
+- per-lane launch intent/contract, provisional supervisor PID, ledger, ack,
+  poll/termination/reconciliation records, and authoritative supervisor result,
+  including supervisor/child procfs identities, raw wait status, normalized
+  exit/signal/timeout/cancellation, group cleanup, log hashes, budget
+  reservation, `process_run_id`, and optional box-session IDs;
 - lane contracts, evidence, and dispositions;
 - parent-verification records, including detached candidate SHA/path,
   verifier/envelope hashes, complete envelope evidence, and
@@ -1804,25 +1832,28 @@ On restart, the graph compares state with reality:
    unremovable state is `INFRA_FAILURE`. Remove and prune a valid leftover,
    record reconciliation evidence, and restart parent candidate verification
    from worktree creation only when no envelope invocation had started.
-8. For every missing launch acknowledgement, invoke the non-daemon
-   `reconcile` subcommand. A valid ledger plus matching live child is adopted
-   and its budget reservation consumed; a valid terminal result is collected;
-   `RECONCILED_NO_CHILD` releases the no-launch reservation exactly once; any
-   invalid/ambiguous ledger or identity is `INFRA_FAILURE`.
-9. For every acknowledged nonterminal child, invoke `poll`; never inspect or
-   signal its PID outside the supervisor CLI. At or beyond the run deadline,
-   close the budget ledger first and invoke `terminate --reason
-   global_deadline` for every active process-run ID.
-10. If `/proc/<pid>` is absent, accept only a schema-valid terminal child result
-    bound to the ledger/process run. Process absence alone never means success.
+8. For every intent missing ledger/ack, invoke `reconcile`. Its bounded `/proc`
+   discovery adopts exactly one identity-valid live supervisor and consumes the
+   reservation; an identity-valid orphan child is terminated and becomes
+   `INFRA_FAILURE`; zero matches releases an unconsumed reservation as
+   interrupted-before-launch but makes a consumed reservation infrastructure
+   failure; multiple/ambiguous matches are never signalled and are
+   `INFRA_FAILURE`.
+9. For every acknowledged nonterminal run, invoke `poll` and validate both
+   supervisor and child identities. At or beyond the run deadline, close the
+   budget ledger first and invoke `terminate --reason global_deadline` for every
+   active process-run ID.
+10. If the supervisor disappears before a complete authoritative result,
+    immediately terminate any identity-valid live child group and classify
+    `INFRA_FAILURE`; child absence/evidence never means success.
 11. Resolve recorded commits directly from Git and require every work commit and
-   current integration HEAD to descend from `execution_source_sha`.
+    current integration HEAD to descend from `execution_source_sha`.
 12. Reclassify a purported completed lane whose artifact or commit is missing
-   as `CRASHED` or `INFRA_FAILURE`, depending on whether lane work or the
-   substrate is untrustworthy.
-13. Require valid child terminal result/evidence even when candidate artifacts
-    exist; a disappearance or non-pass terminal result cannot be normalized to
-    `PASS`.
+    as `CRASHED` or `INFRA_FAILURE`, depending on whether lane work or the
+    substrate is untrustworthy.
+13. Require `supervisor-result.json` to match intent/ledger and record real child
+    exit `0` before candidate eligibility. Nonzero exit, signal, timeout,
+    cancellation, missing result, or child-only evidence cannot become `PASS`.
 14. Reconcile every envelope record against immutable expected HEAD,
     verifier/envelope hashes, exact output-root interface/environment, output
     containment manifest, pre/post porcelain-v2 status, complete
@@ -1867,7 +1898,7 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 |---|---|---|
 | `COMPLETE` | Both source SHAs remain bound; the compiled-source manifest passes immediately before finalization; all work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; every final-sweep lane and final aggregate has a passing, non-discarded envelope bound to exact final integration HEAD; fresh coherence review passes at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, or final aggregate/coherence criteria remain unsatisfied. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | External-root/approval boundary, run-budget boot/deadline/accounting, source-SHA/compiled-byte identity, Git/worktree state, verifier output containment/envelope integrity, candidate-verification lifecycle, non-daemon supervisor/procfs identity, verifier substrate, credentials, remote API, or recovery state cannot be trusted enough to classify product work honestly. | No delivery. |
+| `INFRA_FAILURE` | External-root/approval boundary, run-budget accounting, source/compiled identity, Git/worktree state, verifier integrity, candidate lifecycle, missing/invalid supervisor result, supervisor/orphan/procfs identity, verifier substrate, credentials, remote API, or recovery state cannot be trusted. | No delivery. |
 | `ABORTED` | The plan was rejected/cancelled before mutation, or the operator explicitly stopped the run at an allowed gate. | No delivery. |
 
 ### Finalizer machine contract
@@ -1887,7 +1918,7 @@ writes the run root's versioned `result.json` with, at minimum:
   `execution_source_sha..integrated_head_sha`, or null when no integration HEAD
   exists;
 - `lane_dispositions`;
-- `child_process_evidence_paths`;
+- `child_process_evidence_paths` and authoritative `supervisor_result_paths`;
 - `run_budget_ledger_path` and `run_budget_ledger_sha256`;
 - `verifier_envelope_evidence_paths`;
 - `integration_correction_records`;
@@ -2011,7 +2042,7 @@ Implementation should copy these proven shapes rather than inventing new ones:
 ## Anticipated File Changes
 
 This repository implements one canonical, statically compiled member of the
-family, the reusable local subgraphs, and the deterministic process-supervisor
+family, the reusable local subgraphs, and the deterministic per-lane reaper
 support that `goaltractor` copies into arbitrary real plan directories. It does
 not add a generic root graph, compiler, or runtime scheduler. The expected
 footprint is:
@@ -2023,9 +2054,9 @@ pipelines/goal_plan_smoke/goal_plan_smoke.md
 pipelines/goal_plan_smoke/subgraphs/goal_lane.dot
 pipelines/goal_plan_smoke/subgraphs/deliver_pr.dot
 pipelines/goal_plan_smoke/python/goal_plan_runtime.py
-pipelines/goal_plan_smoke/python/process_supervisor.py
+pipelines/goal_plan_smoke/python/goal_plan_supervisor.py
 pipelines/goal_plan_smoke/python/tests/test_goal_plan_runtime.py
-pipelines/goal_plan_smoke/python/tests/test_process_supervisor.py
+pipelines/goal_plan_smoke/python/tests/test_goal_plan_supervisor.py
 README.md
 ```
 
@@ -2034,9 +2065,9 @@ admission, compiled-source manifests/gates, ownership-pattern rejection,
 candidate-verification worktree lifecycle, the shared
 `VerifierExecutionEnvelope`, external-root safety, run-budget
 reservation/reconciliation, and delta reporting. DOT nodes call that module
-rather than duplicating shell logic. `process_supervisor.py` remains the single
-home for the non-daemon supervisor CLI, Linux process identity, launch/poll/
-terminate/reconcile schemas, and closed tokens.
+rather than duplicating shell logic. `goal_plan_supervisor.py` remains the single
+home for the per-lane reaper, authoritative wait-status capture, Linux process
+identity, control-client schemas, and closed tokens.
 
 The smoke exemplar proves orchestration rather than product behavior. In a
 temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
@@ -2081,15 +2112,16 @@ orchestration behavior, not a library-only change.
     ancestry, and separate compiled-plan/lane-produced reporting ranges.
 12. Validate every lane's child DOT hash, exact ordered argv/typed-parameter
     schema, closed environment policy, `process_run_id` template,
-    process-supervisor hash, expected evidence schema, child wall budget, and
+    reaper/intent/result hashes, expected evidence schema, child wall budget, and
     static launch/monitor node correspondence.
 13. Validate ownership and integration-seam schemas reject every pattern that
     can match `pipelines/PLAN_SLUG/**`; validate complete manifest path-set,
     mode, length, and byte comparisons at every `CompiledSourceGate`.
-14. Unit-test Linux process identity, atomic ledger transitions, exact
-    non-daemon subcommand argv, JSON schemas, ack ordering, child argv/env/CWD
-    hashing, real result capture, timeout/cancellation, stale-PID rejection,
-    missing-ack reconciliation, and closed tokens in `process_supervisor.py`.
+14. Unit-test exact reaper argv/intent schemas, supervisor/child procfs identity,
+    ledger/ack ordering, direct-child wait-status normalization, log hashes,
+    timeout/cancellation/group cleanup, control-client schemas/tokens,
+    pre-ledger `/proc` discovery, and result atomicity in
+    `goal_plan_supervisor.py`.
 15. Unit-test the envelope's immutable expected-HEAD binding, canonical
     pre/post HEAD and porcelain-v2 ignored-aware status commands, complete
     pre/post worktree manifests, exact output-root argv/environment,
@@ -2143,10 +2175,10 @@ The live smoke passes only if direct observation proves:
    worktrees. Process and child evidence show that each OS CWD and Attractor
    root CWD is its assigned worktree and that its box-session relative writes
    remain there.
-5. Every lane has a reserved attempt, exact launch contract, non-daemon
-   `launch` ack, process ledger, poll/reconcile records, canonical
-   `process_run_id`, child procfs identity, durable stdout/stderr, and
-   schema-valid terminal child result. No supervisor process remains alive.
+5. Every lane has a reserved attempt, atomic launch intent, accountable live
+   reaper identity, ledger/ack, poll/reconcile records, canonical process-run
+   token in supervisor and child argv/env, and authoritative supervisor result
+   with raw wait status, normalized exit/signal, cleanup proof, and log hashes.
 6. `lane_b`'s first failure is visible and causes a corrective cycle rather
    than a silent pass or blind restart.
 7. The correction is genuinely dependent on the changed verifier feedback: a
@@ -2192,32 +2224,31 @@ The implementation is not ready until live probes also demonstrate:
 - deleting one lane's required result before fan-in yields `CRASHED`, not a
   clean result;
 - a child that writes its expected artifact and then exits nonzero remains
-  non-pass because the process ledger preserves the real exit status;
-- killing the parent graph while two children run leaves independently
-  supervised child process groups observable; restart safely adopts matching
-  canonical Linux supervisor/child identities or classifies/terminates them
-  under the recovery contract;
-- every supervisor subcommand validates its versioned schema and emits only its
-  documented closed tokens; `launch` exits after atomic ledger/ack, leaving no
-  supervisor daemon or supervisor PID;
-- killing `launch` before ack triggers `reconcile`: matching ledger/identity
-  adopts the child, valid terminal evidence collects it, and absent/ambiguous
-  ledger or identity reaches `INFRA_FAILURE` without replacement launch;
-- `poll` distinguishes running, terminal, disappeared, and infra; parent
-  cancellation invokes only `terminate` with an approved reason token;
-- a child wall timeout performs TERM -> configured grace -> KILL against the
-  whole verified child process group, revalidating identity before each signal,
-  and records the timeout and exit;
-- stale-PID probes independently change PID start ticks, cmdline bytes, PGID,
-  executable realpath, and launch command hash; each mismatch is
-  `INFRA_FAILURE` and the PID is never signalled;
-- a changed boot ID simulates reboot, a reused PID has the wrong canonical
-  `linux:<boot_id>:<pid>:<starttime_ticks>` token, and permission/mount fault
-  injection makes each required procfs identity file unreadable; every case
-  fails loudly without adoption, polling, TERM, or KILL;
-- when `/proc/<pid>` is absent after a real exit, recovery uses the durable
-  supervisor exit record, child result/evidence, and Git state and never
-  interprets absence alone as success;
+  non-pass because the supervisor result preserves authoritative wait status;
+- parent crash while supervisor and child run leaves the reaper alive in its own
+  session; it waits/reaps and writes an authoritative result that restart
+  reconciliation accepts only after full identity/hash validation;
+- normal child exit `0`, nonzero exit, and signal termination produce exact raw
+  wait status and correct normalized exit/signal fields;
+- child artifact plus nonzero exit remains non-candidate because only the
+  supervisor result owns exit truth;
+- supervisor crash with an identity-valid live child triggers immediate
+  control-client group termination and `INFRA_FAILURE`; supervisor disappearance
+  plus absent child and missing result is also infrastructure failure;
+- crash before ledger/ack exercises bounded `/proc` discovery by exact
+  `process_run_id` in supervisor argv/environment: one supervisor is adopted,
+  an orphan child is terminated, zero matches follows consumed-reservation
+  rules, and ambiguous duplicate tokens are never signalled;
+- `poll` distinguishes running, terminal-result, supervisor-gone, and infra;
+  parent cancellation uses only `terminate` with an approved reason token;
+- timeout and cancellation perform supervisor-owned TERM -> grace -> KILL,
+  reap the direct child, empty the whole child group, and write result atomically;
+- killing the reaper while it writes result cannot expose a partial valid JSON;
+  missing result is never success;
+- stale supervisor or child identity probes independently change PID start
+  ticks, cmdline, PGID, CWD, executable, token, or command hash and never signal;
+- normal and failure cases prove no zombie children, orphan child groups, or
+  lingering reapers remain after authoritative completion/cleanup;
 - a candidate-verification worktree with wrong HEAD, dirty-before state,
   dirty-after state, failed non-force removal, stale worktree registration, or
   crash-left incomplete envelope evidence yields `INFRA_FAILURE`; a clean
