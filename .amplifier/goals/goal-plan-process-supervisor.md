@@ -6,7 +6,7 @@ Produce a committed, tested Wave-1 supervisor that captures authoritative child-
 
 - Work only in `/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-impl-supervisor`.
 - Branch: `goal-plan-impl/supervisor`.
-- Base SHA: `BASE_SHA_AFTER_BOOTSTRAP_MERGE` — the orchestrator must replace and commit this value before launch.
+- Base SHA: `64a0e7d5204f9d6cb9ad05b594783d2e5490b692` (merge commit landing Wave 0 identity-bootstrap onto `goal-batch`, independently re-verified: 42/42 tests pass fresh at this SHA).
 - Read repository doctrine and the final design before editing.
 - Own only:
   - `pipelines/goal_plan_smoke/python/goal_plan_supervisor.py`
