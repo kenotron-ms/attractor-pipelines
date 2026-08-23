@@ -124,6 +124,11 @@ orchestration.
   child Attractor processes whose OS working directories are those worktrees.
 - Supervise every child through a durable process ledger, logs, timeouts,
   process-group cancellation, and restart reconciliation.
+- Separate the approved product baseline from the later execution-source commit
+  that contains the complete compiled pipeline, and bind both identities through
+  every runtime and evidence boundary.
+- Keep the complete compiled pipeline directory byte-immutable throughout the
+  run; source mutation is infrastructure failure, never corrective lane work.
 - Accept lane completion only after an exact non-interactive verifier passes.
 - Require a durable commit before a lane can be integrated.
 - Have the parent independently rerun each lane verifier against the exact
@@ -151,6 +156,7 @@ orchestration.
 - Depending on private app-cli internals.
 - Requiring per-box `session_cwd` changes in loop-pipeline, pipeline-runner, or
   Resolve.
+- Supporting non-Linux process supervision in schema version 1.
 - Creating a new resolver.
 - Creating a hidden runtime scheduler, generic work queue, or fixed-width pool
   that conceals the actual plan from the graph.
@@ -231,11 +237,12 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `plan_id` | Slug string equal to `PLAN_SLUG`; stable across runs of the same compiled plan. |
 | `source_request` | Non-empty string containing the originating request or its durable reference. |
 | `target_repo` | Object with `vcs: "git"`, `identity_mode: "remote"` or `"history_anchor"`, and the mode-specific fields defined below. |
-| `base_ref_policy` | Object with `mode: "fixed"` and non-empty `ref`, or `mode: "runtime"` and `ref: null`. |
+| `product_base_sha` | Full immutable commit SHA of the approved product baseline used for requirement provenance and product-level delta reporting. It must be an ancestor of the admitted `execution_source_sha`. |
+| `execution_source` | Object with exact `mode: "containing_commit"`, required runtime binding name `execution_source_sha`, and no embedded SHA value. Admission resolves the exact containing commit as described below, avoiding a self-referential Git hash while still binding the exact SHA through the plan contract. |
 | `lanes` | Non-empty array of lane objects described below. |
 | `waves` | Non-empty ordered array of objects with unique `id` and non-empty `lane_ids`; every lane appears in exactly one wave. |
 | `integration_order` | Array containing every lane ID exactly once in deterministic integration order, with every dependency before its dependents. |
-| `integration_seams` | Array of repository-relative path patterns explicitly writable by late integration correction. |
+| `integration_seams` | Array of repository-relative path patterns explicitly writable by late integration correction. No pattern may equal, contain, or overlap `pipelines/PLAN_SLUG/**`. |
 | `aggregate_verifier` | Aggregate-verifier contract defined below. |
 | `global_budgets` | Object with positive integer `max_total_attempts`, positive integer `max_integration_corrections`, and positive integer `max_pipeline_seconds`. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
@@ -282,26 +289,30 @@ do not establish identity.
 | `plan_commit_sha` | Full commit SHA anchoring the compiled plan. |
 | `plan_path` | Repository-relative path of the identity-stable `PLAN_SLUG.md` plan artifact. |
 | `plan_blob_sha256` | SHA-256 of the exact committed blob bytes at `plan_path`. |
-| `pinned_base_sha` | Full base commit SHA approved for the plan. |
+| `product_base_sha` | Full approved product-baseline commit SHA; must equal top-level `product_base_sha`. |
 
 `PLAN_SLUG.md` is required in `history_anchor` mode and must not contain the
 anchor fields themselves. This avoids a content-addressing cycle: composition
 first commits that identity-stable plan artifact, records its commit and blob
 hash in `plan.json`, materializes the final DOT, and commits the complete
 compiled pipeline directory. Runtime requires every immutable file in
-`pipelines/PLAN_SLUG/` to be tracked and byte-clean against runtime `HEAD`.
+`pipelines/PLAN_SLUG/` to be tracked at exact `execution_source_sha`; admission
+and every later immutable-source gate compare complete path/mode/byte state to
+that commit.
 
 Admission then proves:
 
 1. the target Git object database contains `plan_commit_sha` as a commit;
 2. `plan_commit_sha:plan_path` resolves to a blob;
 3. the blob's exact bytes hash to `plan_blob_sha256`;
-4. those bytes match the working plan artifact at `plan_path`;
-5. the target object database contains `pinned_base_sha`; and
-6. `pinned_base_sha` is an ancestor of `plan_commit_sha`;
-7. `plan_commit_sha` is an ancestor of runtime `HEAD`; and
-8. the complete compiled pipeline directory is tracked and byte-clean at
-   runtime `HEAD`.
+4. those bytes match the invoked plan artifact at `plan_path` in
+   `execution_source_sha`;
+5. the target object database contains `product_base_sha`;
+6. `product_base_sha` is an ancestor of `plan_commit_sha`;
+7. `plan_commit_sha` is an ancestor of the admitted `execution_source_sha`;
+8. `product_base_sha` is an ancestor of `execution_source_sha`; and
+9. the complete compiled pipeline directory at `execution_source_sha` is
+   tracked and matches the admission byte manifest.
 
 The committed plan/blob/base relationship is the identity proof for a
 local-only repository. The design does not claim that Git supplies a globally
@@ -315,39 +326,82 @@ Each `lanes` entry contains:
 | `origins` | Non-empty array of requirement identifiers or text. |
 | `goal` | Non-empty, checkable end-state string. |
 | `scope_outs` | String array. |
-| `owned_paths` | Non-empty array of repository-relative path patterns. |
+| `owned_paths` | Non-empty array of repository-relative path patterns. No pattern may equal, contain, or overlap `pipelines/PLAN_SLUG/**`. |
 | `dependencies` | Array of lane IDs; references must exist and form an acyclic graph. |
-| `verifier` | Object with exactly one of non-empty `command`, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; evidence schema version `goal-plan.lane-verifier/v1`; exit/token mapping; and `definition_sha256`. |
+| `verifier` | Object with exactly one of non-empty `command`, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "candidate_verification_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; evidence schema version `goal-plan.lane-verifier/v1`; exit/token mapping; and `definition_sha256`. |
 | `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
-| `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact launch executable/arguments contract, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v1`, and a hash binding those immutable values. The launch arguments include `run <dot_path>` and `--cwd .`; composition may add provider/config arguments only when they are explicit approved values covered by the contract hash. |
+| `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v1`, and a hash binding those immutable values. |
 | `budgets` | Object with positive integer `max_attempts` and positive integer `max_child_seconds`. |
-| `process_supervision` | Object with exact `mode: "supervised_process_group"`, repository-relative `supervisor_path`, exact `supervisor_sha256`, positive integer `poll_interval_seconds`, positive integer `term_grace_seconds`, stale-PID identity requirements, durable log/ledger policies, and supervisor-definition hash. |
+| `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v1"`, `platform: "linux"`, `mode: "supervised_process_group"`, repository-relative `supervisor_path`, exact `supervisor_sha256`, positive integer `poll_interval_seconds`, positive integer `term_grace_seconds`, canonical procfs identity requirements, durable log/ledger policies, and supervisor-definition hash. |
 
 The composition layer owns decomposition, collision analysis, all typed values
 above, and plan approval or explicit preapproval. It writes `plan.json`
 canonically and computes `plan_sha256` over the exact UTF-8 bytes of that file.
 
-The child launch command is an exact argv template, not a freeform shell string.
-It identifies the Attractor CLI executable and fixes the argument sequence
-equivalent to:
+The child launch command is an exact argv-array template, never a freeform shell
+string. The parent mints:
 
 ```text
-attractor run {child_dot_path} --cwd . {approved_child_inputs}
+process_run_id = PLAN_ID/RUN_ID/LANE_ID/LAUNCH_ATTEMPT
 ```
 
-Only typed placeholders for the lane ID, lane-state directory, contract path,
-and other explicitly approved child inputs are allowed. The immutable
-launch-contract hash covers the executable identity policy, argument template,
-allowed environment keys, child DOT hash, symbolic `lane_worktree` CWD policy,
-and expected lane-result schema. At launch, the parent resolves the placeholders
-to an argv array, records the exact array and its per-run command hash, and
-rejects extra arguments or environment overrides.
+where every component is the already-validated slug or positive decimal launch
+attempt. This is the durable process-run identifier. Individual child box
+session IDs are optional observability and never identity or completion
+evidence.
 
-The approved child inputs must direct the child runner's events, checkpoints,
-session metadata, feedback, and result artifacts to the absolute lane-state
-directory beneath `state_root`. Preflight rejects a child runtime that cannot
-honor that external artifact root; execution may not fall back to writing
-generated state beside `goal_lane.dot`.
+After resolving typed placeholders, argv has exactly this order:
+
+```text
+attractor
+run
+<repo-relative-child-dot>
+--cwd
+.
+--logs-root
+<absolute state_root/lanes/<lane-id>/runs/<launch-attempt>/attractor-run>
+--param lane_id=<lane-id>
+--param process_run_id=<plan-id>/<run-id>/<lane-id>/<launch-attempt>
+--param lane_state_root=<absolute state_root/lanes/<lane-id>>
+--param lane_result_path=<absolute lane-attempt-root/lane-result.json>
+--param lane_feedback_path=<absolute lane-state-root/feedback/current.md>
+--param lane_attempt_root=<absolute state_root/lanes/<lane-id>/runs/<launch-attempt>>
+--param lane_contract_snapshot_path=<absolute lane-state-root/contract.json>
+--param candidate_branch=<validated lane branch name>
+--param product_base_sha=<full product base SHA>
+--param execution_source_sha=<full execution source SHA>
+--param lane_verifier_definition_sha256=<full verifier contract hash>
+--param ownership_contract_sha256=<full ownership contract hash>
+```
+
+The child DOT operand is repository-relative, contains no `..`, and resolves
+under `pipelines/PLAN_SLUG/` in the lane worktree. `--cwd` is the literal token
+`.`. `candidate_branch`, IDs, and SHA/hash params are typed strings with the
+validation stated above. `--logs-root` and every path-valued `--param` are
+absolute, `realpath`-canonicalized, and must resolve beneath that lane's
+run-scoped `state_root/lanes/<lane-id>/`; none may resolve beneath immutable
+source. No additional child parameter is permitted unless a new compiled-plan
+revision adds it to this ordered schema and changes the launch-contract hash.
+
+The launch environment is also closed and hashed. The plan declares the exact
+allowed environment-key set. The ledger records non-secret values directly and
+sensitive values only as `sha256(value)`; a canonical environment hash covers
+the complete key set and value/value-hash representation. The immutable
+launch-contract hash covers executable identity policy, ordered argv template,
+typed parameter schema, environment policy, child DOT hash, symbolic
+`lane_worktree` CWD policy, and expected lane-result schema.
+
+At launch, the parent records the resolved executable realpath, exact argv,
+environment hash, lane-worktree realpath, `process_run_id`, and a
+`launch_command_sha256` over their canonical serialization. Plan/DOT
+correspondence validates the immutable template and parameter ordering;
+runtime admission and the process ledger bind the resolved values. Extra argv,
+environment keys, parameter reordering, or path escape is `INFRA_FAILURE`.
+
+These exact arguments direct child events, checkpoints, session metadata,
+feedback, and result artifacts outside source. Preflight rejects a child runtime
+that cannot honor `--logs-root` and the absolute output paths; execution may not
+fall back to writing generated state beside `goal_lane.dot`.
 
 #### Generated DOT correspondence
 
@@ -359,11 +413,24 @@ generated state beside `goal_lane.dot`.
 - every dependency edge;
 - the full integration-order chain;
 - every lane, integration-correction, run-wide, and duration budget;
+- the literal `product_base_sha` and the `execution_source_sha`
+  containing-commit binding contract;
 - every child DOT path/hash, launch-command contract, symbolic worktree-CWD
-  policy, expected child-evidence schema, and process-supervision policy;
+  policy, exact ordered parameter schema, expected child-evidence schema, and
+  Linux process-supervision policy;
 - the aggregate-verifier definition hash;
 - approval and delivery modes; and
 - all terminal and correction routes.
+
+Embedding the exact `execution_source_sha` inside the commit it identifies would
+create an impossible content-addressing cycle. The immutable plan and DOT
+therefore encode graph attributes
+`product_base_sha="<literal-full-sha>"`,
+`execution_source_binding="containing_commit"`, and
+`execution_source_input="execution_source_sha"`. Admission proves the supplied
+exact SHA is the containing commit of those exact bytes, then freezes the exact
+value in run context and durable state. Thus plan/DOT bind the derivation and
+every runtime/evidence artifact binds the resolved SHA without self-reference.
 
 Admission runs before approval and before any mutation. It deterministically:
 
@@ -372,10 +439,16 @@ Admission runs before approval and before any mutation. It deterministically:
    `plan_sha256`;
 3. schema-validates `plan.json`;
 4. proves the selected target-repository identity mode; and
-5. parses the static DOT to require exact correspondence for lane IDs, waves,
+5. resolves `execution_source_sha` to the exact commit containing the invoked
+   byte-clean parent DOT and adjacent `plan.json`, and proves that commit also
+   contains the complete compiled pipeline directory;
+6. parses the static DOT to require exact correspondence for lane IDs, waves,
    dependency edges, integration order, budget values, aggregate-verifier hash,
-   child launch/monitor nodes, child DOT/command/supervision hashes, approval
-   mode, and delivery mode.
+   both source-SHA contracts, child launch/monitor nodes, exact child argv/param
+   ordering, child DOT/command/supervision hashes, approval mode, and delivery
+   mode; and
+7. records the complete compiled-directory byte manifest and its canonical hash
+   under `state_root/admission/`.
 
 A missing file, hash mismatch, schema failure, or graph/plan mismatch aborts
 admission loudly. Admission reads `plan.json` only to audit the already-static
@@ -388,22 +461,36 @@ Each compiled family member accepts only these runtime inputs:
 | Input | Type and rule |
 |---|---|
 | `target_repo` | Required absolute path to the Git working repository. Admission must prove its `remote` or `history_anchor` identity policy from `plan.json.target_repo`. |
-| `base_ref` | Required Git ref. Preflight resolves it once to a full commit SHA and persists that pinned SHA. Under `base_ref_policy.mode: "fixed"`, it must resolve to the configured fixed ref; under `"runtime"`, the caller-selected ref is allowed. In `history_anchor` identity mode it must also equal `target_repo.pinned_base_sha`. |
+| `execution_source_sha` | Required full Git commit SHA. It must be the containing commit of the exact invoked parent DOT and adjacent `plan.json`, contain every immutable compiled source file, descend from `product_base_sha`, and satisfy the complete byte-manifest gate. |
 | `run_id` | Required slug unique within the plan's run directory. |
 | `state_root` | Absolute path. If omitted, preflight resolves the absolute default `TARGET_REPO/.amplifier/runs/goal-plan/PLAN_ID/RUN_ID`; it must be ignored by Git before runtime writes it. |
 | `approval_mode` | Required enum `required` or `preapproved`; must equal the compiled plan value. |
 | `delivery_mode` | Required enum `none` or `pr`; must equal the compiled plan value. |
 | `github_repo` | `owner/repo` string required only when `delivery_mode` is `pr`; forbidden otherwise. |
 
-Preflight rejects relative `target_repo` or `state_root` values, mode
-mismatches, failed remote/history-anchor identity proofs, reused `run_id` with
-incompatible state, or a base ref that cannot be resolved and pinned.
+Preflight rejects non-Linux hosts, missing or unreadable required procfs
+identity files, relative `target_repo` or `state_root` values, mode mismatches,
+failed remote/history-anchor identity proofs, reused `run_id` with incompatible
+state, an invalid `product_base_sha`, or an `execution_source_sha` that does not
+contain the exact compiled program being invoked.
 
 Composition owns the immutable files under `pipelines/PLAN_SLUG/`. Runtime
 reads but never rewrites them. All runtime-created filesystem state and
 evidence, including its lane and integration worktree directories, live beneath
 `state_root`; product changes leave those worktrees only as explicit Git commits
 and integrations.
+
+Preflight defines the dedicated external worktree root as
+`state_root/worktrees/`. The integration worktree and every initially prepared
+lane branch are created at exact `execution_source_sha`. Before a later
+dependency wave launches, its lane branch is advanced only to the current
+parent-verified integration HEAD, which must descend from
+`execution_source_sha`; therefore every lane always contains the compiled child
+DOT and supervisor. Lane-owned candidate diffs and integration mutations are
+measured from `execution_source_sha`, while final product reporting separately
+identifies the known compiled-plan delta
+`product_base_sha..execution_source_sha` and the lane-produced delta
+`execution_source_sha..final_integrated_head`.
 
 The runtime graph is responsible for:
 
@@ -419,32 +506,77 @@ The runtime graph is responsible for:
 - recovery; and
 - optional PR delivery.
 
+### Immutable compiled-source contract
+
+Admission walks `pipelines/PLAN_SLUG/` at exact `execution_source_sha` and writes
+`state_root/admission/compiled-source-manifest.json` with schema
+`goal-plan.compiled-source-manifest/v1`. The canonical manifest records
+`product_base_sha`, `execution_source_sha`, compiled-directory path, and a
+lexicographically sorted entry for every regular file containing:
+
+- repository-relative path;
+- Git mode;
+- byte length; and
+- SHA-256 of the exact blob bytes.
+
+Symlinks, submodules, untracked entries, non-regular files, duplicate normalized
+paths, and case-colliding paths are rejected. The manifest includes
+`plan.json`, parent DOT, child lane DOT, supervisor code, verifier definitions,
+delivery subgraph when present, and every other compiled-directory byte. Its
+`manifest_sha256` covers the canonical JSON excluding only that hash field.
+The manifest itself lives under `state_root`, so it does not create a
+self-hashing source cycle.
+
+The deterministic `CompiledSourceGate` compares both the complete path set and
+every entry's mode, length, and bytes against the admission manifest. It emits
+only `COMPILED_SOURCE:PASS` or `COMPILED_SOURCE:INFRA`. The gate runs:
+
+1. at admission in the execution-source checkout;
+2. against each lane worktree immediately after every child exit;
+3. against the candidate commit before parent candidate verification;
+4. against the integration worktree after every merge and every
+   `IntegrationCorrection`;
+5. against all existing run worktrees during restart reconciliation; and
+6. against the integration worktree immediately before finalization or
+   delivery.
+
+Any missing, added, mode-changed, or byte-changed compiled-source entry is
+`INFRA_FAILURE`. It never enters a lane, integration-correction, or verifier
+retry loop. Composition additionally rejects any lane `owned_paths` or
+`integration_seams` pattern that could match `pipelines/PLAN_SLUG/**`.
+
 ### Top-level topology
 
 ```text
 Start
   -> Reconcile durable state
   -> Bind typed runtime inputs
-  -> Admission: validate plan hash + graph correspondence + repo identity
-  -> Resolve and pin base_ref; establish ignored state_root
+  -> Admission: validate plan/graph/repo + bind product_base_sha/execution_source_sha
+  -> Record compiled-source byte manifest; establish ignored state_root/worktree root
   -> Plan approval (or verify explicit preapproval)
-  -> Prepare worktrees for Wave 1
+  -> Prepare integration + Wave 1 worktrees from execution_source_sha
   -> component fan-out
        -> LaunchChild(A) -> MonitorChild(A) -> classify terminal A
        -> LaunchChild(B) -> MonitorChild(B) -> classify terminal B
   -> tripleoctagon fan-in
   -> Collect child process records + artifacts
        -> missing exit/artifact = CRASHED or INFRA, never PASS
-  -> Parent reruns lane verifiers at exact commit SHAs
+  -> CompiledSourceGate on every exited lane worktree
+  -> For each candidate: CompiledSourceGate on candidate commit
+       -> create clean detached candidate_verification_worktree at exact candidate SHA
+       -> parent reruns lane verifier there
+       -> require clean after verifier; remove/reconcile detached worktree
   -> Enforce ownership
   -> Integrate passing commits one at a time
        -> aggregate verifier after each merge
+       -> CompiledSourceGate after each merge
        -> on failure: undo candidate merge, return evidence to owning lane
   -> Prepare next explicit dependency wave
   -> ...
   -> Aggregate verifier at final HEAD
   -> Fresh cross-lane coherence review at final HEAD
        -> ITERATE: one IntegrationCorrection on integration branch
+            -> CompiledSourceGate after correction
             -> affected-closure lane verifiers at current integration HEAD
             -> aggregate verifier
             -> fresh coherence review
@@ -452,6 +584,7 @@ Start
        -> PASS: final sweep of every lane verifier at exact final HEAD
             -> red: IntegrationCorrection within integration budget
             -> all green: completion-eligible
+  -> CompiledSourceGate before finalization/delivery
   -> Classify convergence result
        -> all gates green
             -> delivery disabled -> COMPLETE
@@ -486,7 +619,7 @@ Every lane has the following approved, immutable contract:
 | Scope-outs | Explicit work the lane must not perform. |
 | Owned paths | Allowed write set. Concurrent lanes must not have conflicting ownership. |
 | Dependencies | Lane IDs that must be `PASS` and integrated before this lane starts. |
-| Verifier | Exact, non-interactive command with a defined working-directory policy and timeout. It must run both in the lane worktree and against current integration HEAD in the integration worktree. Exit zero means the mechanical condition passed; any other result is evidence to classify. |
+| Verifier | Exact, non-interactive command with a defined symbolic CWD policy and timeout. The child uses `lane_worktree`; pre-integration parent verification uses a clean detached `candidate_verification_worktree`; post-merge closure and final-sweep verification use `integration_worktree`. Exit zero means the mechanical condition passed; any other result is evidence to classify. |
 | Qualitative criteria | Optional criteria that require an independent judgment gate after the mechanical verifier passes. |
 | Attempt budget | Maximum verification-bearing attempts available to the lane. |
 
@@ -498,11 +631,12 @@ ownership failure.
 The lane result must bind evidence to:
 
 - the lane ID;
-- the approved plan revision;
-- its dependency/base commit;
+- the approved plan revision, `product_base_sha`, and
+  `execution_source_sha`;
+- its current dependency/integration base commit;
 - the exact lane head commit;
 - the approved child DOT and launch-command hashes;
-- the durable process-ledger entry, child run identifier, and observed exit
+- the durable process-ledger entry, `process_run_id`, and observed exit
   status;
 - the verifier command and exit status;
 - verifier output;
@@ -519,23 +653,63 @@ Lane-verifier definitions are immutable across runs and worktree locations.
 Their `definition_sha256` covers a canonical serialization of:
 
 - the exact command string, or the checked-in script's content SHA-256;
-- the symbolic cwd policies `lane_worktree` and `integration_worktree`;
+- the exact ordered symbolic CWD policies `lane_worktree`,
+  `candidate_verification_worktree`, and `integration_worktree`;
 - the configured timeout;
 - lane-verifier evidence schema version `goal-plan.lane-verifier/v1`; and
 - the exact exit/verdict/token mapping.
 
-No resolved absolute path is part of the immutable hash. A lane attempt selects
-`lane_worktree`; parent verification, affected-closure verification, and the
-final sweep select `integration_worktree`.
+No resolved absolute path is part of the immutable hash. A child attempt selects
+`lane_worktree`; pre-integration parent verification selects
+`candidate_verification_worktree`; affected-closure and final-sweep
+verification select `integration_worktree`.
 
-At runtime, `lane_worktree` resolves from `target_repo`, `state_root`, `run_id`,
-and lane ID; `integration_worktree` resolves from `target_repo`, `state_root`,
-and `run_id`. The wrapper canonicalizes the selected path with `realpath`,
-requires equality with the corresponding worktree realpath in the durable run
-record, and confirms the worktree uses the target repository's Git common
-object database. Each lane-verifier evidence record stores the selected
-`cwd_policy` token and resolved absolute `cwd` separately from
-`definition_sha256`.
+At runtime:
+
+- `lane_worktree` resolves from `state_root`, run ID, and lane ID and is rooted
+  at the lane's current integration base, which descends from
+  `execution_source_sha`;
+- `candidate_verification_worktree` resolves to a unique disposable path under
+  `state_root/worktrees/candidate-verification/LANE_ID/CANDIDATE_SHA/ATTEMPT`
+  and is detached at that exact candidate SHA; and
+- `integration_worktree` resolves beneath `state_root/worktrees/integration`
+  and begins at exact `execution_source_sha`.
+
+The wrapper canonicalizes every selected path with `realpath`, requires equality
+with the corresponding durable worktree record, confirms the target
+repository's Git common object database, and records `product_base_sha`,
+`execution_source_sha`, selected `cwd_policy`, and resolved `cwd` separately
+from `definition_sha256`.
+
+#### Candidate verification worktree lifecycle
+
+After a child produces a candidate commit, the parent first resolves that SHA
+directly from Git and runs `CompiledSourceGate` against its tree. It then:
+
+1. requires the candidate to descend from the lane's current integration base,
+   which must itself descend from `execution_source_sha`;
+2. creates a clean disposable detached worktree at the exact candidate SHA under
+   the dedicated external worktree root;
+3. proves `HEAD == candidate_sha`, the common Git directory matches, and
+   `git status --porcelain=v1 --untracked-files=all` is empty before verification;
+4. runs the immutable lane verifier only in that worktree using
+   `candidate_verification_worktree`;
+5. records the canonical path, candidate SHA, `product_base_sha`,
+   `execution_source_sha`, verifier-definition hash, command/exit/log, and
+   clean-before result;
+6. requires the same full status command to remain empty after verification;
+7. removes the detached worktree without `--force`, prunes/reconciles its Git
+   registration, and proves both filesystem path and worktree-list entry are
+   absent; and
+8. atomically records clean-after, removal command/result, registration
+   reconciliation, and final disposition in the parent-verification evidence.
+
+These fields extend `goal-plan.lane-verifier/v1` whenever
+`cwd_policy == "candidate_verification_worktree"`. A dirty verifier worktree,
+wrong HEAD, path escape, create failure, remove failure, stale registration, or
+inability to reconcile is `INFRA_FAILURE`, regardless of verifier exit. It never
+becomes lane feedback. A verifier failure is product evidence only after clean
+teardown succeeds.
 
 ### Child launch and process-supervision contract
 
@@ -561,50 +735,84 @@ pipeline runner starts with the lane worktree as both OS CWD and Attractor root
 CWD, every child box session inherits the correct lane root without changes to
 loop-pipeline, pipeline-runner, or Resolve.
 
+Process-supervision schema version 1 is Linux-only. Preflight requires procfs
+and rejects any host where `/proc/sys/kernel/random/boot_id`,
+`/proc/<pid>/stat`, `/proc/<pid>/cmdline`, or `/proc/<pid>/exe` cannot supply
+the identity contract below.
+
 Before the launch node returns, the supervisor atomically creates
-`state_root/lanes/<lane-id>/process.json` with schema
+`state_root/lanes/<lane-id>/runs/<launch-attempt>/process.json` with schema
 `goal-plan.child-process/v1`. The versioned ledger records:
 
 | Field | Contract |
 |---|---|
 | `schema_version` | Exact value `goal-plan.child-process/v1`. |
-| `lane_id` | Exact compiled lane ID. |
+| `lane_id`, `process_run_id`, `launch_attempt` | Exact compiled lane ID, canonical `PLAN_ID/RUN_ID/LANE_ID/LAUNCH_ATTEMPT`, and positive attempt integer. |
+| `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
 | `state` | One of `STARTING`, `RUNNING`, `TERM_SENT`, `KILL_SENT`, `EXITED`, `TIMED_OUT`, `CANCELLED`, or `INTERRUPTED`. |
-| `supervisor_pid`, `supervisor_start_token` | PID and OS process-start identity used to defend against PID reuse. |
-| `child_pid`, `child_pgid`, `child_start_token` | Child PID, process group, and OS process-start identity once launch succeeds. |
-| `command`, `command_sha256` | Exact argv array and canonical hash matching the approved launch contract. |
+| `supervisor_identity`, `child_identity` | Identity objects containing the canonical Linux token, cmdline SHA-256, expected PGID, executable realpath, and launch command hash. Child identity may be null only during `STARTING`. |
+| `argv`, `environment_sha256`, `launch_command_sha256` | Exact argv, canonical environment hash, and hash of the approved executable/argv/env/CWD/process-run envelope. |
 | `cwd_policy`, `cwd` | Exact token `lane_worktree` and its verified absolute realpath. |
 | `dot_path`, `dot_sha256` | Resolved checked-in child DOT path and verified content hash. |
 | `started_at`, `ended_at` | UTC timestamps; `ended_at` is null until terminal. |
-| `child_run_id` | Attractor child run/session identifier; null only while starting and required before any trustworthy terminal classification. |
+| `child_box_session_ids` | Optional array used only for observability; it may be empty and never participates in identity or completion. |
 | `stdout_stderr_log` | Absolute durable log path under the lane state directory. |
 | `exit_code`, `timed_out`, `termination_reason` | Real observed child exit and timeout/cancellation facts; null only before terminal. |
 
 Ledger writes use atomic replace and retain a JSONL transition history so a
-partially written status cannot be mistaken for terminal evidence. Process
-identity requires, at minimum, PID, OS start token, command hash, CWD realpath,
-and process group. `kill -0` proves only liveness; it never proves identity.
-A stale or mismatched PID is never signalled or adopted.
+partially written status cannot be mistaken for terminal evidence.
+
+#### Canonical Linux process identity
+
+For both supervisor and child, the canonical identity token is:
+
+```text
+linux:<boot_id>:<pid>:<starttime_ticks>
+```
+
+`boot_id` is the exact trimmed value read from
+`/proc/sys/kernel/random/boot_id`. `pid` is the decimal PID.
+`starttime_ticks` is field 22 of `/proc/<pid>/stat` as defined by procfs. The
+identity object also records and verifies:
+
+- SHA-256 of the exact NUL-delimited bytes from `/proc/<pid>/cmdline`;
+- expected PGID;
+- `realpath` of `/proc/<pid>/exe`; and
+- the canonical `launch_command_sha256`.
+
+For the supervisor identity this final hash is the approved supervisor
+invocation hash; for the child identity it is the exact child
+executable/argv/env/CWD/process-run hash defined above.
+
+Before adoption, every monitor poll, `TERM`, or `KILL`, the responsible
+supervisor or parent rereads and exactly matches boot ID, PID start ticks,
+cmdline hash, PGID, executable realpath, and launch command hash. `kill -0` may
+be used only after this identity check and proves liveness only. Unreadable
+required procfs identity data or any mismatch writes stale-PID evidence and is
+`INFRA_FAILURE`; that PID or process group is never signalled or adopted.
 
 The supervisor enforces `max_child_seconds`. On timeout or graph-requested
-cancellation it sends `TERM` to the verified child process group, waits exactly
-`term_grace_seconds`, then sends `KILL` to that same verified group if any member
-remains. It records the real child exit, timeout/cancellation reason, and final
-ledger state before exiting. The monitor routes on this persisted exit status
-even when expected child artifacts exist; artifact presence can never mask a
-nonzero process exit.
+cancellation it revalidates the complete child identity, sends `TERM` to the
+verified child process group, waits exactly `term_grace_seconds`, revalidates
+identity again, then sends `KILL` to that group only if the same process remains.
+It records the real child exit, timeout/cancellation reason, and final ledger
+state before exiting. The monitor routes on this persisted exit status even
+when expected child artifacts exist; artifact presence can never mask a nonzero
+process exit.
 
 The child process may outlive a crashed parent graph. On restart,
 reconciliation adopts monitoring only when the durable supervisor and child
 identities both match live processes. If the supervisor is gone but a matching
 child group remains, the run cannot recover a trustworthy eventual exit status;
 it safely terminates that verified group and classifies the attempt
-`INTERRUPTED`. If neither process remains, persisted terminal status and
-Git/evidence state decide whether to collect a candidate or classify the lane
-`CRASHED`. Contradictory identity or ledger state is `INFRA_FAILURE`.
+`INTERRUPTED`. If `/proc/<pid>` is absent because the process exited, absence is
+never success: reconciliation uses the durable supervisor exit record, child
+result/evidence, compiled-source evidence, and Git state to classify the
+attempt. A reboot/boot-ID mismatch, unreadable procfs state, contradictory
+identity, or ledger disagreement is `INFRA_FAILURE`.
 
 Manual observation uses the durable combined log, transition history, child
-Attractor events, and child run identifier.
+Attractor events, `process_run_id`, and optional child box-session IDs.
 
 ### Aggregate verifier contract
 
@@ -648,6 +856,7 @@ record is written atomically with these required fields:
 |---|---|
 | `schema_version` | Exact value `goal-plan.aggregate-verifier/v1`. |
 | `attempt` | Positive integer for this aggregate-verifier invocation. |
+| `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
 | `head_sha` | Full SHA returned by `git rev-parse HEAD` immediately before the run. |
 | `verifier_hash` | Recomputed SHA-256 verifier-definition hash. |
 | `cwd_policy` | Exact value `integration_worktree`. |
@@ -699,15 +908,15 @@ failure signatures route to diagnosis rather than another blind attempt.
 The child lane graph does not mark the batch lane `PASS`, certify integration,
 or certify batch completion. It produces a candidate commit and versioned
 `goal-plan.lane-result/v1` evidence under
-`state_root/lanes/<lane-id>/`. Parent verification assigns the final `PASS`
-disposition.
+`state_root/lanes/<lane-id>/runs/<launch-attempt>/`. Parent verification in a
+clean detached candidate worktree assigns the final `PASS` disposition.
 
 ## Deterministic and LLM Boundaries
 
 | Responsibility | Owner | Reason |
 |---|---|---|
-| Plan-schema validation, dependency-cycle checks, ownership-collision checks, repo/preflight checks | Deterministic nodes | These are exact predicates. |
-| Worktree creation, cleanup, branch/base inspection | Deterministic nodes | Git state is observable and must be reproducible. |
+| Plan-schema validation, dependency-cycle checks, ownership-collision checks, source-SHA/compiled-manifest admission | Deterministic nodes | These are exact predicates. |
+| Lane, candidate-verification, and integration worktree creation, cleanliness, cleanup, branch/source inspection | Deterministic nodes | Git state is observable and must be reproducible. |
 | Child process launch, identity ledger, logs, timeout, TERM/grace/KILL, exit capture, and restart reconciliation | Deterministic supervisor and parent nodes | Process control is exact infrastructure state; artifacts cannot substitute for the real exit status. |
 | Advancing a lane goal and adapting implementation | LLM lane worker inside the child Attractor process | The implementation path may change as the domain surprises the worker. |
 | Running lane and aggregate verifier commands | Deterministic nodes | Exit status and captured output are the primary machine evidence. |
@@ -728,12 +937,14 @@ next lane, compare SHAs, or parse known structured state.
 
 Evidence is accepted in this order:
 
-1. Git object and worktree state observed by deterministic commands.
-2. Verifier command, exit status, timeout status, and captured output.
-3. Deterministic ownership and dependency checks.
-4. Independent qualitative review tied to an exact commit, only for criteria
+1. Git object, worktree, source-SHA, and compiled-source-manifest state observed
+   by deterministic commands.
+2. Canonical process identity, real process exit, and process-run evidence.
+3. Verifier command, exit status, timeout status, and captured output.
+4. Deterministic ownership and dependency checks.
+5. Independent qualitative review tied to an exact commit, only for criteria
    that genuinely require judgment.
-5. Remote API state for delivery.
+6. Remote API state for delivery.
 
 Worker self-report is never in this hierarchy.
 
@@ -749,7 +960,8 @@ serialization, but the state must include:
 - contract snapshot and hash;
 - process ledger and transition history;
 - durable combined stdout/stderr and child event log;
-- base and head commit SHAs;
+- `product_base_sha`, `execution_source_sha`, current integration base, and
+  candidate head SHAs;
 - attempt/convergence record;
 - latest verifier log and status;
 - curated feedback and diagnosis;
@@ -765,18 +977,20 @@ schema:
 |---|---|
 | `schema_version` | Exact value `goal-plan.lane-result/v1`. |
 | `lane_id`, `plan_hash` | Exact compiled lane ID and approved plan hash. |
+| `process_run_id`, `launch_attempt` | Canonical process-run ID and matching positive launch-attempt integer. |
+| `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
 | `child_dot_sha256`, `launch_command_sha256` | Exact approved child DOT and launch-contract hashes. |
-| `child_run_id`, `process_ledger_path` | Non-empty child run identifier and path to the matching durable process record. |
-| `base_sha`, `candidate_head_sha` | Full expected lane base and candidate commit SHA, or null candidate when no commit exists. |
+| `process_ledger_path`, `child_box_session_ids` | Path to the matching durable process record and optional observability-only box-session ID array. |
+| `integration_base_sha`, `candidate_head_sha` | Full expected integration base and candidate commit SHA, or null candidate when no commit exists. Both must descend from `execution_source_sha`. |
 | `attempts_used`, `max_attempts` | Non-negative used count and approved positive limit. |
 | `candidate_disposition` | One of `CANDIDATE`, named `FAIL`, named `BLOCKED`, `PENDING_HUMAN`, or `BUDGET_EXHAUSTED`; never parent `PASS`. |
 | `verifier_evidence_paths`, `review_evidence_paths`, `ownership_evidence_path` | Run-scoped evidence references; arrays may be empty only when the candidate disposition explains why the gate was unreachable. |
 | `feedback_sha256` | Hash of the final curated feedback that informed the last correction, or null when no correction occurred. |
 
 The parent requires the child process ledger and `lane-result.json` to agree on
-lane ID, plan/command/DOT hashes, child run ID, and terminal timing. This
-agreement still supplies only a candidate routing hint. Parent verification is
-the evidence gate that can assign `PASS`.
+lane ID, both source SHAs, plan/command/DOT hashes, `process_run_id`, launch
+attempt, and terminal timing. This agreement still supplies only a candidate
+routing hint. Parent verification is the evidence gate that can assign `PASS`.
 
 The fan-in collector treats a missing required result artifact as `CRASHED`.
 It must not substitute an empty result, `PASS`, or "(none found)." This directly
@@ -793,6 +1007,7 @@ required schema:
 |---|---|
 | `schema_version` | Exact value `goal-plan.fresh-review/v1`. |
 | `review_kind` | Exact value `lane` or `cross_lane`. |
+| `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
 | `reviewed_head` | Full commit SHA reviewed from actual repository state. |
 | `verdict` | Exact value `PASS`, `ITERATE`, or `BLOCKED`; no other verdict is valid. |
 | `findings` | JSON array of objects with required `id`, `summary`, `evidence` string array, and `disposition_detail` string fields. |
@@ -804,8 +1019,8 @@ or more approved lane IDs: all integrated lanes covered by a `PASS` review, or
 the specific correction owners for `ITERATE` and `BLOCKED`.
 
 A deterministic classifier schema-validates the artifact, resolves current
-HEAD directly from Git, and requires `reviewed_head == current HEAD`. It then
-routes:
+HEAD directly from Git, requires both source SHAs to equal the durable run
+binding, and requires `reviewed_head == current HEAD`. It then routes:
 
 - `PASS` onward only when the relevant mechanical verifier is already green:
   the lane verifier for lane review, or `AGGREGATE_VERIFY:PASS` for cross-lane
@@ -840,11 +1055,13 @@ Their distinct causes determine dependent-lane handling and the residual report.
 ### Worktree isolation
 
 Every lane runs in a dedicated git worktree, branch, and headless child
-Attractor process rooted at the integrated HEAD that satisfies its
-dependencies. The deterministic parent creates the worktree first, resolves its
-absolute realpath, and launches the approved process supervisor with that path
-as OS `cwd`. The child Attractor command receives `--cwd .`, so its pipeline
-runner and box sessions inherit the lane worktree mechanically.
+Attractor process. The integration worktree and prepared lane branches begin at
+exact `execution_source_sha`. When dependencies have already integrated, the
+eligible lane is advanced to that current integration HEAD only after proving it
+descends from `execution_source_sha`. The deterministic parent resolves the lane
+worktree's absolute realpath and launches the approved process supervisor with
+that path as OS `cwd`. The child Attractor command receives `--cwd .`, so its
+pipeline runner and box sessions inherit the lane worktree mechanically.
 
 This process boundary is the isolation mechanism. The design does not depend on
 per-box `session_cwd` propagation. The verified runner-global box-CWD behavior
@@ -854,7 +1071,10 @@ outside immutable source paths.
 
 Before a wave starts, deterministic preflight confirms:
 
-- the repository identity and approved base HEAD;
+- repository identity, literal `product_base_sha`, exact
+  `execution_source_sha`, and their ancestry;
+- the admission compiled-source manifest still matches every existing
+  execution worktree;
 - worktree paths are available or reconcilable;
 - lane branches do not point at unexpected commits;
 - the child DOT, launch command, and supervisor hashes match the approved plan;
@@ -862,7 +1082,8 @@ Before a wave starts, deterministic preflight confirms:
   ignored `state_root`;
 - the aggregate verifier is runnable;
 - lane verifiers are present and non-interactive; and
-- declared ownership for concurrently running lanes does not overlap.
+- declared ownership for concurrently running lanes does not overlap and no
+  owned path or integration seam can match `pipelines/PLAN_SLUG/**`.
 
 ### Dependency semantics
 
@@ -897,14 +1118,22 @@ For each candidate lane in stable plan order, the parent:
 2. requires a zero child exit plus schema-valid, run-scoped lane evidence; a
    nonzero or missing exit remains non-pass even when candidate artifacts exist;
 3. resolves the exact candidate commit from Git rather than from prose;
-4. confirms the commit descends from the expected lane base;
-5. reruns the immutable lane verifier against that exact commit in a clean
-   context;
-6. checks the diff against the lane's owned paths;
-7. checks required qualitative evidence, when declared;
-8. records the parent verdict;
-9. integrates only a `PASS` candidate into the integration branch; and
-10. runs the aggregate verifier immediately after the integration.
+4. confirms the candidate and its integration base descend from
+   `execution_source_sha`;
+5. runs `CompiledSourceGate` against the candidate tree;
+6. creates the clean disposable detached
+   `candidate_verification_worktree` at that exact commit;
+7. reruns the immutable lane verifier only there, proves clean before and after,
+   removes/reconciles the worktree, and records all lifecycle evidence;
+8. records the cumulative candidate tree delta from `execution_source_sha`,
+   subtracts the already-journaled cumulative delta through the exact current
+   integration base to isolate this lane's mutation, and checks that isolated
+   mutation against `owned_paths`, with compiled source categorically excluded;
+9. checks required qualitative evidence, when declared;
+10. records the parent verdict;
+11. integrates only a `PASS` candidate into the integration branch;
+12. runs the aggregate verifier immediately after the integration; and
+13. runs `CompiledSourceGate` against the resulting integration HEAD.
 
 If candidate integration or the aggregate verifier fails:
 
@@ -914,6 +1143,10 @@ If candidate integration or the aggregate verifier fails:
 - the lane re-enters its bounded correction loop from the current integrated
   base; and
 - parent verification repeats before another integration attempt.
+
+A compiled-source failure, candidate-verification worktree lifecycle failure, or
+other infrastructure verdict bypasses this correction loop and routes directly
+to `INFRA_FAILURE`.
 
 This is the integration-level corrective cycle. It prevents a lane-local green
 result from poisoning the shared branch.
@@ -944,7 +1177,8 @@ For each correction round, deterministic setup computes:
 Only the responsible set contributes owned paths; transitive dependents are
 included for proof invalidation and re-verification, not to widen correction
 ownership. A deterministic diff check rejects any write outside the computed
-allowed set.
+allowed set. The compiled pipeline directory is always subtracted from this set,
+and composition has already proved no input pattern overlaps it.
 
 Before the worker acts, the graph appends invalidation records for every
 affected lane's prior verifier and review evidence. The old artifacts remain
@@ -953,12 +1187,14 @@ later gate.
 
 After `IntegrationCorrection` writes and commits a correction, the graph:
 
-1. reruns every affected-closure lane verifier against the current integration
+1. runs `CompiledSourceGate` against the current integration HEAD and routes any
+   mismatch directly to `INFRA_FAILURE`;
+2. reruns every affected-closure lane verifier against the current integration
    HEAD, in static integration order restricted to that closure;
-2. rejects any verifier evidence whose `head_sha` is not that current HEAD;
-3. reruns the aggregate verifier;
-4. reruns fresh cross-lane coherence review; and
-5. repeats only through the one `IntegrationCorrection` loop when evidence is
+3. rejects any verifier evidence whose `head_sha` is not that current HEAD;
+4. reruns the aggregate verifier;
+5. reruns fresh cross-lane coherence review; and
+6. repeats only through the one `IntegrationCorrection` loop when product evidence is
    red.
 
 An affected-closure lane-verifier failure adds that lane ID to the next
@@ -971,9 +1207,10 @@ last findings, closure, ownership check, verifier logs, and integration HEAD.
 ### Final lane-verifier sweep
 
 After coherence returns `PASS`, and before delivery eligibility or
-`COMPLETE`, the graph runs every lane verifier once more against the exact
-current integration HEAD in full static integration order. Each final-sweep
-record is bound to that one SHA.
+`COMPLETE`, `CompiledSourceGate` passes and the graph runs every lane verifier
+once more against the exact current integration HEAD in full static integration
+order. Each final-sweep record is bound to that one SHA,
+`product_base_sha`, and `execution_source_sha`.
 
 If any final-sweep lane verifier is red, its lane ID becomes the responsible
 set for `IntegrationCorrection`; the graph computes its transitive-dependent
@@ -988,7 +1225,10 @@ After all runnable waves finish:
 
 1. The deterministic aggregate verifier runs at final integrated HEAD.
 2. A fresh independent reviewer reads the approved plan, lane evidence, final
-   diff, and actual repository state at that HEAD.
+   lane-produced diff `execution_source_sha..final_integrated_head`, the
+   separately labeled compiled-plan delta
+   `product_base_sha..execution_source_sha`, and actual repository state at
+   that HEAD.
 3. The reviewer checks cross-lane coherence: compatible interfaces, preserved
    assumptions, no duplicated or contradictory implementations, and complete
    satisfaction of qualitative criteria.
@@ -1077,6 +1317,9 @@ or resumes old lane branches.
 The only pre-mutation gate presents:
 
 - the full lane/dependency graph;
+- `product_base_sha`, admitted `execution_source_sha`, their ancestry, and the
+  known compiled-plan delta between them;
+- the compiled-source manifest hash;
 - ownership and collision analysis;
 - lane and aggregate verifiers;
 - child DOT/launch hashes, lane wall limits, and process-supervision policy;
@@ -1119,18 +1362,27 @@ The run persists:
 - approved plan snapshot/hash and preapproval/approval evidence;
 - compiled-pipeline path, embedded `plan_sha256`, typed runtime inputs,
   selected target-repository identity mode and its remote-match or
-  history-anchor proof, and pinned base HEAD;
+  history-anchor proof, exact `product_base_sha`, exact
+  `execution_source_sha`, their ancestry proof, and the separated compiled-plan
+  and lane-produced delta ranges;
+- admission compiled-source manifest path/hash and every subsequent
+  `CompiledSourceGate` record;
 - run-wide and per-lane counters;
 - worktree/branch/base/head mapping, including recorded `realpath` values for
-  every lane worktree and the integration worktree;
+  every lane worktree, disposable candidate-verification worktree, and the
+  integration worktree;
 - per-lane process ledger and transition history, including supervisor/child
-  PID identities, PGID, command/DOT hashes, child run identifier, log path,
-  start/end times, timeout/cancellation state, and real exit status;
+  canonical Linux identity tokens, cmdline hashes, PGIDs, executable realpaths,
+  environment/command/DOT hashes, `process_run_id`, optional box-session IDs,
+  log path, start/end times, timeout/cancellation state, and real exit status;
 - lane contracts, evidence, and dispositions;
-- parent-verification records;
-- integration journal with pre-merge and post-merge HEADs;
+- parent-verification records, including detached candidate SHA/path,
+  verifier hash, clean-before/after results, and removal/reconciliation proof;
+- integration journal whose every entry binds `product_base_sha`,
+  `execution_source_sha`, candidate SHA, and pre-merge/post-merge HEADs;
 - integration-correction journal with each round's responsible set, affected
-  closure, allowed write set, evidence invalidations, commit, and budget count;
+  closure, allowed write set, both source SHAs, compiled-source-gate evidence,
+  evidence invalidations, commit, and budget count;
 - aggregate-verifier records after each merge;
 - final aggregate and versioned fresh-review records;
 - final-sweep lane-verifier records bound to final integration HEAD;
@@ -1150,43 +1402,59 @@ On restart, the graph compares state with reality:
    `plan_sha256`, including graph/plan correspondence.
 2. Re-prove the selected `remote` or `history_anchor` target-repository
    identity policy, then confirm `plan_id`, typed runtime inputs, `state_root`,
-   and pinned base SHA match the durable run record.
-3. Enumerate actual worktrees and branches beneath `state_root`; canonicalize
+   `product_base_sha`, `execution_source_sha`, their ancestry, and the
+   compiled-source manifest hash match the durable run record.
+3. Run `CompiledSourceGate` against the execution source and every existing
+   lane, candidate-verification, and integration worktree. Any mismatch is
+   immediate `INFRA_FAILURE`.
+4. Enumerate actual worktrees and branches beneath `state_root`; canonicalize
    each with `realpath` and require equality with its recorded path and Git
    common object database.
-4. Reconcile every nonterminal child process ledger. Validate supervisor and
-   child identities using PID, OS start token, command hash, CWD realpath, and
-   PGID before any adoption or signal. Use `kill -0` only after identity
-   validation and only as a liveness probe.
-5. Adopt monitoring when the recorded supervisor and child are both alive and
+5. Reconcile any disposable candidate-verification worktree left by a crash.
+   Require its recorded candidate SHA/path, exact detached HEAD, and clean full
+   status; dirty, wrong, or unremovable state is `INFRA_FAILURE`. Remove and
+   prune a valid leftover, record reconciliation evidence, and restart parent
+   candidate verification from worktree creation rather than trusting a partial
+   verifier result.
+6. Reconcile every nonterminal child process ledger. Before polling, adoption,
+   or signalling, reread and match for both supervisor and child the canonical
+   Linux boot-ID/PID/starttime token, exact cmdline hash, PGID, executable
+   realpath, and launch command hash.
+7. Adopt monitoring when the recorded supervisor and child are both alive and
    match. If a matching child remains without its supervisor, terminate only
    that verified process group and classify the attempt `INTERRUPTED`; no new
-   process may reuse the stale PID record. If both are gone, reconcile the
-   persisted exit status and lane evidence. Contradictory process facts are
-   `INFRA_FAILURE`.
-6. Resolve recorded commits directly from Git.
-7. Reclassify a purported completed lane whose artifact or commit is missing
+   process may reuse the stale PID record. Missing/unreadable procfs identity or
+   mismatch is stale-PID `INFRA_FAILURE` and is never signalled.
+8. If `/proc/<pid>` is absent, reconcile from the durable supervisor exit
+   record, child result/evidence, compiled-source evidence, and Git state;
+   process absence alone never means success.
+9. Resolve recorded commits directly from Git and require every work commit and
+   current integration HEAD to descend from `execution_source_sha`.
+10. Reclassify a purported completed lane whose artifact or commit is missing
    as `CRASHED` or `INFRA_FAILURE`, depending on whether lane work or the
    substrate is untrustworthy.
-8. Require the persisted child exit status even when candidate artifacts exist;
+11. Require the persisted child exit status even when candidate artifacts exist;
    a missing or nonzero exit cannot be normalized to `PASS`.
-9. Rerun a verifier when the recorded result is absent, stale, or not bound to
-   the recorded commit.
-10. Reconcile the integration journal against the actual integration HEAD and
+12. Rerun pre-integration parent verification only through a newly created
+   clean `candidate_verification_worktree` when its lifecycle evidence is
+   absent, stale, incomplete, or not bound to the candidate commit.
+13. Reconcile the integration journal against the actual integration HEAD and
    Git ancestry before attempting another merge.
-11. Recompute every recorded integration-correction affected closure from the
+14. Recompute every recorded integration-correction affected closure from the
    static DAG and require it to match the durable journal. Preserve prior
    artifacts but enforce all recorded invalidations.
-12. If an integration-correction commit exists but its proof sequence is
-   incomplete, resume at affected-closure verification against current
-   integration HEAD rather than rerunning the worker.
-13. Rerun the aggregate verifier if the actual HEAD lacks a bound passing
+15. If an integration-correction commit exists but its proof sequence is
+   incomplete, first run `CompiledSourceGate`, then resume at affected-closure
+   verification against current integration HEAD rather than rerunning the
+   worker.
+16. Rerun the aggregate verifier if the actual HEAD lacks a bound passing
    record.
-14. Reject a fresh-review artifact whose `reviewed_head` does not equal actual
-   HEAD.
-15. Require a complete all-lane final sweep at actual integration HEAD before
+17. Reject a fresh-review artifact whose source SHAs differ or whose
+   `reviewed_head` does not equal actual HEAD.
+18. Require a complete all-lane final sweep and a current compiled-source pass
+    at actual integration HEAD before
     restoring completion eligibility.
-16. Reconcile the delivery ledger, then query remote PR state at the ledger's
+19. Reconcile the delivery ledger, then query remote PR state at the ledger's
    exact expected head if delivery may already have occurred; never open a
    duplicate merely because local state is incomplete.
 
@@ -1198,9 +1466,9 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | All work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; every lane verifier passes in the final sweep at exact final integration HEAD; the aggregate verifier and fresh coherence review pass at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
+| `COMPLETE` | Both source SHAs remain bound; the compiled-source manifest passes immediately before finalization; all work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; every lane verifier passes in the final sweep at exact final integration HEAD; the aggregate verifier and fresh coherence review pass at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, or final aggregate/coherence criteria remain unsatisfied. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | Git/worktree state, child process identity/supervision, verifier execution substrate, credentials, remote API, or recovery state cannot be trusted enough to classify product work honestly. | No delivery. |
+| `INFRA_FAILURE` | Source-SHA/compiled-byte identity, Git/worktree state, candidate-verification worktree lifecycle, Linux procfs process identity/supervision, verifier execution substrate, credentials, remote API, or recovery state cannot be trusted enough to classify product work honestly. | No delivery. |
 | `ABORTED` | The plan was rejected/cancelled before mutation, or the operator explicitly stopped the run at an allowed gate. | No delivery. |
 
 ### Finalizer machine contract
@@ -1212,7 +1480,13 @@ writes the run root's versioned `result.json` with, at minimum:
 - `status` with exact value `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or
   `ABORTED`;
 - `plan_hash`;
+- `product_base_sha` and `execution_source_sha`;
+- `compiled_source_manifest_path` and `compiled_source_manifest_sha256`;
 - `integrated_head_sha`, or `null` when no integration HEAD exists;
+- `compiled_plan_delta` describing `product_base_sha..execution_source_sha`;
+- `lane_produced_delta` describing
+  `execution_source_sha..integrated_head_sha`, or null when no integration HEAD
+  exists;
 - `lane_dispositions`;
 - `child_process_evidence_paths`;
 - `integration_correction_records`;
@@ -1240,6 +1514,11 @@ The finalizer completes its write successfully so the graph can route on
 pipeline outcome. `COMPLETE` is the only successful and deliverable outcome.
 The other three remain distinct non-success, evidence-bearing outcomes rather
 than aliases for a generic failure.
+
+Before writing any terminal result, including `INFRA_FAILURE`, the finalizer
+attempts one last `CompiledSourceGate` and records its evidence. Only a passing
+gate can emit `COMPLETE` or begin delivery; a red or unexecutable gate forces or
+preserves `INFRA_FAILURE`.
 
 Terminal nodes must route explicitly to the graph exit with the intended machine
 status. They must not dead-end and become `no_matching_edge` authoring errors.
@@ -1274,6 +1553,8 @@ uses schema version `goal-plan.delivery-attempt/v1` and records:
 
 - `schema_version` with exact value `goal-plan.delivery-attempt/v1`;
 - `attempt` as integer `1` or `2`;
+- `product_base_sha` and `execution_source_sha`;
+- `compiled_source_manifest_sha256`;
 - `branch` as the delivery branch;
 - `expected_head_sha` as the exact expected head SHA;
 - `phase` as `started` or `completed`;
@@ -1291,6 +1572,11 @@ verification. If none exists, the proven delivery subgraph may push/open the
 PR. In both cases, the attempt succeeds only after a separate remote query
 confirms that the PR exists and that its head SHA exactly equals the ledger's
 expected head SHA. The delivery actor's own report is never sufficient.
+
+Immediately before any delivery query or mutation, `CompiledSourceGate` must
+pass at the exact expected integration HEAD and both source SHAs must match the
+ledger. Delivery evidence and the PR report preserve the known compiled-plan
+delta separately from the lane-produced delta.
 
 An incomplete ledger entry discovered during recovery counts as an attempt and
 is reconciled against remote state before another attempt can start. No third
@@ -1327,10 +1613,18 @@ pipelines/goal_plan_smoke/plan.json
 pipelines/goal_plan_smoke/goal_plan_smoke.md
 pipelines/goal_plan_smoke/subgraphs/goal_lane.dot
 pipelines/goal_plan_smoke/subgraphs/deliver_pr.dot
+pipelines/goal_plan_smoke/python/goal_plan_runtime.py
 pipelines/goal_plan_smoke/python/process_supervisor.py
+pipelines/goal_plan_smoke/python/tests/test_goal_plan_runtime.py
 pipelines/goal_plan_smoke/python/tests/test_process_supervisor.py
 README.md
 ```
+
+`goal_plan_runtime.py` is the single deterministic home for source-SHA
+admission, compiled-source manifests/gates, ownership-pattern rejection,
+candidate-verification worktree lifecycle, and delta reporting. DOT nodes call
+that module rather than duplicating shell logic. `process_supervisor.py` remains
+the single home for Linux process identity and child lifecycle.
 
 The smoke exemplar proves orchestration rather than product behavior. In a
 temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
@@ -1365,15 +1659,24 @@ orchestration behavior, not a library-only change.
 9. Prove the graph contains no manifest-driven scheduler: lane, wave,
    dependency, integration-order, and budget dispatch all remain explicit DOT
    nodes, edges, and constants.
-10. Prove lane and aggregate verifier-definition hashes use symbolic cwd policy
-    tokens rather than absolute paths, while every invocation records and
-    validates its resolved `realpath` separately.
-11. Validate every lane's child DOT hash, launch-command hash, process-supervisor
-    hash, expected evidence schema, child wall budget, and static launch/monitor
-    node correspondence.
-12. Unit-test process identity, atomic ledger transitions, real exit capture,
-    timeout escalation, cancellation, stale-PID rejection, and restart
-    reconciliation in `process_supervisor.py`.
+10. Prove lane verifier-definition hashes include all three symbolic CWD
+    policies and no absolute paths; aggregate hashes retain only
+    `integration_worktree`; every invocation records and validates its resolved
+    `realpath` separately.
+11. Validate `product_base_sha`, the non-self-referential containing-commit
+    binding for exact `execution_source_sha`, their graph attributes and
+    ancestry, and separate compiled-plan/lane-produced reporting ranges.
+12. Validate every lane's child DOT hash, exact ordered argv/typed-parameter
+    schema, closed environment policy, `process_run_id` template,
+    process-supervisor hash, expected evidence schema, child wall budget, and
+    static launch/monitor node correspondence.
+13. Validate ownership and integration-seam schemas reject every pattern that
+    can match `pipelines/PLAN_SLUG/**`; validate complete manifest path-set,
+    mode, length, and byte comparisons at every `CompiledSourceGate`.
+14. Unit-test Linux process identity, atomic ledger transitions, exact
+    argv/env/CWD hashing, real exit capture, timeout escalation, cancellation,
+    stale-PID rejection, and restart reconciliation in
+    `process_supervisor.py`.
 
 ### Primary live smoke scenario
 
@@ -1398,44 +1701,61 @@ fixture lanes:
 
 The live smoke passes only if direct observation proves:
 
-1. The adjacent `plan.json` hash equals embedded `plan_sha256`; admission
-   proves graph/plan correspondence and an exact normalized fetch-remote
-   identity match before mutation.
-2. Typed runtime inputs are bound, `base_ref` is pinned, `state_root` is
-   ignored, and no mutation occurs before approval/preapproval validation.
-3. Wave 1 launches two concurrent child Attractor processes in distinct
+1. The adjacent `plan.json` hash equals embedded `plan_sha256`; admission proves
+   graph/plan correspondence, an exact normalized fetch-remote identity match,
+   literal `product_base_sha`, exact containing `execution_source_sha`, their
+   ancestry, and the complete compiled-source manifest before mutation.
+2. Typed runtime inputs are bound, `state_root/worktrees` is the dedicated
+   external worktree root, state is ignored, and no mutation occurs before
+   approval/preapproval validation.
+3. The integration worktree and prepared Wave 1 branches begin at exact
+   `execution_source_sha`; a later-wave lane begins at a parent-verified
+   integration HEAD descended from it. Product reporting separately names the
+   compiled-plan and lane-produced delta ranges.
+4. Wave 1 launches two concurrent child Attractor processes in distinct
    worktrees. Process and child evidence show that each OS CWD and Attractor
    root CWD is its assigned worktree and that its box-session relative writes
    remain there.
-4. Every child process ledger records the approved command/DOT hashes, process
-   identities, child run identifier, durable log, and real exit status.
-5. `lane_b`'s first failure is visible and causes a corrective cycle rather
+5. Every process ledger binds both source SHAs, canonical `process_run_id`,
+   exact ordered argv/params, environment hash, CWD/command/DOT hashes,
+   canonical Linux process identities, optional box-session IDs, durable log,
+   and real exit status.
+6. `lane_b`'s first failure is visible and causes a corrective cycle rather
    than a silent pass or blind restart.
-6. The correction is genuinely dependent on the changed verifier feedback: a
+7. The correction is genuinely dependent on the changed verifier feedback: a
    control run with unchanged/withheld feedback remains red, while the changed
    feedback produces a different candidate hash and later green evidence.
-7. Parent verifier logs are produced by a fresh rerun of the immutable lane
-   verifier against the exact candidate commits; child evidence alone cannot
-   satisfy this gate.
-8. Ownership checks pass and would have rejected an out-of-scope write.
-9. Integration occurs in stable order, with an aggregate-verifier record after
+8. Parent verification creates a clean detached
+   `candidate_verification_worktree` at the exact candidate SHA, runs the
+   verifier only there, proves clean before and after, removes/reconciles it,
+   and records canonical path, SHA, verifier hash, and lifecycle evidence.
+9. Ownership checks pass, reject an out-of-scope write, and categorically
+   reject any compiled-pipeline write or integration seam.
+10. Integration occurs in stable order, with an aggregate-verifier record and
+   passing `CompiledSourceGate` after
    each merge that names the exact HEAD and verifier hash and whose last-line
    token agrees with its JSON verdict. The immutable hash contains
    `integration_worktree`, while the evidence separately records the verified
    absolute cwd.
-10. `lane_c` starts only after both dependencies are integrated and green.
-11. Cross-lane `ITERATE` invokes one `IntegrationCorrection` on the integration
+11. `lane_c` starts only after both dependencies are integrated and green.
+12. Cross-lane `ITERATE` invokes one `IntegrationCorrection` on the integration
    branch, never the old lane branches; its write set is limited to the
    responsible lanes' ownership union plus declared integration seams.
-12. Correction invalidates prior proof for the affected closure, then reruns
+13. Correction invalidates prior proof for the affected closure, passes
+    `CompiledSourceGate`, then reruns
     all three closure lane verifiers at current integration HEAD before
     aggregate and coherence gates pass.
-13. The final sweep reruns every lane verifier at one exact final integration
-    HEAD, and final aggregate and fresh-review records name that same SHA.
-14. The delivery ledger records no more than two attempts, and the remote PR
+14. The final sweep reruns every lane verifier at one exact final integration
+    HEAD; final aggregate and fresh-review records name that SHA and both source
+    SHAs.
+15. The pre-finalization and pre-delivery compiled-source gates match the
+    admission manifest.
+16. The delivery ledger records no more than two attempts, both source SHAs,
+    and the manifest hash, and the remote PR
     exists with a head SHA equal to its exact expected head.
-15. `result.json`, `goal_plan.status`, and last-line token agree on `COMPLETE`
-    only after all fourteen preceding observations hold.
+17. `result.json` reports both delta ranges; `result.json`,
+    `goal_plan.status`, and the last-line token agree on `COMPLETE` only after
+    all sixteen preceding observations hold.
 
 ### Fault and recovery probes
 
@@ -1447,15 +1767,34 @@ The implementation is not ready until live probes also demonstrate:
   non-pass because the process ledger preserves the real exit status;
 - killing the parent graph while two children run leaves independently
   supervised child process groups observable; restart safely adopts matching
-  supervisor/child identities or classifies/terminates them under the recovery
-  contract;
+  canonical Linux supervisor/child identities or classifies/terminates them
+  under the recovery contract;
 - a child wall timeout performs TERM -> configured grace -> KILL against the
-  whole verified child process group and records the timeout and exit;
-- a reused/stale PID whose OS start token, command hash, CWD, or PGID differs is
-  neither adopted nor signalled;
+  whole verified child process group, revalidating identity before each signal,
+  and records the timeout and exit;
+- stale-PID probes independently change PID start ticks, cmdline bytes, PGID,
+  executable realpath, and launch command hash; each mismatch is
+  `INFRA_FAILURE` and the PID is never signalled;
+- a changed boot ID simulates reboot, a reused PID has the wrong canonical
+  `linux:<boot_id>:<pid>:<starttime_ticks>` token, and permission/mount fault
+  injection makes each required procfs identity file unreadable; every case
+  fails loudly without adoption, polling, TERM, or KILL;
+- when `/proc/<pid>` is absent after a real exit, recovery uses the durable
+  supervisor exit record, child result/evidence, and Git state and never
+  interprets absence alone as success;
+- a candidate-verification worktree with wrong HEAD, dirty-before state,
+  dirty-after state, failed non-force removal, stale worktree registration, or
+  crash-left incomplete lifecycle evidence yields `INFRA_FAILURE`; a clean
+  crash-left worktree is removed/reconciled and verification restarts in a new
+  detached worktree;
 - two consecutive runs leave source DOT, scripts, and committed fixtures
   byte-clean, with every generated log, event, checkpoint, feedback, and result
   beneath `state_root/lanes/<lane-id>/`;
+- deleting, adding, mode-changing, or byte-changing any compiled-source entry
+  is detected after child exit, before candidate verification, after merge,
+  after integration correction, during restart, and before
+  finalization/delivery; every case reaches `INFRA_FAILURE` without lane
+  correction;
 - an impossible verifier exhausts its lane budget, produces a postmortem,
   blocks dependents by name, reaches `RESIDUALS_READY`, and opens no automatic
   PR;
@@ -1463,25 +1802,32 @@ The implementation is not ready until live probes also demonstrate:
 - an aggregate failure after a candidate merge restores the pre-merge HEAD and
   routes evidence back to the responsible lane;
 - a `plan.json` byte change, DOT/plan lane mismatch, relative runtime path,
-  incompatible reused `run_id`, or mode mismatch fails admission before
-  mutation;
+  wrong `product_base_sha`, non-containing or non-descendant
+  `execution_source_sha`, argv/param order mismatch, output-path escape,
+  incompatible reused `run_id`, non-Linux platform, or mode mismatch fails
+  admission before mutation;
 - HTTPS, `ssh://`, and scp-like forms for the same fetch remote normalize to
   the same `host[:port]/path`, while a host, non-default-port, path-case, or
   repository-path mismatch fails remote identity admission;
-- `history_anchor` admission fails when the plan commit or pinned base object is
+- `history_anchor` admission fails when the plan commit, product-base object, or
+  execution-source object is
   missing, the committed blob hash differs, the working plan artifact differs,
-  or the pinned base is not an ancestor of the plan commit;
+  the product base is not an ancestor of the plan commit, or the plan commit is
+  not an ancestor of the containing execution source;
 - changing the aggregate verifier definition after approval yields
   `AGGREGATE_VERIFY:INFRA` before the changed verifier runs;
 - the same aggregate/lane verifier contract retains one
-  `definition_sha256` across different run directories, while a missing,
+  `definition_sha256` across different run directories; the lane hash includes
+  all three symbolic CWD policies while the aggregate hash includes only
+  `integration_worktree`; a missing,
   replaced, or incorrectly resolved recorded worktree `realpath` yields
   infrastructure failure before verification;
 - a missing, malformed, or stale fresh-review artifact is rejected and never
   advances as `PASS`;
 - a multi-owner coherence `ITERATE` creates one integration-branch correction,
   rejects a write outside the ownership union plus integration seams, computes
-  the full transitive-dependent closure, and invalidates its old evidence;
+  the full transitive-dependent closure, rejects every compiled-source write,
+  runs `CompiledSourceGate`, and invalidates its old evidence;
 - a red affected-closure or final-sweep lane verifier routes back to
   `IntegrationCorrection`, while correction-budget exhaustion records named
   residuals and never resumes old lane branches;
