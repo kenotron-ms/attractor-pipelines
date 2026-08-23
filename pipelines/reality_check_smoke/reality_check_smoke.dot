@@ -1,0 +1,195 @@
+// reality_check_smoke.dot
+//
+// The simplest possible pipeline in this repo that exercises the Amplifier
+// Resolve platform's REAL reality-check broker API end to end: it performs
+// one trivial, cheap, real action (write a known-content file + push it to
+// the target repo), then invokes reality-check to independently confirm --
+// inside a fresh Incus-provisioned DTU that the broker itself stands up --
+// that the action actually took effect. No planning, no rubric, no fix loop.
+// The reality-check verdict IS the pipeline's terminal evidence; there is no
+// redundant separate check.
+//
+// Pipeline shape:
+//   Start -> WriteClaimAndPush -> PrepareRealityCheckInputs -> RealityCheck
+//         -> RenderVerdict -> Report -> Exit
+//   (WriteClaimAndPush routes to MarkPushFailed -> Report on local failure,
+//   short-circuiting before any reality-check call is attempted.)
+//
+// Ground truth this pipeline was built from (read, not guessed):
+//   - amplifier-resolver-dot-graph/src/amplifier_resolver_dot_graph/pipelines/reality_check.dot
+//     (the proven, non-wip reference invocation: BuildArtifact -> RealityCheck -> RenderVerdict)
+//   - amplifier-resolver-dot-graph/.../handlers/reality_check_invoke.py (exact contract:
+//     reads .resolve/reality_check/artifact.json {"software_path": ...} + config.json
+//     params.spec; writes .resolve/reality_check/verdict.json; NO synthetic fallback;
+//     exits 0 with a failure-shaped verdict on SDK/infra errors, exits 2 only on
+//     input-contract errors)
+//   - amplifier_resolver_sdk/_reality_check.py (installed SDK, the actual broker HTTP
+//     contract: POST/GET/DELETE /api/instances/{id}/broker/reality-check[/{session_id}],
+//     terminal statuses {completed, failed, timeout} + cancelled handled separately)
+//   - amplifier_resolver_sdk/_base.py (start_reality_check/wait_for_reality_check
+//     signatures -- software_path, acceptance_criteria, environment, dtu_lifecycle,
+//     timeout_seconds)
+//   - pipelines/resolve_hello_world/resolve_hello_world.dot (this repo's own proven
+//     "lean on the real platform, verify a real side effect" style, tool_env usage,
+//     and the write-then-independently-verify discipline from docs/RUBRIC.md)
+//
+// Context inputs:
+//   $repo      - target repo slug (owner/name), same convention as hello_world.dot /
+//                resolve_hello_world.dot. MUST be a repo you can push directly to the
+//                default branch of (see reality_check_smoke.md -- this is a REQUIRED,
+//                non-obvious submission constraint, not an incidental detail).
+//   $GH_TOKEN  - must be present in the worker container env with push rights to $repo.
+//
+// Context outputs:
+//   smoke.result       - "passed" | "failed"
+//   rc.verdict         - "pass" | "partial" | "fail" | "None" (string "None" if the
+//                        broker never produced a verdict, e.g. an infra failure)
+//   rc.status          - broker session terminal status, or "not_attempted"
+//   rc.failure_mode    - broker failure_mode, or "local_push_failed" if we never got
+//                        as far as calling the broker
+//   rc.session_id      - broker session id (n/a if never started)
+//
+// IMPORTANT -- read pipelines/reality_check_smoke/reality_check_smoke.md before
+// submitting a job for this pipeline. It documents a hard, source-verified
+// constraint: reality-check's software_path (as constructed by the one proven
+// reference implementation, reality_check.dot's BuildArtifact node) is always a
+// bare "https://github.com/<repo>" URL with no branch/ref qualifier. There is no
+// confirmed way to point reality-check at a specific branch. That means the
+// trivial claim file this pipeline writes MUST land on the repo's actual default
+// branch to be visible to reality-check's own fresh clone -- this pipeline
+// therefore pushes DIRECTLY to whatever branch is currently checked out (assumed
+// to be the default branch), with NO PR and NO review. Only submit this against a
+// disposable/scratch repo. See the .md for the full list of assumptions and the
+// one genuinely open infrastructure question (runner network reachability) this
+// pipeline could not verify from source alone.
+
+digraph reality_check_smoke {
+  graph [
+    label="Reality Check Smoke -- exercise the real reality-check broker round trip",
+    goal="Write a trivial, known-content file into a target GitHub repo, then use the Amplifier Resolve reality-check broker API to independently confirm -- inside a real Incus-provisioned DTU -- that the file exists with exactly that content.",
+    rankdir=LR,
+    default_max_retry=1,
+    default_fidelity="truncate",
+    model_stylesheet="* { llm_model: claude-sonnet-4-6; llm_provider: anthropic; }"
+  ];
+
+  Start [shape=Mdiamond, label="Start"];
+  Exit  [shape=Msquare,  label="Exit"];
+
+  // -- Node 1: the trivial, cheap, real action --------------------------------
+  //
+  // Writes a single file with fixed, known content at the repo root, commits
+  // it, and pushes DIRECTLY to whatever branch is currently checked out (no
+  // new branch, no PR -- see header comment for why this is required, not a
+  // shortcut). Pushes straight to https://github.com/$REPO (bypassing
+  // whatever `origin` is locally configured as -- it may be a Gitea sidecar
+  // mirror per resolve_hello_world.dot's own documented behavior, which
+  // reality-check's fresh clone would never see) using GH_TOKEN directly, the
+  // same credential convention every other pipeline in this repo already
+  // assumes (see pr_review.dot, deliver_pr.dot).
+  //
+  // Deliberately written as a python heredoc with single-quoted strings only
+  // (zero embedded double quotes) and chr(10) for the one embedded newline in
+  // file content -- mirrors resolve_hello_world.dot's WriteHelloWorld exactly,
+  // which uses the identical technique for the identical reason: avoid any
+  // ambiguity in DOT-attribute-string escaping.
+  //
+  // tool_env="repo" (not ${repo} substitution) -- reads $repo as a real OS
+  // env var ($REPO), sidestepping any question of whether inline ${repo}
+  // substitution would collide with the shell's own $VAR expansions used
+  // later in the same script. Same defensive pattern resolve_hello_world.dot
+  // uses via tool_env="branch_name".
+  WriteClaimAndPush [
+    shape=parallelogram, label="Write claim file + push",
+    tool_env="repo",
+    tool_command="#!/bin/sh\nset -e\ncat > /tmp/rc_smoke_write_claim.py <<'PYEOF'\nimport os\nimport subprocess\nimport sys\n\nwork_dir = '/project/workspace'\nrepo_slug = (os.environ.get('REPO') or '').strip()\nnl = chr(10)\ncontent = 'reality-check-smoke-ok' + nl\nclaim_path = os.path.join(work_dir, 'reality_check_smoke_claim.txt')\nwith open(claim_path, 'w') as f:\n    f.write(content)\n\nsubprocess.run(['git', '-C', work_dir, 'add', 'reality_check_smoke_claim.txt'], check=True, stdout=sys.stderr, stderr=sys.stderr)\nsubprocess.run(['git', '-C', work_dir, 'commit', '-m', 'chore: reality-check smoke claim marker'], stdout=sys.stderr, stderr=sys.stderr)\n\nbranch = subprocess.run(['git', '-C', work_dir, 'rev-parse', '--abbrev-ref', 'HEAD'], check=True, capture_output=True, text=True).stdout.strip()\n\ngh_token = (os.environ.get('GH_TOKEN') or '').strip()\nif not repo_slug:\n    print('write-claim: REPO env var not set -- submit this pipeline with a repo param', file=sys.stderr)\n    print('push_failed')\nelif not gh_token:\n    print('write-claim: GH_TOKEN not set -- cannot push directly to github.com', file=sys.stderr)\n    print('push_failed')\nelse:\n    remote = 'https://x-access-token:' + gh_token + '@github.com/' + repo_slug + '.git'\n    result = subprocess.run(['git', '-C', work_dir, 'push', remote, 'HEAD:' + branch], capture_output=True, text=True)\n    if result.returncode == 0:\n        print('write-claim: pushed branch=' + branch + ' to https://github.com/' + repo_slug, file=sys.stderr)\n        print('ok')\n    else:\n        print('write-claim: push failed:', file=sys.stderr)\n        print(result.stderr, file=sys.stderr)\n        print('push_failed')\nPYEOF\n/opt/uv-tools/amplifier/bin/python /tmp/rc_smoke_write_claim.py"
+  ];
+
+  // Early bail if the local write/push itself failed -- no point spending a
+  // real broker session on a claim that was never actually pushed. Mirrors
+  // deliver_pr.dot's Failed node shape/purpose.
+  MarkPushFailed [
+    shape=parallelogram, label="Mark Push Failed",
+    tool_command="printf '{\"smoke.result\": \"failed\", \"rc.verdict\": \"None\", \"rc.status\": \"not_attempted\", \"rc.failure_mode\": \"local_push_failed\"}'",
+    parse_json="true"
+  ];
+
+  // -- Node 2: build the reality-check inputs ---------------------------------
+  //
+  // Writes .resolve/reality_check/artifact.json (software_path -- same
+  // http*/owner-name-shorthand normalisation as reality_check.dot's
+  // BuildArtifact, verbatim logic, just sourced from $REPO instead of
+  // $workspace_repo) and mutates /project/.resolve/config.json's
+  // params.spec (the field build_acceptance_criteria() in
+  // reality_check_invoke.py checks FIRST, per its own documented
+  // precedence) with an acceptance spec that embeds the EXACT content just
+  // written to the claim file -- read back from disk rather than
+  // reconstructed, so the acceptance criteria can never drift from what was
+  // actually written.
+  PrepareRealityCheckInputs [
+    shape=parallelogram, label="Prepare Reality Check Inputs",
+    tool_env="repo",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/reality_check\ncat > /tmp/rc_smoke_prepare_inputs.py <<'PYEOF'\nimport json\nimport os\nimport pathlib\nimport sys\n\nrepo_slug = (os.environ.get('REPO') or '').strip()\nif repo_slug.startswith('http'):\n    software_path = repo_slug\nelse:\n    software_path = 'https://github.com/' + repo_slug\n\nartifact_path = pathlib.Path('.resolve/reality_check/artifact.json')\nartifact_path.parent.mkdir(parents=True, exist_ok=True)\nartifact_path.write_text(json.dumps({'software_path': software_path}))\n\nclaim_path = pathlib.Path('/project/workspace/reality_check_smoke_claim.txt')\nif claim_path.exists():\n    claim_content = claim_path.read_text().strip()\nelse:\n    claim_content = '(missing -- claim file was not found)'\n\nconfig_path = pathlib.Path('/project/.resolve/config.json')\ncfg = json.loads(config_path.read_text()) if config_path.exists() else {}\ncfg.setdefault('params', {})\nspec = (\n    'Clone the repository default branch. Confirm that a file named ' +\n    'reality_check_smoke_claim.txt exists at the repository root, and that ' +\n    'its exact contents (ignoring surrounding whitespace) equal the single ' +\n    'line: ' + repr(claim_content) + '. Pass if and only if the file exists ' +\n    'with exactly that content. Fail otherwise. No deployment or server ' +\n    'startup is required for this check -- it is a pure filesystem check ' +\n    'against the cloned repository.'\n)\ncfg['params']['spec'] = spec\nconfig_path.write_text(json.dumps(cfg, indent=2))\n\nprint('artifact.json software_path=' + software_path, file=sys.stderr)\nprint('rc spec set: ' + spec, file=sys.stderr)\nprint('artifact_ready')\nPYEOF\n/opt/uv-tools/amplifier/bin/python /tmp/rc_smoke_prepare_inputs.py"
+  ];
+
+  // -- Node 3: the real broker call -------------------------------------------
+  //
+  // VERBATIM reuse of reality_check.dot's RealityCheck node (same repo,
+  // amplifier-resolver-dot-graph). This is the one piece of this pipeline
+  // that is NOT reinvented -- it is copied character-for-character from the
+  // proven reference implementation, because it is the ground truth for how
+  // a pipeline node actually invokes the broker: dispatch to
+  // reality_check_invoke.py via the SDK-enabled interpreter at
+  // /opt/uv-tools/amplifier/bin/python (system python3 lacks aiohttp +
+  // amplifier-resolver-sdk). That module reads the artifact.json + spec this
+  // pipeline just wrote, calls Resolver.start_reality_check() +
+  // wait_for_reality_check() from the installed amplifier_resolver_sdk, and
+  // ALWAYS writes .resolve/reality_check/verdict.json (even on SDK/infra
+  // failure -- there is no synthetic fallback, only a failure-shaped real
+  // verdict envelope). Requires AMPLIFIER_RESOLVE_ENABLE_REALITY_CHECK=true
+  // on the resolve backend; requires this pipeline be submitted to the
+  // dot-graph resolver specifically (see reality_check_smoke.md).
+  RealityCheck [
+    shape=parallelogram, label="Reality Check",
+    tool_command="#!/bin/sh\nset -e\n# Live SDK invocation. See handlers/reality_check_invoke.py for the\n# real implementation; this just dispatches to it via the SDK-enabled\n# Python interpreter (system python3 lacks aiohttp + amplifier-resolver-sdk).\n#\n# Requires AMPLIFIER_RESOLVE_ENABLE_REALITY_CHECK=true on the resolve\n# backend. If that flag is unset (or any other infrastructure precondition\n# fails -- SDK missing, broker unreachable, runner image missing, etc.)\n# the invoker exits non-zero and this node fails. NO synthetic fallback.\nmkdir -p .resolve/reality_check\n/opt/uv-tools/amplifier/bin/python -m amplifier_resolver_dot_graph.handlers.reality_check_invoke\nprintf 'reality_check_complete'"
+  ];
+
+  // -- Node 4: render + route on the verdict ----------------------------------
+  //
+  // Reads .resolve/reality_check/verdict.json (defensively -- an empty dict
+  // if the file is somehow absent, e.g. RealityCheck crashed outright rather
+  // than writing a failure verdict) and emits BOTH a human-readable
+  // .reality-check-smoke/verdict.md AND a parsed context update. smoke.result
+  // is the ONE deterministic gate this pipeline cares about: "passed" iff
+  // rc.verdict is exactly "pass", "failed" for every other case (partial,
+  // fail, or no verdict at all). This is the pipeline's actual verification
+  // step -- per the task brief, reality-check's own verdict IS the evidence;
+  // there is no redundant second check layered on top.
+  RenderVerdict [
+    shape=parallelogram, label="Render Verdict",
+    tool_command="#!/bin/sh\nset -e\nmkdir -p .resolve/reality_check\ncat > /tmp/rc_smoke_render_verdict.py <<'PYEOF'\nimport json\nimport pathlib\nimport sys\n\nverdict_path = pathlib.Path('.resolve/reality_check/verdict.json')\nif verdict_path.exists():\n    v = json.loads(verdict_path.read_text())\nelse:\n    v = {}\n\nverdict = v.get('verdict')\nstatus = v.get('status') or 'unknown'\nfailure_mode = v.get('failure_mode')\nsession_id = v.get('session_id') or 'n/a'\nreport_yaml_path = v.get('report_yaml_path') or 'n/a'\nsmoke_result = 'passed' if verdict == 'pass' else 'failed'\n\nnl = chr(10)\nout_dir = pathlib.Path('.reality-check-smoke')\nout_dir.mkdir(parents=True, exist_ok=True)\nlines = [\n    '# Reality-check smoke verdict',\n    '',\n    '- Session: ' + str(session_id),\n    '- Status: ' + str(status),\n    '- Verdict: ' + str(verdict),\n    '- Failure mode: ' + str(failure_mode),\n    '- Report: ' + str(report_yaml_path),\n    '- Smoke result: ' + smoke_result,\n]\n(out_dir / 'verdict.md').write_text(nl.join(lines) + nl)\n\nprint('rendered verdict: smoke_result=' + smoke_result + ' rc_verdict=' + str(verdict), file=sys.stderr)\nprint(json.dumps({\n    'rc.verdict': str(verdict),\n    'rc.status': status,\n    'rc.failure_mode': str(failure_mode),\n    'rc.session_id': session_id,\n    'smoke.result': smoke_result,\n}))\nPYEOF\n/opt/uv-tools/amplifier/bin/python /tmp/rc_smoke_render_verdict.py",
+    parse_json="true"
+  ];
+
+  // Plain narration only -- no goal_gate, nothing downstream depends on this
+  // node's own judgment (Report -> Exit is unconditional). Matches
+  // resolve_hello_world.dot's Report node exactly: routing was already
+  // decided upstream by deterministic context fields (smoke.result etc.),
+  // this node just states it in prose for a human reader.
+  Report [
+    shape=box, fidelity="summary:high",
+    label="Report",
+    prompt="Report the final outcome of this reality-check smoke test plainly, in one short paragraph. If ${smoke.result} is 'passed', state that the trivial claim file (reality_check_smoke_claim.txt) was written, pushed to the target repository, and independently confirmed present with the exact expected content by a live Amplifier Resolve reality-check run (session ${rc.session_id}). If ${smoke.result} is anything other than 'passed', state plainly that the smoke test failed and report why: rc.failure_mode=${rc.failure_mode}, rc.status=${rc.status}, rc.verdict=${rc.verdict}. Do not claim success unless smoke.result is exactly 'passed'. Print the single line: reported"
+  ];
+
+  Start                     -> WriteClaimAndPush;
+  WriteClaimAndPush         -> PrepareRealityCheckInputs [condition="context.tool.last_line=ok", weight="2"];
+  WriteClaimAndPush         -> MarkPushFailed            [condition="context.tool.last_line=push_failed"];
+  WriteClaimAndPush         -> MarkPushFailed            [condition="outcome=fail"];  // safety net: tool_command crashed entirely (RUBRIC.md 3.2)
+  MarkPushFailed            -> Report;
+  PrepareRealityCheckInputs -> RealityCheck;
+  RealityCheck              -> RenderVerdict;
+  RealityCheck              -> RenderVerdict             [condition="outcome=fail"];  // safety net: invoker crashed outright rather than writing a failure verdict; RenderVerdict handles a missing verdict.json gracefully
+  RenderVerdict             -> Report;
+  Report                    -> Exit;
+}
