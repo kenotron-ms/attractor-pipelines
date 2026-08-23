@@ -137,6 +137,11 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
   starts/restarts never stand in for attempt accounting.
 - Launch every lane, integration-correction, and delivery child from one
   immutable `attractor_runner_argv_prefix` with the exact compiled `provider`.
+- Launch the parent Attractor CLI only after the launching process has changed
+  its OS CWD to the canonical `target_repo`; require the parent process CWD,
+  literal `--cwd .` resolution, invoked parent DOT realpath, DOT bytes/hash,
+  compiled provider, and runner prefix to remain bound to that repository and
+  `execution_source_sha`.
 - Execute every supervisor start and control operation from one separately
   immutable `supervisor_runner_argv_prefix`; no supervisor operation uses PATH,
   a shell command string, or an unbound interpreter/script.
@@ -169,6 +174,9 @@ delivery runs. This is parent/child Attractor composition, not nested app-cli
 - Record every post-approval lane, integration, candidate-verification, and
   delivery worktree in `run-owned-worktrees.json`; reject foreign paths and
   clean up only exact recorded run-owned worktrees.
+- Route every intended terminal state through `PreTerminalCleanup`, let that
+  phase choose the final status from real process/worktree state, and only then
+  publish durable terminal result/status/token/carrier evidence.
 - End in one of four explicit terminal states:
   `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or `ABORTED`.
 
@@ -274,11 +282,13 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `aggregate_verifier` | Aggregate-verifier contract defined below. |
 | `attractor_runner_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/path/to/attractor"]` or `["/absolute/path/to/python", "-m", "amplifier_module_pipeline_runner.cli"]`. PATH lookup, `/usr/bin/env`, relative executables, wrapper shell strings, and extra prefix tokens are forbidden. |
 | `attractor_runner_identity` | Object binding the prefix's canonical JSON SHA-256, executable realpath/hash, exact module name, module-source realpath/hash, expected `doctor` contract, and required `run` flags. |
+| `parent_runner_invocation` | Object with exact schema `goal-plan.parent-runner-invocation-definition/v1` binding the parent to the same runner prefix/identity and compiled `provider`; symbolic `os_cwd_policy: "target_repo"`; literal `runner_cwd_arg: "."`; exact parent DOT path `pipelines/PLAN_SLUG/PLAN_SLUG.dot`; `parent_dot_hash_policy: "execution_source_blob_and_compiled_manifest"`; exact parent logs-root policy `state_root/parent-attractor-run`; canonical Linux process-identity policy; immutable evidence schema `goal-plan.parent-runner-invocation/v1`; and `definition_sha256`. It embeds no parent-DOT digest, avoiding a `plan_sha256`/parent-DOT hash cycle; admission derives the expected digest from `execution_source_sha` and the compiled-source manifest. |
 | `supervisor_runner_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/path/to/supervisor-executable"]` or `["/absolute/path/to/python", "/absolute/path/resolved/from/pipelines/PLAN_SLUG/python/goal_plan_supervisor.py"]`. PATH lookup, `/usr/bin/env`, relative executables/scripts, `-m`, shell strings, wrappers with unbound targets, and extra prefix tokens are forbidden. |
 | `supervisor_runner_identity` | Object binding canonical prefix SHA-256; executable/interpreter realpath and byte hash; repository-relative supervisor script path plus exact execution-source blob hash and resolved absolute path/hash for the Python form; the closed environment-key/value-hash schema; exact CLI version; supported process-supervision, intent, ledger, ack, result, poll, termination, reconciliation, and self-check schema versions; and the exact `self-check`, `run`, `poll`, `terminate`, and `reconcile` suffix schemas. |
 | `provider` | Non-empty compiled provider ID. Every parent-spawned lane, correction, and delivery runner argv contains exact `--provider <provider>`; the value is immutable across restart/resume. |
 | `integration_correction_child` | Immutable child-pipeline path/hash, exact prefix/provider/argv contract, `integration_worktree` CWD policy, positive `max_child_seconds`, result schema, and process-supervision contract for bounded integration correction. |
 | `delivery_child` | Required only for `delivery_mode: "pr"`; immutable adapted `deliver_pr.dot` path/hash, exact prefix/provider/argv contract, `delivery_worktree` CWD policy, positive `max_child_seconds`, external-state policy, delivery-result schema, and process-supervision contract. Forbidden for `delivery_mode: "none"`. |
+| `pre_terminal_cleanup` | Object binding the checked-in `goal_plan_runtime.py` path/hash, admitted absolute interpreter identity, exact `pre-terminal-cleanup` argv schemas, bounded identity-safe process-reconciliation policy, run-owned-worktree lifecycle rules including `PRESERVED_RESIDUAL`, evidence schema `goal-plan.pre-terminal-cleanup/v1`, final-status/token mapping, and `definition_sha256`. |
 | `engine_step_budget` | Object with exact positive integers `poll_wait_seconds: 30` and `engine_step_multiplier: 50`; compiled parent node/step totals; and, for every lane, correction, and delivery branch, `branch_nonpoll_steps`, `branch_node_count`, and `max_poll_cycles`. |
 | `global_budgets` | Object with positive integer `max_total_attempts` for verification-bearing adaptive attempts only, positive integer `max_process_launches` for supervisor starts/restarts, positive integer `max_integration_corrections` for supervised correction-child launches, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v2`, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, correction-reservation state contract, and budget-ledger implementation hash. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
@@ -353,6 +363,60 @@ Admission then proves:
 The committed plan/blob/base relationship is the identity proof for a
 local-only repository. The design does not claim that Git supplies a globally
 unique repository identifier.
+
+#### Parent runner target-repository binding
+
+The parent invocation is repository-bound before the parent CLI starts. The
+launcher canonicalizes the requested `target_repo`, requires it to be the
+target Git top-level, changes its own OS CWD to that realpath, and only then
+`execve`s the exact immutable `attractor_runner_argv_prefix` plus the closed
+parent argv. The resulting parent Attractor process therefore starts with:
+
+```text
+realpath(/proc/self/cwd) == canonical_target_repo
+realpath(resolve_runner_cwd("--cwd", ".")) == canonical_target_repo
+realpath(resolve_dot_operand("pipelines/PLAN_SLUG/PLAN_SLUG.dot"))
+  == canonical_target_repo/pipelines/PLAN_SLUG/PLAN_SLUG.dot
+```
+
+The first admission node re-observes all three equalities before any repository,
+Git-common-directory, ref, branch, worktree, `worktree_root`, or
+`delivery_state_root` mutation. It hashes the invoked parent DOT's exact bytes,
+requires those bytes to equal
+`execution_source_sha:pipelines/PLAN_SLUG/PLAN_SLUG.dot`, and requires the same
+path/mode/length/SHA-256 tuple in
+`compiled-source-manifest.json`. A symlink alias, different current directory,
+different runner `--cwd` resolution, alternate DOT copy, wrong path spelling,
+or byte/hash mismatch is `INFRA_FAILURE`. That parent process may write the
+failure evidence only below external `state_root`; it performs no repository or
+worktree mutation.
+
+Every initial start and resume writes a new immutable, atomically-created
+`state_root/admission/parent-runner-invocations/NNNN.json` record with schema
+`goal-plan.parent-runner-invocation/v1`. The record contains:
+
+- the exact parent `attractor_runner_argv_prefix`, prefix hash, runner
+  executable/module/source identity, and compiled provider;
+- the complete parent argv and its canonical hash;
+- literal parent `--cwd .`, its runner-resolved realpath, and the observed OS
+  CWD from `/proc/self/cwd`;
+- canonical `target_repo`;
+- repository-relative and absolute parent DOT paths, exact observed DOT
+  SHA-256, execution-source blob SHA-256, and compiled-manifest entry/hash;
+- exact `execution_source_sha`;
+- exact absolute parent `--logs-root`, which must equal
+  `state_root/parent-attractor-run`;
+- the canonical Linux parent process identity, including boot ID, PID,
+  starttime ticks, executable realpath, cmdline hash, PGID, and process CWD; and
+- invocation ordinal, prior-invocation record hash on resume, creation
+  boottime, and the record's canonical SHA-256.
+
+The record is append-only and never rewritten. A resume may have a new parent
+process identity and ordinal, but every static binding, CWD equality, DOT
+path/hash, logs root, provider, prefix, target repository, and
+`execution_source_sha` must match the compiled plan and durable run state before
+reconciliation can mutate anything. A mismatch is terminal infrastructure
+failure for that invocation and authorizes no repository mutation.
 
 Each `lanes` entry contains:
 
@@ -476,6 +540,10 @@ fall back to writing generated state beside `goal_lane.dot`.
   Linux process-supervision policy;
 - exact `attractor_runner_argv_prefix` hash/module/source identity and compiled
   `provider`;
+- the parent-runner invocation definition hash, symbolic target-repository CWD
+  policy, literal `--cwd .`, exact parent DOT path and
+  execution-source/compiled-manifest hash policy, parent logs-root policy, and
+  parent invocation evidence schema;
 - exact `supervisor_runner_argv_prefix` hash, executable/interpreter/script
   identity, CLI/schema versions, environment schema, self-check contract, and
   every closed subcommand suffix;
@@ -498,27 +566,36 @@ every runtime/evidence artifact binds the resolved SHA without self-reference.
 
 Admission runs before approval and before any mutation. It deterministically:
 
-1. locates the adjacent `plan.json`;
-2. recomputes its SHA-256 and requires equality with embedded
+1. binds `canonical_target_repo`, then requires the already-started parent
+   process's `/proc/self/cwd` realpath and the runner's literal `--cwd .`
+   resolution to equal it; requires the invoked DOT realpath to equal
+   `<canonical_target_repo>/pipelines/PLAN_SLUG/PLAN_SLUG.dot`; and binds exact
+   parent prefix/identity, provider, argv, process identity, and logs root;
+2. locates the adjacent `plan.json`;
+3. recomputes its SHA-256 and requires equality with embedded
    `plan_sha256`;
-3. schema-validates `plan.json`;
-4. proves the selected target-repository identity mode; and
-5. resolves `execution_source_sha` to the exact commit containing the invoked
+4. schema-validates `plan.json`;
+5. proves the selected target-repository identity mode; and
+6. resolves `execution_source_sha` to the exact commit containing the invoked
    byte-clean parent DOT and adjacent `plan.json`, and proves that commit also
    contains the complete compiled pipeline directory;
-6. parses the static DOT to require exact correspondence for lane IDs, waves,
+7. hashes the invoked parent DOT bytes; requires equality with the exact
+   execution-source blob; constructs the canonical compiled-source manifest;
+   and requires its parent-DOT path/mode/length/hash entry to equal that same
+   observation;
+8. parses the static DOT to require exact correspondence for lane IDs, waves,
    dependency edges, integration order, budget values, aggregate-verifier hash,
    both source-SHA contracts, child launch/monitor nodes, exact child argv/param
    ordering, child DOT/command/supervision hashes, exact child-runner and
    supervisor-runner prefixes/identities, provider bindings, engine-step values,
    verifier-envelope hash and policies, correction-round expansion, approval
    mode/transport requirements, delivery mode, and delivery-state policy;
-7. validates the child runner without PATH lookup: exact prefix form and canonical
+9. validates the child runner without PATH lookup: exact prefix form and canonical
    prefix hash, executable realpath/hash, module name and source
    realpath/hash, successful `<prefix> doctor`, required `run --help` flags
    (`--provider`, `--cwd`, `--logs-root`, `--on-human-gate`, and `--param`),
    support for the compiled provider, and its required credential;
-8. validates `supervisor_runner_argv_prefix` without PATH lookup: permitted
+10. validates `supervisor_runner_argv_prefix` without PATH lookup: permitted
    prefix form and canonical prefix hash; executable or interpreter realpath and
    byte hash; for the Python form, exact repository-relative script path,
    execution-source blob hash, resolved absolute script path, and byte hash;
@@ -526,8 +603,10 @@ Admission runs before approval and before any mutation. It deterministically:
    `<supervisor-prefix> self-check --format json`. The self-check must report the
    exact compiled CLI version, all required supported schema versions, and exact
    availability/signatures for `run`, `poll`, `terminate`, and `reconcile`; and
-9. records the complete compiled-directory byte manifest and its canonical hash
-   under `state_root/admission/`.
+11. atomically records the complete compiled-directory byte manifest and its
+   canonical hash under `state_root/admission/`, then atomically writes the
+   immutable parent-runner invocation record that references that durable
+   manifest entry/hash.
 
 For the Python-module prefix, the absolute interpreter runs a deterministic
 `importlib.util.find_spec("amplifier_module_pipeline_runner.cli")` probe and the
@@ -546,9 +625,12 @@ launches no child, and emits one canonical JSON object on stdout. Any prefix,
 identity, script, environment-schema, CLI-version, supported-schema, or
 subcommand-signature mismatch fails admission before approval or mutation.
 
-A missing file, hash mismatch, schema failure, or graph/plan mismatch aborts
-admission loudly. Admission reads `plan.json` only to audit the already-static
-program; it never dispatches work from the JSON.
+A parent CWD/`--cwd`/DOT-realpath mismatch, parent DOT byte/hash mismatch,
+unbound parent prefix/provider/process/logs-root value, missing file, schema
+failure, or graph/plan mismatch aborts admission as `INFRA_FAILURE`. The failing
+parent invocation writes only immutable external evidence and performs no
+repository mutation. Admission reads `plan.json` only to audit the
+already-static program; it never dispatches work from the JSON.
 
 #### Runtime invocation interface
 
@@ -556,8 +638,8 @@ Each compiled family member accepts only these runtime inputs:
 
 | Input | Type and rule |
 |---|---|
-| `target_repo` | Required absolute path to the Git working repository. Admission must prove its `remote` or `history_anchor` identity policy from `plan.json.target_repo`. |
-| `execution_source_sha` | Required full Git commit SHA. It must be the containing commit of the exact invoked parent DOT and adjacent `plan.json`, contain every immutable compiled source file, descend from `product_base_sha`, and satisfy the complete byte-manifest gate. |
+| `target_repo` | Required absolute path to the Git working repository. Before the parent CLI starts, the launcher must change OS CWD to its canonical realpath. Admission must prove that same realpath is the Git top-level, equals `/proc/self/cwd`, equals the runner's literal `--cwd .` resolution, and satisfies the `remote` or `history_anchor` identity policy from `plan.json.target_repo`. |
+| `execution_source_sha` | Required full Git commit SHA. It must be the containing commit of the exact invoked parent DOT and adjacent `plan.json`, contain every immutable compiled source file, descend from `product_base_sha`, and satisfy the complete byte-manifest gate. The invoked DOT realpath and observed bytes/hash must equal the exact parent-DOT path/blob and compiled-manifest entry for this commit. |
 | `run_id` | Required slug unique within the plan's run directory. |
 | `state_root` | Effective value is a required absolute external path. The caller may omit it only to derive the canonical external user-state default defined below; it is never inside the target repository. |
 | `worktree_root` | Required absolute external path dedicated to this run's lane, integration, candidate-verification, and delivery worktrees. It is separate from `state_root`. |
@@ -567,11 +649,13 @@ Each compiled family member accepts only these runtime inputs:
 | `delivery_mode` | Required enum `none` or `pr`; must equal the compiled plan value. |
 | `github_repo` | `owner/repo` string required only when `delivery_mode` is `pr`; forbidden otherwise. |
 
-The canonical unattended smoke uses the absolute-console prefix form and this
-closed parent argv shape (paths and SHAs shown symbolically):
+The canonical unattended smoke uses the absolute-console prefix form. Its
+launcher first canonicalizes `target_repo`, changes CWD before `exec`, and then
+uses this closed parent argv shape (paths and SHAs shown symbolically):
 
 ```text
-/absolute/path/to/attractor
+cd -- <canonical-absolute-target-repo>
+exec /absolute/path/to/attractor
 run
 pipelines/goal_plan_smoke/goal_plan_smoke.dot
 --provider
@@ -582,7 +666,7 @@ anthropic
 <absolute-state-root>/parent-attractor-run
 --on-human-gate
 fail
---param target_repo=<absolute-target-repo>
+--param target_repo=<canonical-absolute-target-repo>
 --param execution_source_sha=<full-containing-sha>
 --param run_id=<run-id>
 --param state_root=<absolute-state-root>
@@ -594,10 +678,21 @@ fail
 --param github_repo=<owner/repo>
 ```
 
-The equally valid Python-module form replaces only the first token with
-`/absolute/path/to/python -m amplifier_module_pipeline_runner.cli`; all remaining
-tokens and their order are unchanged. An interactive required-approval
-invocation changes exactly
+`cd`/`exec` above describes the required pre-start sequence; the parent process
+argv begins with `/absolute/path/to/attractor`, contains no shell token, and its
+observed `/proc/self/cwd` is already the canonical target repository. The
+launcher must reject a `target_repo` whose canonical realpath differs from the
+directory it changed into. Admission then requires the literal `--cwd .` to
+resolve to that same realpath, requires the DOT operand to resolve to exact
+`<target_repo>/pipelines/goal_plan_smoke/goal_plan_smoke.dot`, and binds the
+observed DOT hash to both `execution_source_sha` and the compiled-source
+manifest before mutation.
+
+The equally valid Python-module form retains the same `cd`/`exec` sequence and
+replaces the console executable prefix after `exec` with
+`/absolute/path/to/python -m amplifier_module_pipeline_runner.cli`; all
+remaining parent argv tokens and their order are unchanged. An interactive
+required-approval invocation changes exactly
 `--on-human-gate fail` to `--on-human-gate console`,
 `approval_mode=preapproved` to `approval_mode=required`, and
 `human_gate_transport=none` to `human_gate_transport=console`. Admission also
@@ -606,6 +701,14 @@ and that `/dev/tty` is openable for both input and output. Hosted or unattended
 headless execution cannot use `approval_mode=required`. The compiled provider is
 not a runtime override: any other `--provider`, omitted explicit provider, or
 provider change on resume fails admission.
+
+The parent `--logs-root` is not a caller-selected alternate location. It must
+realpath to exact `state_root/parent-attractor-run`. Before approval or
+preapproval can advance, the parent persists the immutable invocation record
+containing prefix/provider/cwd/DOT/hash, OS CWD, target repository,
+`execution_source_sha`, process identity, and logs root. A missing or
+inconsistent record is `INFRA_FAILURE` and the parent performs no repository
+mutation.
 
 If `state_root` is omitted, preflight derives:
 
@@ -648,11 +751,12 @@ common directory, compiled-source directory, any registered Git worktree, or
    canonical path, expected branch name or null, detached boolean, expected full
    HEAD SHA, target Git common directory, worktree-creation
    argv/exit/stdout/stderr evidence, creation boottime, and lifecycle state
-   (`CREATING`, `ACTIVE`, `REMOVING`, or `REMOVED`). `CREATING` is durable before
-   `git worktree add`; `ACTIVE` is written only after exact path, registration,
-   common directory, HEAD SHA, and branch/detached state are independently
-   proved. Any intentional branch advance atomically updates expected HEAD with
-   the command and old/new SHA evidence before later use.
+   (`CREATING`, `ACTIVE`, `REMOVING`, `REMOVED`, or
+   `PRESERVED_RESIDUAL`). `CREATING` is durable before `git worktree add`;
+   `ACTIVE` is written only after exact path, registration, common directory,
+   HEAD SHA, and branch/detached state are independently proved. Any intentional
+   branch advance atomically updates expected HEAD with the command and old/new
+   SHA evidence before later use.
 3. At every post-approval gate, any unrecorded filesystem entry or foreign Git
    worktree beneath `worktree_root`, or any non-`REMOVED` recorded run-owned
    worktree outside `worktree_root`, is `INFRA_FAILURE`. Ordinary parent
@@ -661,6 +765,16 @@ common directory, compiled-source directory, any registered Git worktree, or
    exactly one such recorded worktree. The canonical flat names are
    `lane-LANE_ID`, `integration`, `candidate-LANE_ID-SHA-ATTEMPT`, and
    `delivery-ATTEMPT`.
+
+The lifecycle enum is exactly `CREATING`, `ACTIVE`, `REMOVING`, `REMOVED`, or
+`PRESERVED_RESIDUAL`. `PRESERVED_RESIDUAL` is legal only during
+`PreTerminalCleanup` for intended `RESIDUALS_READY`, only for an exact worktree
+named in the durable residual-preservation manifest, and only after proving its
+path, Git registration/common directory, branch/detached state, expected HEAD,
+current dirtiness, residual ID, evidence paths, and identity-safe recovery
+commands. It is intentional terminal custody, not an incomplete cleanup. No
+lane, candidate, delivery, or integration worktree may enter that state merely
+because removal is difficult or the path is dirty.
 
 The post-approval exception is therefore a closed allowlist for this run's
 worktrees, not a relaxation for arbitrary descendants. Root safety never
@@ -674,10 +788,17 @@ the expected common directory, HEAD, and branch/detached state before marking
 `ACTIVE`. A `REMOVING` entry may become `REMOVED` only after path and
 registration are both absent; otherwise recovery retries non-force removal only
 for that exact clean recorded worktree. Partial, conflicting, dirty, or foreign
-state is `INFRA_FAILURE`.
+state is `INFRA_FAILURE`. A `PRESERVED_RESIDUAL` entry is accepted only for a
+durably finalized `RESIDUALS_READY` run or an in-progress
+`PreTerminalCleanup` whose residual manifest names that exact entry. Recovery
+revalidates it without changing or removing it unless an operator later runs
+the recorded recovery command as a separate, explicit action.
 
 Preflight rejects non-Linux hosts, missing or unreadable required procfs
-identity files, relative or unsafe roots, mode/approval-transport mismatches,
+identity files, a parent OS CWD/runner `--cwd .`/canonical `target_repo`
+mismatch, a parent DOT realpath/blob/manifest mismatch, incomplete parent
+invocation evidence, relative or unsafe roots, mode/approval-transport
+mismatches,
 `required` approval without attached standalone console/TTY evidence,
 `required` approval in unattended or hosted headless execution, failed
 remote/history-anchor identity proofs, reused `run_id` with incompatible state,
@@ -728,7 +849,7 @@ The runtime graph is responsible for:
 - parent-side evidence checks;
 - sequential integration and rollback of failed candidates;
 - aggregate and coherence gates;
-- terminal classification;
+- intended terminal classification and final cleanup-chosen status;
 - recovery; and
 - optional PR delivery.
 
@@ -754,6 +875,23 @@ compiled-directory byte. Its
 The manifest itself lives under `state_root`, so it does not create a
 self-hashing source cycle.
 
+The parent also runs a deterministic `ParentRunnerBindingGate`. It validates
+the current `/proc/self/cwd`, runner-resolved literal `--cwd .`, canonical
+`target_repo`, exact invoked parent-DOT realpath, observed DOT SHA-256,
+execution-source blob SHA-256, compiled-manifest entry/hash, parent
+prefix/provider/argv, process identity, and parent logs root against the
+immutable invocation record. It runs during admission, before the first
+repository mutation, on every resume before reconciliation may mutate, before
+every dependency-wave/correction/delivery mutation phase, and immediately
+before `PreTerminalCleanup`. Every parent-executed `CompiledSourceGate` first
+requires this binding gate to pass.
+
+A parent-binding mismatch is `INFRA_FAILURE` and disables repository mutation
+for that parent invocation. The parent may atomically close external evidence
+and identity-safely reconcile or stop a child only when the full recorded
+process identity remains valid; it may not alter Git refs, registrations, or
+worktree paths from the mismatched invocation.
+
 The deterministic `CompiledSourceGate` compares both the complete path set and
 every entry's mode, length, and bytes against the admission manifest. It emits
 only `COMPILED_SOURCE:PASS` or `COMPILED_SOURCE:INFRA`. The gate runs:
@@ -764,9 +902,11 @@ only `COMPILED_SOURCE:PASS` or `COMPILED_SOURCE:INFRA`. The gate runs:
 4. against the integration worktree before and after every post-merge aggregate
    envelope, and after every `IntegrationCorrection`;
 5. against every clean disposable delivery worktree before and after its child;
-6. against all existing run worktrees during restart reconciliation; and
-7. against the integration worktree immediately before finalization or
-   delivery eligibility.
+6. against all existing run worktrees during restart reconciliation;
+7. against the integration worktree immediately before delivery eligibility;
+   and
+8. immediately before `PreTerminalCleanup`, together with a fresh
+   `ParentRunnerBindingGate`.
 
 Any missing, added, mode-changed, or byte-changed compiled-source entry is
 `INFRA_FAILURE`. It never enters a lane, integration-correction, or verifier
@@ -777,15 +917,21 @@ retry loop. Composition additionally rejects any lane `owned_paths` or
 
 ```text
 Start
-  -> Reconcile durable state
   -> Bind typed runtime inputs
+  -> Require launcher-started OS CWD realpath == canonical target_repo
+  -> ParentRunnerBindingGate:
+       /proc/self/cwd == runner --cwd . == canonical target_repo
+       invoked DOT == target_repo/pipelines/PLAN_SLUG/PLAN_SLUG.dot
+       observed DOT hash == execution_source blob == compiled-manifest entry
   -> Resolve and validate external state_root + worktree_root
      + conditional delivery_state_root
   -> Admission: validate plan/graph/repo + bind product_base_sha/execution_source_sha
+  -> Persist immutable parent argv/prefix/provider/cwd/DOT/hash/process/logs evidence
   -> Validate child runner prefix/module/source/doctor/flags + compiled provider credentials
   -> Validate supervisor prefix/executable/interpreter/script/self-check/subcommands
   -> Validate poll/branch/parent engine-step arithmetic
   -> Persist manifest/render/admission evidence under external state_root only
+  -> Reconcile durable state only after current parent invocation is fully bound
   -> Plan approval through attached standalone console (or verify explicit preapproval)
   -> Create worktree_root; mint flock-protected run-wide budget/deadline ledger
   -> Prepare integration + Wave 1 worktrees from execution_source_sha
@@ -835,23 +981,32 @@ Start
             -> red: IntegrationCorrection within integration budget
             -> all green: VerifierExecutionEnvelope(final_aggregate_after_sweep)
                at frozen HEAD
-  -> CompiledSourceGate before finalization/delivery
-  -> Classify convergence result
+  -> CompiledSourceGate before delivery/intended-status classification
+  -> Classify intended convergence result
        -> fresh coherence + final sweep + final-aggregate-after-sweep all green
           at exact final HEAD
-            -> delivery disabled -> COMPLETE
+            -> delivery disabled -> intended COMPLETE
             -> delivery enabled -> clean disposable final-HEAD delivery worktree
                  -> pre-HEAD/status/full-filesystem/source gates
                  -> reserve process launch -> supervised adapted deliver_pr.dot child
                     with all generated state under delivery_state_root
                  -> post-HEAD/status/full-filesystem/source gates
-                 -> exact-head PR verification -> COMPLETE
-                 -> unverifiable delivery -> INFRA_FAILURE
+                 -> exact-head PR verification -> intended COMPLETE
+                 -> unverifiable delivery -> intended INFRA_FAILURE
        -> residuals -> residual disposition gate
-            -> preserve evidence-backed residuals -> RESIDUALS_READY
-            -> operator stops -> ABORTED
-       -> untrustworthy substrate -> INFRA_FAILURE
-       -> rejected/cancelled plan -> ABORTED
+            -> name exact preserved residual worktrees -> intended RESIDUALS_READY
+       -> untrustworthy substrate -> intended INFRA_FAILURE
+       -> rejected/cancelled before mutation -> intended ABORTED
+  -> ParentRunnerBindingGate + CompiledSourceGate before terminal cleanup
+  -> PreTerminalCleanup(intended status)
+       -> reconcile/stop identity-valid child supervisors and process groups
+       -> remove or explicitly preserve exact run-owned worktrees by status
+       -> verify registry/filesystem/worktree-list mapping and foreign-path absence
+       -> choose final status; cleanup fault downgrades non-INFRA intent to INFRA_FAILURE
+  -> DurableTerminalFinalizer(final status)
+       -> atomically write result.json and goal_plan.status
+       -> emit exactly one terminal token
+  -> explicit terminal carrier publishes matching CLI outcome
 ```
 
 Each dependency wave is drawn explicitly. `shape=component` and
@@ -1595,6 +1750,7 @@ evidence, and exact candidate disposition. It is a parent routing hint only.
 
 | Responsibility | Owner | Reason |
 |---|---|---|
+| Parent pre-start CWD, runner `--cwd .`, target-repository, parent-DOT path/hash, argv/provider/process/logs binding | Deterministic launcher plus `ParentRunnerBindingGate` | The parent must execute the reviewed graph in the repository named by the plan; an alternate CWD or DOT copy cannot be repaired by model work. |
 | Plan-schema validation, dependency-cycle checks, ownership-collision checks, source-SHA/compiled-manifest admission | Deterministic nodes | These are exact predicates. |
 | Lane, candidate-verification, and integration worktree creation, cleanliness, cleanup, branch/source inspection | Deterministic nodes | Git state is observable and must be reproducible. |
 | Child process launch, identity ledger, logs, timeout, TERM/grace/KILL, exit capture, and restart reconciliation | Deterministic supervisor and parent nodes | Process control is exact infrastructure state; artifacts cannot substitute for the real exit status. |
@@ -1606,6 +1762,7 @@ evidence, and exact candidate disposition. It is a parent routing hint only.
 | Optional qualitative lane critique | Independent LLM gate plus deterministic artifact classifier | Some acceptance criteria cannot be reduced to a command; the reviewer must be outside the worker context, and its versioned artifact must be schema-valid and tied to the exact commit. |
 | Ownership diff, commit existence, ancestry, clean-state checks | Deterministic nodes | A worker cannot attest its own git side effects. |
 | Merge/cherry-pick, rollback of a failed candidate, merge journal | Deterministic nodes | Integration is state mutation with exact success criteria. |
+| Pre-terminal process reconciliation, run-owned worktree removal/preservation, foreign-path proof, and final-status choice | Deterministic `PreTerminalCleanup` | Cleanup can invalidate intended success, so it must finish before any durable terminal publication. |
 | Cross-lane coherence review | Fresh independent LLM gate plus the same deterministic artifact classifier | Semantic conflicts can survive lane-local mechanical checks. The shared review interface ties the verdict to final HEAD and routes correction to named lane IDs. |
 | PR existence and exact-head verification | Deterministic remote query | `OpenPR` cannot certify its own external side effect. |
 
@@ -2314,14 +2471,24 @@ The second possible gate appears only after bounded convergence cannot reach
 
 The operator decides the disposition of that evidence-backed partial result.
 The gate cannot relabel residual work as `COMPLETE`. No partial work is
-automatically delivered.
+automatically delivered. If any worktree must remain for residual inspection,
+the gate must name its exact run-owned registry entry, residual ID, reason,
+evidence paths, expected current identity, and identity-safe recovery/removal
+commands in the residual-preservation manifest. `PreTerminalCleanup` preserves
+only those named entries as `PRESERVED_RESIDUAL` and cleans every other
+run-owned worktree. Selecting no preserved worktrees is valid and still yields
+`RESIDUALS_READY` after all entries are removed. An operator stop after
+repository mutation remains an evidence-backed residual disposition; `ABORTED`
+is reserved for rejection or cancellation before mutation.
 
 There are no routine gates between waves.
 
 ## Durable State and Crash Recovery
 
 Recovery is a graph pattern, not an assumption about engine checkpoints. Every
-run begins with deterministic reconciliation.
+initial start and resume first satisfies the parent target-repository binding,
+persists its immutable invocation record, and only then begins deterministic
+reconciliation.
 
 ### Durable state
 
@@ -2330,6 +2497,10 @@ The run persists:
 - approved plan snapshot/hash and preapproval/approval evidence;
 - compiled-pipeline path, embedded `plan_sha256`, typed runtime inputs,
   immutable `attractor_runner_argv_prefix`/identity/hash,
+  append-only parent-runner invocation records with exact argv/prefix/provider,
+  `/proc/self/cwd`, runner-resolved `--cwd .`, canonical `target_repo`, parent
+  DOT path/observed/execution-source/manifest hashes, parent process identity,
+  `execution_source_sha`, and exact parent logs root,
   `supervisor_runner_argv_prefix`/identity/hash/CLI/schema/self-check evidence,
   compiled `provider`, provider credential preflight, doctor/flag evidence, and engine-step budget,
   selected target-repository identity mode and its remote-match or
@@ -2380,6 +2551,10 @@ The run persists:
 - final-sweep lane-verifier records bound to final integration HEAD;
 - `final-aggregate-after-sweep` record bound to that same final HEAD;
 - terminal classification;
+- `PreTerminalCleanup` intent, invocation, bounded process reconciliation,
+  residual-preservation manifest, cleanup journal, final registry/filesystem/Git
+  worktree-list projection, unresolved infrastructure resources, chosen final
+  status, and evidence hash;
 - versioned `result.json`; and
 - the versioned delivery-attempt ledger, external `delivery_state_root`,
   disposable delivery-worktree lifecycle and pre/post envelope, supervised
@@ -2392,6 +2567,13 @@ state; they are not the source of truth.
 ### Reconciliation rules
 
 On restart, the graph compares state with reality:
+
+Before rule 1, the launcher changes into the durable canonical `target_repo`
+before `exec`; the new parent invocation must pass
+`ParentRunnerBindingGate`, append a hash-chained invocation record, and match
+the original prefix/provider/CWD/DOT/hash/logs/source bindings. Until that
+passes, recovery may write only below external `state_root` and may perform no
+Git/ref/worktree mutation.
 
 1. Re-resolve `state_root`, `worktree_root`, and conditional
    `delivery_state_root`, reject symlink drift, and require equality with the
@@ -2508,6 +2690,19 @@ On restart, the graph compares state with reality:
 27. Reconcile the external delivery ledger, then independently query remote PR
     state at its exact expected head if delivery may already have occurred;
     never open a duplicate merely because local state is incomplete.
+28. If a durable intended-status or partial `PreTerminalCleanup` journal exists
+    but no valid `result.json` exists, resume only
+    `PreTerminalCleanup`: revalidate the current parent binding, process
+    identities, registry, residual manifest, filesystem, and Git worktree list;
+    idempotently finish exact lifecycle transitions; choose the final status;
+    and only then run the finalizer. Do not re-enter product work or delivery.
+29. If valid durable terminal `result.json`, `goal_plan.status`, and terminal
+    token evidence exist, verify they match the cleanup record's chosen status
+    and perform no post-terminal cleanup or repository mutation. If matching
+    CLI carrier evidence is absent, resume only the idempotent carrier outcome
+    from that final status; do not rewrite result/status/token or rerun cleanup.
+    A mismatch is an externally reported infrastructure inconsistency, never a
+    reason to rewrite a prior `COMPLETE` in place.
 
 Reconciliation is idempotent. It skips work only when durable evidence and real
 state agree. Ambiguous or contradictory infrastructure state fails loudly as
@@ -2517,15 +2712,94 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Both source SHAs, immutable child-runner and supervisor-runner prefixes/identities, provider, and exact run-owned worktree mapping remain bound; the compiled-source manifest passes immediately before finalization; all work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; fresh coherence, every final-sweep lane, and `final-aggregate-after-sweep` all pass with non-discarded evidence bound to the exact same final integration HEAD; and, when delivery is enabled, a clean supervised delivery child preserves that HEAD and the parent independently confirms the PR at it. | May auto-deliver one PR. |
-| `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, pre-coherence/coherence/final-sweep/final-aggregate-after-sweep criteria remain unsatisfied, or the global deadline prevented delivery after product proof passed. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | External-root/approval boundary, run-owned worktree registry, process-launch/correction-round/adaptive-attempt accounting, child-runner/supervisor-runner/provider identity, source/compiled identity, Git/worktree state, verifier integrity, candidate/delivery lifecycle, missing/invalid supervisor result, supervisor/orphan/procfs identity, verifier substrate, credentials, remote API, or recovery state cannot be trusted. | No delivery. |
-| `ABORTED` | The plan was rejected/cancelled before mutation, or the operator explicitly stopped the run at an allowed gate. | No delivery. |
+| `COMPLETE` | Both source SHAs, the immutable parent/child/supervisor runner bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and `PreTerminalCleanup` proves no live supervisor/child process group, no foreign path, and every run-owned lane/candidate/delivery/integration worktree and Git registration is `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
+| `RESIDUALS_READY` | All lanes are terminal or dependency-blocked and every residual has evidence. `PreTerminalCleanup` proves no live process group, marks only explicitly named residual worktrees `PRESERVED_RESIDUAL` with evidence/recovery commands, removes every other run-owned worktree/registration, and finds no unidentified or foreign path. | Never auto-delivers; requires residual disposition. |
+| `INFRA_FAILURE` | Any external-root/approval boundary, parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. `PreTerminalCleanup` has completed its bounded identity-safe best effort and names every unresolved resource. | No delivery. |
+| `ABORTED` | The plan was rejected or cancelled before mutation, and `PreTerminalCleanup` proves no run-owned process, worktree, Git registration, `worktree_root`, or `delivery_state_root` mutation exists. | No delivery. |
 
-### Finalizer machine contract
+### `PreTerminalCleanup` and durable finalizer machine contract
 
-Every terminal route passes through one deterministic finalizer. It atomically
-writes the run root's versioned `result.json` with, at minimum:
+Every intended terminal route first enters the explicit deterministic
+`PreTerminalCleanup` phase. The phase runs after the final
+`ParentRunnerBindingGate` and `CompiledSourceGate`, before durable terminal
+finalization, and before any terminal token, `goal_plan.status`,
+`result.json`, or CLI carrier outcome is published.
+Both gates must pass for intended `COMPLETE`, `RESIDUALS_READY`, or `ABORTED`.
+A red gate routes intended `INFRA_FAILURE` into the restricted bounded cleanup
+path with the red evidence; it does not authorize Git/worktree mutation.
+
+The DOT invokes the admitted checked-in runtime with this exact ordered command:
+
+```text
+<admitted-absolute-python>
+<canonical-target-repo>/pipelines/PLAN_SLUG/python/goal_plan_runtime.py
+pre-terminal-cleanup
+--target-repo <canonical-target-repo>
+--execution-source-sha <full-execution-source-sha>
+--state-root <absolute-state-root>
+--worktree-root <absolute-worktree-root>
+--run-owned-worktrees <absolute-state-root/run-owned-worktrees.json>
+--intended-status <COMPLETE|RESIDUALS_READY|INFRA_FAILURE|ABORTED>
+--output <absolute-state-root/cleanup/pre-terminal-cleanup.json>
+```
+
+For intended `RESIDUALS_READY`, exact
+`--residual-manifest
+<absolute-state-root/cleanup/residual-preservation.json>` is appended after
+`--intended-status` and before `--output`; that option is forbidden for every
+other intended status. The command rejects reordered, missing, extra, relative,
+or hash-unbound arguments. Its script/interpreter identity, suffix schemas,
+evidence schema `goal-plan.pre-terminal-cleanup/v1`, and token map are part of
+`plan.json.pre_terminal_cleanup`.
+
+The status-specific cleanup rules are normative:
+
+- **Intended `COMPLETE`:** reconcile every process-launch intent, ledger, ack,
+  and result; request termination only through the immutable supervisor control
+  client for a still-live fully identity-valid supervisor; verify every
+  supervisor is terminal and every child process group is empty; mark each
+  clean run-owned lane, candidate, delivery, and integration worktree
+  `REMOVING`; remove it without `--force`; prune/reconcile exact Git worktree
+  registrations; prove path and registration absence; and mark every mapping
+  entry `REMOVED`. The final filesystem/registry/worktree-list projection must
+  contain no foreign path. Any stop, group-empty, cleanliness, removal, prune,
+  mapping, or foreign-path failure changes the chosen final status to
+  `INFRA_FAILURE` before finalization.
+- **Intended `ABORTED`:** this route is legal only before repository mutation.
+  Prove there is no process intent/ledger/ack, no live run process, no
+  run-owned registry entry or worktree, no Git registration, and no created
+  `worktree_root` or `delivery_state_root`. Any mismatch chooses
+  `INFRA_FAILURE`; it is never explained away as cancellation.
+- **Intended `RESIDUALS_READY`:** reconcile all processes to terminal and prove
+  no live process group. Preserve only registry entries explicitly named in the
+  durable residual manifest, mark each `PRESERVED_RESIDUAL`, and bind its exact
+  residual ID, path/registration/HEAD/status evidence, reason, and
+  identity-safe recovery/removal commands. Clean every other run-owned
+  worktree exactly as on the complete path. Preservation is an intentional,
+  gating terminal state, not a cleanup fault. Any unidentified or foreign path,
+  dirty non-residual worktree, non-residual removal/prune failure, or mismatch
+  between manifest and registry chooses `INFRA_FAILURE`.
+- **Intended `INFRA_FAILURE`:** perform bounded best-effort cleanup. Reconcile
+  known process state; signal only a PID/process group whose complete canonical
+  identity matches the durable record; attempt non-force removal only for exact
+  clean identity-matched run-owned worktrees; never signal an unverified PID and
+  never delete an unrecorded/foreign path. Persist every unresolved process,
+  worktree, registration, dirty path, ambiguous identity, attempted command,
+  and recovery command. Cleanup faults do not change the already-infrastructure
+  final status, but they must remain visible in terminal evidence.
+
+`PreTerminalCleanup` atomically writes intended status, chosen final status,
+current parent invocation hash, every process reconciliation/termination
+result, pre/post registry and worktree-list projections, worktree lifecycle
+transitions, preserved-residual manifest/hash, foreign-path scan, unresolved
+resources, exact commands/outputs, and its evidence hash. Its last non-empty
+stdout line is exactly
+`PRE_TERMINAL_CLEANUP:<CHOSEN_FINAL_STATUS>`. A missing, malformed, or
+incomplete cleanup record is itself `INFRA_FAILURE`; the graph reruns/reconciles
+cleanup rather than publishing a terminal.
+
+Only after that record is durable does the deterministic finalizer atomically
+write the run root's versioned `result.json` with, at minimum:
 
 - `schema_version` with exact value `goal-plan.result/v2`;
 - `status` with exact value `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or
@@ -2534,6 +2808,8 @@ writes the run root's versioned `result.json` with, at minimum:
 - `product_base_sha` and `execution_source_sha`;
 - `attractor_runner_argv_prefix_sha256`, runner module/source identity, and
   compiled `provider`;
+- `parent_runner_invocation_definition_sha256`,
+  `parent_runner_invocation_paths`, and current parent invocation evidence hash;
 - `supervisor_runner_argv_prefix_sha256` and bound
   executable/interpreter/script/CLI/schema identity;
 - `compiled_source_manifest_path` and `compiled_source_manifest_sha256`;
@@ -2547,6 +2823,9 @@ writes the run root's versioned `result.json` with, at minimum:
 - `run_budget_ledger_path` and `run_budget_ledger_sha256`;
 - `run_owned_worktrees_path`, `run_owned_worktrees_sha256`, and final lifecycle
   state for every recorded worktree;
+- `pre_terminal_cleanup_path`, `pre_terminal_cleanup_sha256`,
+  `intended_status`, `unresolved_resource_evidence`, and
+  `preserved_residual_worktrees`;
 - `verifier_envelope_evidence_paths`;
 - `integration_correction_records`, including every `correction_round_id`,
   `process_run_id`, and terminal correction-reservation state;
@@ -2560,7 +2839,8 @@ writes the run root's versioned `result.json` with, at minimum:
 - `delivery_pr_url` and `delivery_verified_head_sha` when delivery was
   requested, otherwise `null`.
 
-The finalizer sets `goal_plan.status` to the same exact `status` value and emits
+The finalizer copies only the cleanup record's chosen final status into
+`result.json`, sets `goal_plan.status` to that same exact value, and emits
 exactly one of these strings as its last non-empty stdout line, with no prose
 after it:
 
@@ -2571,43 +2851,35 @@ after it:
 | `INFRA_FAILURE` | `GOAL_PLAN:INFRA_FAILURE` |
 | `ABORTED` | `GOAL_PLAN:ABORTED` |
 
-The finalizer completes its write successfully so the graph can route on
-`tool.last_line`; the explicit terminal carrier then preserves the intended
-pipeline outcome. `COMPLETE` is the only successful and deliverable outcome.
+The finalizer completes its writes successfully so the graph can route on
+`tool.last_line`; only then does the explicit terminal carrier publish the
+matching CLI outcome. `COMPLETE` is the only successful and deliverable outcome.
 The other three remain distinct non-success, evidence-bearing outcomes rather
 than aliases for a generic failure.
 
-Before writing any terminal result, including `INFRA_FAILURE`, the finalizer
-attempts one last `CompiledSourceGate` and records its evidence. Only a passing
-gate can emit `COMPLETE` or begin delivery; a red or unexecutable gate forces or
-preserves `INFRA_FAILURE`.
+There is no post-terminal repository/process/worktree cleanup phase. After
+`result.json`, `goal_plan.status`, terminal token, and carrier outcome are
+published, only immutable external evidence retention is permitted. In
+particular, no later cleanup can downgrade an already-written `COMPLETE`; all
+conditions capable of changing it to `INFRA_FAILURE` are resolved inside
+`PreTerminalCleanup` first.
 
-After terminal evidence is durable, cleanup first proves no active process-run
-ID remains, then considers only non-`REMOVED` entries in
-`run-owned-worktrees.json`. For each exact clean, identity-matched, registered
-run-owned worktree it atomically marks `REMOVING`, removes without `--force`,
-proves both path and registration absent, and marks `REMOVED`; it never scans
-for and deletes an unrecorded descendant merely because it is beneath
-`worktree_root`. Dirty, foreign, unrecorded, identity-mismatched, or unremovable
-worktrees are preserved and reported as infrastructure faults. All path/ref/
-registry outcomes are recorded under `state_root/cleanup/`. External
-`state_root`, conditional `delivery_state_root`, and their evidence remain. A
-never-approved run has no worktree/ref cleanup because `worktree_root`,
-`delivery_state_root`, and repository state were never mutated.
-
-Terminal nodes must route explicitly to the graph exit with the intended machine
-status. They must not dead-end and become `no_matching_edge` authoring errors.
+Terminal nodes must route explicitly to the graph exit with the cleanup-chosen
+final machine status. They must not dead-end and become `no_matching_edge`
+authoring errors.
 Failure routes must account for real node outcomes; no "successful failure"
 sentinel may rely on an unreachable `outcome=fail` edge.
 
 ## PR Delivery
 
-The `COMPLETE` path is the only automatic-delivery path. A run becomes eligible
-only after fresh coherence, the final all-lane sweep,
+The intended-`COMPLETE` path is the only automatic-delivery path. A run becomes
+eligible only after fresh coherence, the final all-lane sweep,
 `final-aggregate-after-sweep`, and `CompiledSourceGate` all pass at one exact
-final HEAD. When delivery is enabled, `COMPLETE` is emitted only after the
-supervised delivery child preserves that HEAD and the parent independently
-verifies remote state.
+final HEAD. When delivery is enabled, independent remote verification produces
+only intended `COMPLETE`; actual `COMPLETE` is emitted only after
+`PreTerminalCleanup` also removes the delivery worktree and every other
+run-owned worktree/registration and proves no live process group or foreign
+path.
 
 The implementation starts from the proven portable `deliver_pr.dot` topology,
 as required by `AGENTS.md` and `docs/RUBRIC.md` section 5, but adapts every
@@ -2685,8 +2957,12 @@ frozen final HEAD, pre/post status must both be clean, pre/post manifests must
 be identical, all compiled-source checks must pass, and no `.resolve` path may
 be newly created or changed relative to final HEAD. Postconditions run even
 after nonzero exit, timeout, or cancellation.
-Any local mutation, generated-state leak, missing supervisor result, teardown
-failure, or stale registration is `INFRA_FAILURE`, even if a PR exists.
+Any local mutation, generated-state leak, missing supervisor result, or stale
+registration is `INFRA_FAILURE`, even if a PR exists. The validated delivery
+worktree remains an exact `ACTIVE` run-owned entry until
+`PreTerminalCleanup`; a non-force removal, prune, or mapping failure there
+changes intended `COMPLETE` to final `INFRA_FAILURE` before any terminal
+publication.
 
 Delivery has a hard limit of two attempts total for the run, including across
 crash recovery. Before any network mutation, each attempt appends a durable
@@ -2727,10 +3003,11 @@ An incomplete ledger entry discovered during recovery counts as an attempt and
 is reconciled against remote state before another attempt can start. No third
 attempt is possible. If neither attempt obtains independent exact-head
 verification, the integrated branch, verifier/review evidence, and ledger are
-preserved, and the finalizer emits `GOAL_PLAN:INFRA_FAILURE`; the pipeline does
-not claim `COMPLETE`. Delivery network attempts cannot consume/reset adaptive
-attempt budget, and delivery process launches cannot exceed
-`max_process_launches`.
+preserved, and the graph selects intended `INFRA_FAILURE`, runs bounded
+`PreTerminalCleanup`, and only then finalizes `GOAL_PLAN:INFRA_FAILURE`; the
+pipeline does not claim `COMPLETE`. Delivery network attempts cannot
+consume/reset adaptive attempt budget, and delivery process launches cannot
+exceed `max_process_launches`.
 
 ## Reusable Precedent
 
@@ -2768,13 +3045,15 @@ README.md
 ```
 
 `goal_plan_runtime.py` is the single deterministic home for source-SHA
-admission, compiled-source manifests/gates, ownership-pattern rejection,
+admission, parent target-repository/CWD/DOT invocation binding and immutable
+invocation evidence, compiled-source manifests/gates, ownership-pattern rejection,
 candidate-verification worktree lifecycle, the shared
 `VerifierExecutionEnvelope`, phase-split external-root safety,
 `run-owned-worktrees.json` lifecycle/recovery, run-budget
 process-launch/correction-round/adaptive-attempt reservation/reconciliation,
 child-runner/supervisor-runner/provider preflight, engine-step admission,
-delivery-worktree envelope, and delta reporting. DOT nodes call that module
+delivery-worktree envelope, `PreTerminalCleanup`, durable final-status
+selection, and delta reporting. DOT nodes call that module
 rather than duplicating shell logic. `goal_plan_supervisor.py` remains the
 single home for the lane, correction, and delivery reaper, immutable
 self-check/CLI-schema report, authoritative wait-status capture, Linux process
@@ -2803,11 +3082,12 @@ orchestration behavior, not a library-only change.
 | Claim | Verification level | Required proof |
 |---|---|---|
 | Adaptive attempts, process launches, and correction rounds are separate | Unit + concurrent live fault injection | Flocked v2 ledger shows `ReserveGlobalAttempt` consumed at verifier classification, every supervised correction-child launch transitions its own `correction_round_id`, and every supervisor start changes `max_process_launches`; no counter borrows from another. |
-| Final proof order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep`. |
+| Parent runner is bound to `target_repo` | Launcher/admission/recovery faults | Parent starts only after `chdir(realpath(target_repo))`; `/proc/self/cwd`, runner `--cwd .`, and canonical target repo are equal; parent DOT realpath is exact; observed/execution-source/manifest hashes agree; and immutable argv/prefix/provider/process/logs evidence is durable before mutation. |
+| Final proof and cleanup order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep` -> optional delivery -> intended status -> `PreTerminalCleanup` -> durable terminal publication. |
 | Long polling cannot exhaust engine steps prematurely | Static arithmetic + timed live run | Recomputed branch inequality, parent total-step inequality, exact 30-second poll argv, identity checks, and observed deadline-capped waits. |
 | Delivery preserves verified source | Live Git/remote probe | Disposable final-HEAD worktree has equal pre/post HEAD/status/full-filesystem/source records, no generated `.resolve` delta, external delivery evidence, and parent-observed PR exact head. |
 | Child-runner, supervisor-runner, and provider identity cannot drift | Admission/recovery faults | Both allowed forms for each prefix pass; PATH/shell/executable/interpreter/script/hash/environment/CLI/schema/subcommand/flag/credential faults and either prefix/provider change on resume fail before mutation. |
-| Worktree ownership is phase-safe | Unit + live Git recovery faults | Preapproval rejects every overlap; postapproval accepts only the exact `run-owned-worktrees.json` mapping; foreign/unrecorded descendants and recorded paths outside the root are INFRA; cleanup removes only recorded clean entries. |
+| Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; complete removes all run-owned worktrees; residual preserves only named `PRESERVED_RESIDUAL` entries; aborted proves no mutation; infrastructure cleanup is bounded and identity-safe; and no terminal is published first. |
 | Approval modes are operationally honest | Standalone admission probes | Preapproved unattended headless passes; required attached standalone console/TTY passes; required without TTY or on unattended/hosted headless execution fails before mutation. |
 | DOT remains inspectable | Graphviz + lint | Every DOT renders to a non-empty PNG with recorded hashes and passes strict lint; any render failure is loud. |
 | Python implementation is clean without cache mutation | Static + unit | `python_check`, system `python3 -m pytest`, clean diff, and no changed managed-cache path. |
@@ -2901,6 +3181,18 @@ orchestration behavior, not a library-only change.
 22. Run `git diff --check`, assert only the planned implementation footprint is
     modified, and explicitly fail if any changed path resolves beneath a managed
     cache.
+23. Validate the parent launch definition and every immutable invocation record:
+    launcher CWD changes before `exec`; `/proc/self/cwd`, runner `--cwd .`, and
+    canonical `target_repo` are equal; the parent DOT realpath is exact; its
+    observed/execution-source/compiled-manifest hashes agree; argv prefix,
+    provider, process identity, logs root, and resume hash chain are exact; and
+    every mismatch fails before repository mutation.
+24. Validate the exact `pre-terminal-cleanup` command schemas, status-specific
+    process/worktree rules, `PRESERVED_RESIDUAL` evidence/recovery contract,
+    all-`REMOVED` complete mapping, pre-mutation aborted proof, bounded
+    infrastructure cleanup, cleanup-resume idempotence, chosen-final-status
+    token, and strict ordering before `result.json`, `goal_plan.status`,
+    terminal token, and CLI carrier publication.
 
 ### Primary live smoke scenario
 
@@ -2927,12 +3219,14 @@ Anthropic credential before the headless `preapproved` run:
 
 The live smoke passes only if direct observation proves:
 
-1. The adjacent `plan.json` hash equals embedded `plan_sha256`; admission proves
-   graph/plan correspondence, an exact normalized fetch-remote identity match,
-   literal `product_base_sha`, exact containing `execution_source_sha`, their
-   ancestry, the complete compiled-source manifest, child-runner binding, and
-   supervisor prefix/executable-or-interpreter/script/environment/CLI/schema/
-   self-check binding before mutation.
+1. The launcher changes into canonical `target_repo` before parent `exec`;
+   `/proc/self/cwd`, literal runner `--cwd .`, and canonical `target_repo`
+   resolve equally; the invoked parent DOT realpath is exact; its
+   observed/execution-source/compiled-manifest hashes agree; immutable parent
+   argv/prefix/provider/process/logs evidence is durable; and the adjacent
+   `plan.json` hash, graph/plan correspondence, normalized fetch-remote
+   identity, both source SHAs/ancestry, child-runner binding, and supervisor
+   self-check all pass before mutation.
 2. Typed runtime inputs are bound; `state_root` resolves under
    `$XDG_STATE_HOME` or the external user-state fallback; `worktree_root` and
    `delivery_state_root` are separate safe external roots; strict preapproval
@@ -2993,8 +3287,9 @@ The live smoke passes only if direct observation proves:
     `final_sweep_lane` envelope at one frozen final HEAD, followed by
     `final-aggregate-after-sweep`; both and the coherence record name that exact
     SHA and both source SHAs.
-16. The pre-finalization and pre-delivery compiled-source gates match the
-    admission manifest.
+16. The pre-delivery and pre-`PreTerminalCleanup`
+    `ParentRunnerBindingGate`/compiled-source gates match immutable admission
+    evidence.
 17. Delivery runs through a separately supervised child in a clean disposable
     final-HEAD worktree. Pre/post HEAD, full status, complete non-`.git`
     filesystem manifests, and source gates remain equal/green; every generated
@@ -3003,9 +3298,14 @@ The live smoke passes only if direct observation proves:
 18. The external delivery ledger records no more than two attempts, both source
     SHAs, runner/provider/process identities, and manifest hash; the parent's
     independent remote query observes a PR head equal to exact final HEAD.
-19. `result.json` reports both delta ranges; `result.json`,
-    `goal_plan.status`, and the last-line token agree on `COMPLETE` only after
-    all eighteen preceding observations hold.
+19. `PreTerminalCleanup` reconciles every supervisor/process group to terminal,
+    removes lane/candidate/delivery/integration worktrees without force,
+    prunes/reconciles registrations, proves the complete run-owned mapping is
+    `REMOVED`, finds no foreign path, and durably chooses `COMPLETE`.
+20. Only after item 19, `result.json` reports both delta ranges and cleanup
+    evidence; `result.json`, `goal_plan.status`, the last-line token, and CLI
+    carrier outcome agree on `COMPLETE` only after all nineteen preceding
+    observations hold.
 
 ### Fault and recovery probes
 
@@ -3013,6 +3313,13 @@ The implementation is not ready until live probes also demonstrate:
 
 - deleting one lane's required result before fan-in yields `CRASHED`, not a
   clean result;
+- launching the parent from the repository's parent directory, a symlink alias,
+  a different worktree, or an unrelated CWD; changing literal `--cwd .`;
+  invoking a copied/renamed parent DOT; changing its bytes; changing parent
+  prefix/provider/logs root; or resuming with a non-matching parent invocation
+  record yields `INFRA_FAILURE` before any repository mutation, with immutable
+  external evidence for the observed OS CWD, CLI CWD, DOT realpath/hash,
+  target repository, source SHA, process identity, and argv;
 - a child that writes its expected artifact and then exits nonzero remains
   non-pass because the supervisor result preserves authoritative wait status;
 - parent crash while supervisor and child run leaves the reaper alive in its own
@@ -3130,16 +3437,35 @@ The implementation is not ready until live probes also demonstrate:
 - creating an unrecorded file/worktree beneath `worktree_root`, registering a
   foreign worktree there, moving a recorded worktree outside it, changing a
   recorded branch/detached SHA/common directory, or deleting its registration
-  yields `INFRA_FAILURE`; cleanup leaves every unrecorded/dirty/foreign path
-  untouched and removes only exact recorded clean worktrees;
+  yields `INFRA_FAILURE`; intended-infrastructure cleanup leaves every
+  unrecorded/foreign path and unverified process untouched and removes/signals
+  only exact identity-validated resources;
+- intended `COMPLETE` with a live supervisor/group, dirty run-owned worktree,
+  non-force removal failure, prune/registration failure, non-`REMOVED` mapping,
+  or foreign path is changed by `PreTerminalCleanup` to final
+  `INFRA_FAILURE` before any `result.json`, status, token, or carrier outcome;
+- intended pre-mutation `ABORTED` finalizes only when no process/worktree/root
+  mutation exists; an injected process intent, registry entry, worktree,
+  registration, or created mutable root changes it to `INFRA_FAILURE`;
+- intended `RESIDUALS_READY` preserves only explicitly named worktrees as
+  `PRESERVED_RESIDUAL` with exact evidence and recovery commands, removes all
+  others, treats intentional preservation as green, and changes any
+  unidentified/dirty non-residual or removal failure to `INFRA_FAILURE`;
+- intended `INFRA_FAILURE` performs bounded best-effort identity-safe cleanup,
+  never signals a PID with mismatched/unreadable identity, and records every
+  unresolved resource and recovery command before finalization;
+- crashing during `PreTerminalCleanup` resumes the exact cleanup journal
+  idempotently and publishes no terminal first; after durable terminal
+  publication, no cleanup command runs and an already-written `COMPLETE` can
+  never be downgraded by post-terminal work;
 - two consecutive runs leave source DOT, scripts, and committed fixtures
   byte-clean, with every generated log, event, checkpoint, feedback, and result
   beneath the appropriate external `state_root`/`delivery_state_root`; no
   `.resolve` appears in any verified worktree;
 - deleting, adding, mode-changing, or byte-changing any compiled-source entry
   is detected after child exit, before candidate verification, after merge,
-  after integration correction, during restart, and before
-  finalization/delivery; every case reaches `INFRA_FAILURE` without lane
+  after integration correction, during restart, before delivery, and before
+  `PreTerminalCleanup`; every case reaches `INFRA_FAILURE` without lane
   correction;
 - an impossible verifier exhausts its lane budget, produces a postmortem,
   blocks dependents by name, reaches `RESIDUALS_READY`, and opens no automatic
@@ -3151,8 +3477,10 @@ The implementation is not ready until live probes also demonstrate:
   wrong `product_base_sha`, non-containing or non-descendant
   `execution_source_sha`, invalid runner-prefix form/hash/module/source,
   failed doctor/missing required flag, unsupported/missing-credential provider,
-  provider change on resume, argv/param order mismatch, output-path escape,
-  engine-step inequality, incompatible reused `run_id`, non-Linux platform, or
+  provider change on resume, parent OS-CWD/CLI-CWD/target-repo inequality,
+  parent DOT realpath/blob/manifest mismatch, incomplete parent invocation
+  evidence, argv/param order mismatch, output-path escape, engine-step
+  inequality, incompatible reused `run_id`, non-Linux platform, or
   mode/approval-transport mismatch fails admission before mutation;
 - HTTPS, `ssh://`, and scp-like forms for the same fetch remote normalize to
   the same `host[:port]/path`, while a host, non-default-port, path-case, or
