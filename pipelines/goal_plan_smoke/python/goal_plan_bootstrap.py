@@ -15,10 +15,11 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
-import tempfile
+import urllib.parse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -33,6 +34,7 @@ RUNTIME_BINDING_SCHEMA = "goal-plan.trusted-runtime-binding/v3"
 CLOSED_ENVIRONMENT_SCHEMA = "goal-plan.closed-environment/v1"
 SELF_CHECK_SCHEMA = "goal-plan.trusted-launcher-self-check/v2"
 PARENT_INVOCATION_SCHEMA = "goal-plan.parent-runner-invocation-definition/v4"
+RUNNER_IDENTITY_SCHEMA = "goal-plan.attractor-runner-identity/v1"
 
 MAX_DESCRIPTOR_BYTES = 1024 * 1024
 MAX_PLAN_BYTES = 16 * 1024 * 1024
@@ -44,6 +46,26 @@ SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 _ORDERING_OBSERVER: Callable[[str], None] | None = None
 _BUNDLE_VALIDATION_OBSERVER: Callable[[str], None] | None = None
+_HANDOFF_OBSERVER: Callable[[str], None] | None = None
+
+_PARENT_PARAMETER_ORDER = [
+    "target_repo",
+    "execution_source_sha",
+    "run_id",
+    "state_root",
+    "launch_descriptor_path",
+    "launch_descriptor_sha256",
+    "trusted_launcher_argv_prefix_sha256",
+    "trusted_launcher_binding_sha256",
+    "runtime_bundle_hash",
+    "trusted_runtime_binding_path",
+    "worktree_root",
+    "approval_mode",
+    "human_gate_transport",
+    "delivery_mode",
+    "delivery_branch",
+]
+_DELIVERY_PARENT_PARAMETERS = ["delivery_state_root", "github_repo"]
 
 _COMMAND_SCHEMAS: dict[str, tuple[str, ...]] = {
     "self-check": ("--launch-descriptor", "--plan", "--evidence"),
@@ -219,6 +241,14 @@ class Authenticated:
     source_bytes: dict[str, bytes]
 
 
+@dataclass(frozen=True)
+class PinnedDirectory:
+    path: str
+    descriptor: int
+    device: int
+    inode: int
+
+
 def _event(name: str) -> None:
     if _ORDERING_OBSERVER is not None:
         _ORDERING_OBSERVER(name)
@@ -342,6 +372,57 @@ def _require_disjoint(path_a: str, path_b: str, code: str, names: str) -> None:
         _fail(code, f"{names} must be disjoint")
 
 
+def _open_directory(
+    path_value: str, code: str, *, create: bool = False, mode: int = 0o700
+) -> PinnedDirectory:
+    path = _require_absolute_normal_path(path_value, code, "directory")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(os.path.sep, flags)
+    current_path = os.path.sep
+    try:
+        for part in (item for item in path.split(os.path.sep) if item):
+            try:
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, mode, dir_fd=descriptor)
+                os.fsync(descriptor)
+                next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+            current_path = os.path.join(current_path, part)
+        observed_path = os.path.realpath(f"/proc/self/fd/{descriptor}")
+        if observed_path != path:
+            _fail(code, f"opened directory differs from canonical path: {path}")
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            _fail(code, f"opened path is not a directory: {path}")
+        return PinnedDirectory(path, descriptor, metadata.st_dev, metadata.st_ino)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _close_directory(directory: PinnedDirectory) -> None:
+    os.close(directory.descriptor)
+
+
+def _verify_pinned_directory(directory: PinnedDirectory, code: str) -> None:
+    metadata = os.fstat(directory.descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_dev, metadata.st_ino) != (directory.device, directory.inode)
+        or os.path.realpath(f"/proc/self/fd/{directory.descriptor}") != directory.path
+    ):
+        _fail(code, f"pinned directory identity changed: {directory.path}")
+
+
 def _assert_no_symlink_components(
     path: str, code: str, *, allow_missing: bool = False
 ) -> None:
@@ -370,26 +451,24 @@ def _read_regular(
     expected_mode: int | None = None,
 ) -> tuple[bytes, os.stat_result]:
     path = _require_absolute_normal_path(path, code, "path")
-    _assert_no_symlink_components(path, code)
-    if os.path.realpath(path) != path:
-        _fail(code, f"path is not canonical: {path}")
-    before = os.lstat(path)
-    if not stat.S_ISREG(before.st_mode):
-        _fail(code, f"path is not a regular file: {path}")
-    mode = stat.S_IMODE(before.st_mode)
-    if require_nonwritable and mode & 0o222:
-        _fail(code, f"file must have no write bits: {path}")
-    if expected_mode is not None and mode != expected_mode:
-        _fail(code, f"file mode mismatch for {path}: {mode:04o}")
+    parent = _open_directory(os.path.dirname(path), code)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(os.path.basename(path), flags, dir_fd=parent.descriptor)
     except OSError as exc:
+        _close_directory(parent)
         _fail(code, f"cannot open regular file safely: {path}: {exc.errno}")
     try:
         opened = os.fstat(descriptor)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            _fail(code, f"file identity changed while opening: {path}")
+        if not stat.S_ISREG(opened.st_mode):
+            _fail(code, f"path is not a regular file: {path}")
+        if os.path.realpath(f"/proc/self/fd/{descriptor}") != path:
+            _fail(code, f"opened file differs from canonical path: {path}")
+        mode = stat.S_IMODE(opened.st_mode)
+        if require_nonwritable and mode & 0o222:
+            _fail(code, f"file must have no write bits: {path}")
+        if expected_mode is not None and mode != expected_mode:
+            _fail(code, f"file mode mismatch for {path}: {mode:04o}")
         chunks: list[bytes] = []
         total = 0
         while True:
@@ -410,6 +489,7 @@ def _read_regular(
         return b"".join(chunks), after
     finally:
         os.close(descriptor)
+        _close_directory(parent)
 
 
 def _identity(path: str, code: str) -> dict[str, Any]:
@@ -923,6 +1003,8 @@ def _validate_source_record(
     common: str,
     record_value: Any,
     expected_role: str,
+    *,
+    require_working_copy: bool = True,
 ) -> tuple[dict[str, Any], bytes]:
     code = "SOURCE_IDENTITY"
     record = _require_mapping(record_value, code, f"{expected_role} source")
@@ -947,13 +1029,99 @@ def _validate_source_record(
     blob = _git_blob(descriptor, common, object_id, code)
     if len(blob) != length or _sha256(blob) != digest:
         _fail(code, f"{expected_role} committed bytes mismatch")
-    working_path = os.path.join(repo, path)
-    working, _ = _read_regular(
-        working_path, code, max_bytes=MAX_SOURCE_BYTES, require_nonwritable=False
-    )
-    if working != blob:
-        _fail(code, f"{expected_role} checked-out bytes differ from Git blob")
+    if require_working_copy:
+        working_path = os.path.join(repo, path)
+        working, _ = _read_regular(
+            working_path, code, max_bytes=MAX_SOURCE_BYTES, require_nonwritable=False
+        )
+        if working != blob:
+            _fail(code, f"{expected_role} checked-out bytes differ from Git blob")
     return record, blob
+
+
+def _normalize_fetch_remote(value: str) -> str:
+    code = "REPOSITORY_IDENTITY"
+    remote = _require_string(value, code, "fetch remote URL")
+    host: str
+    port: int | None
+    path: str
+    if "://" in remote:
+        parsed = urllib.parse.urlsplit(remote)
+        if parsed.scheme not in {"https", "ssh"} or not parsed.hostname:
+            _fail(code, "fetch remote must use HTTPS, ssh://, or scp-like SSH")
+        if parsed.query or parsed.fragment:
+            _fail(code, "fetch remote may not contain query or fragment")
+        host = parsed.hostname.lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            _fail(code, "fetch remote port is invalid")
+        default_port = 443 if parsed.scheme == "https" else 22
+        if port == default_port:
+            port = None
+        path = parsed.path
+    else:
+        match = re.fullmatch(r"(?:[^/@:\s]+@)?([^/@:\s]+):(.+)", remote)
+        if match is None:
+            _fail(code, "fetch remote must use HTTPS, ssh://, or scp-like SSH")
+        host = match.group(1).lower()
+        port = None
+        path = match.group(2)
+    normalized_path = path.strip("/")
+    if normalized_path.endswith(".git"):
+        normalized_path = normalized_path[:-4]
+    if not normalized_path or any(
+        part in {"", ".", ".."} for part in normalized_path.split("/")
+    ):
+        _fail(code, "fetch remote repository path is not canonical")
+    authority = host if port is None else f"{host}:{port}"
+    return f"{authority}/{normalized_path}"
+
+
+def _validate_remote_repository_identity(
+    descriptor: dict[str, Any], repo: str, identity: dict[str, Any]
+) -> None:
+    code = "REPOSITORY_IDENTITY"
+    expected = _require_string(
+        identity["expected_fetch_remote"], code, "expected fetch remote"
+    )
+    if (
+        re.fullmatch(r"[a-z0-9.-]+(?::[1-9][0-9]{0,4})?/.+", expected) is None
+        or expected.endswith(".git")
+    ):
+        _fail(code, "expected fetch remote is not canonical host[:port]/path")
+    remote_name = identity["remote_name"]
+    if remote_name is not None and (
+        not isinstance(remote_name, str)
+        or not remote_name
+        or re.fullmatch(r"[A-Za-z0-9._-]+", remote_name) is None
+    ):
+        _fail(code, "remote_name must be a canonical string or null")
+    if remote_name is None:
+        output = _run_git(descriptor, ("-C", repo, "remote"), code).stdout
+        try:
+            names = [line for line in output.decode("utf-8").splitlines() if line]
+        except UnicodeDecodeError:
+            _fail(code, "configured Git remote names are not UTF-8")
+    else:
+        names = [remote_name]
+    observed: list[str] = []
+    for name in names:
+        result = _run_git(
+            descriptor,
+            ("-C", repo, "remote", "get-url", "--all", name),
+            code,
+            allow_exit={0, 2},
+        )
+        if result.returncode != 0:
+            continue
+        try:
+            urls = [line for line in result.stdout.decode("utf-8").splitlines() if line]
+        except UnicodeDecodeError:
+            _fail(code, "configured Git fetch URL is not UTF-8")
+        observed.extend(_normalize_fetch_remote(url) for url in urls)
+    if expected not in observed:
+        _fail(code, f"no configured fetch URL matches expected remote: {expected}")
 
 
 def _validate_repository_identity(
@@ -1018,13 +1186,9 @@ def _validate_repository_identity(
         )
         if identity["vcs"] != "git":
             _fail(code, "remote repository VCS must be git")
-        _require_string(
-            identity["expected_fetch_remote"], code, "expected fetch remote"
+        _validate_remote_repository_identity(
+            descriptor, descriptor["target_repo"]["path"], identity
         )
-        if identity["remote_name"] is not None and not isinstance(
-            identity["remote_name"], str
-        ):
-            _fail(code, "remote_name must be a string or null")
     else:
         _fail(code, "unsupported repository identity mode")
 
@@ -1160,6 +1324,8 @@ def _validate_runtime_definition(
     repo: str,
     common: str,
     value: Any,
+    *,
+    require_working_copy: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, bytes]]:
     code = "RUNTIME_DEFINITION"
     definition = _require_mapping(value, code, "trusted runtime definition")
@@ -1185,10 +1351,20 @@ def _validate_runtime_definition(
     )
     _validate_hash_field(definition, "definition_sha256", code, "runtime definition")
     runtime, runtime_bytes = _validate_source_record(
-        descriptor, repo, common, definition["runtime_source"], "runtime"
+        descriptor,
+        repo,
+        common,
+        definition["runtime_source"],
+        "runtime",
+        require_working_copy=require_working_copy,
     )
     supervisor, supervisor_bytes = _validate_source_record(
-        descriptor, repo, common, definition["supervisor_source"], "supervisor"
+        descriptor,
+        repo,
+        common,
+        definition["supervisor_source"],
+        "supervisor",
+        require_working_copy=require_working_copy,
     )
     if runtime["path"] == supervisor["path"]:
         _fail(code, "runtime and supervisor source paths must differ")
@@ -1207,6 +1383,8 @@ def _validate_plan(
     common: str,
     plan: dict[str, Any],
     supplied_source_sha: str | None,
+    *,
+    require_runtime_working_copy: bool,
 ) -> tuple[
     dict[str, Any],
     dict[str, Any],
@@ -1226,6 +1404,7 @@ def _validate_plan(
         "trusted_runtime_binding_policy",
         "provider",
         "attractor_runner_argv_prefix",
+        "attractor_runner_identity",
         "parent_runner_invocation",
         "approval_mode",
         "delivery_mode",
@@ -1271,7 +1450,11 @@ def _validate_plan(
         plan["trusted_launcher_binding"],
     )
     definition, sources, source_bytes = _validate_runtime_definition(
-        descriptor, repo, common, plan["trusted_runtime_definition"]
+        descriptor,
+        repo,
+        common,
+        plan["trusted_runtime_definition"],
+        require_working_copy=require_runtime_working_copy,
     )
     if plan["trusted_runtime_binding_policy"] != _RUNTIME_BINDING_POLICY:
         _fail(code, "trusted runtime binding policy mismatch")
@@ -1285,6 +1468,7 @@ def _authenticate(
     *,
     supplied_target_repo: str | None = None,
     supplied_source_sha: str | None = None,
+    require_runtime_working_copy: bool = True,
 ) -> Authenticated:
     descriptor_path, descriptor_bytes, descriptor, descriptor_hash = _load_descriptor(
         descriptor_path_value
@@ -1320,6 +1504,7 @@ def _authenticate(
         common,
         plan,
         supplied_source_sha,
+        require_runtime_working_copy=require_runtime_working_copy,
     )
     return Authenticated(
         descriptor_path=descriptor_path,
@@ -2125,6 +2310,7 @@ def run(command: ParsedCommand) -> int:
             values["--plan"],
             supplied_target_repo=values["--target-repo"],
             supplied_source_sha=values["--execution-source-sha"],
+            require_runtime_working_copy=command.name == "materialize-runtime",
         )
         bundle_hash = _materialize(auth, values["--state-root"], values["--binding"])
         if command.name == "materialize-runtime":
