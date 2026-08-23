@@ -6,7 +6,7 @@ Produce a committed, tested Wave-2 runtime that safely manages external state, w
 
 - Work only in `/home/ken/workspace/attractor-pipelines/worktrees/goal-plan-impl-runtime`.
 - Branch: `goal-plan-impl/runtime`.
-- Base SHA: `BASE_SHA_AFTER_SUPERVISOR_MERGE` — replace and commit before launch.
+- Base SHA: `4350a6e` (merge commit landing Wave 1 process-supervisor onto `goal-batch`, independently re-verified: 53/53 tests pass fresh at this SHA — the orchestrator will use the full 40-hex SHA when cutting the worktree).
 - Read repository doctrine and final design.
 - Own only:
   - `pipelines/goal_plan_smoke/python/goal_plan_runtime.py`
