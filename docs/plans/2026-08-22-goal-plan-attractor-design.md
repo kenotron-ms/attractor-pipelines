@@ -140,10 +140,18 @@ orchestration.
 - Launch every lane, integration-correction, and delivery child from one
   immutable `attractor_runner_argv_prefix` with the exact compiled `provider`.
 - Require every initial start and recovery to enter through one immutable
-  externally installed `trusted_launcher_argv_prefix`. The launcher is a
-  byte-exact staged copy of the compiled `goal_plan_bootstrap.py` blob, lives
-  outside the target repository and every run-controlled root, and is validated
-  before every invocation without PATH lookup or a shell.
+  harness/deployment-owned immutable `launch_descriptor.json` and one immutable
+  externally installed `trusted_launcher_argv_prefix`. Both live outside the
+  target repository, `state_root`, `worktree_root`, every worktree, and
+  `delivery_state_root`. The descriptor is created from trusted deployment
+  configuration plus compile-time/commit outputs, never from the checked-out
+  `plan.json`.
+- Make the launch descriptor the first trust root. The external launcher first
+  validates its own path/bytes/prefix and the descriptor-bound Git and
+  interpreter/executable identities without reading any plan-controlled trust
+  field; it then reads the exact committed plan blob through descriptor-bound
+  Git and requires the checked-out plan bytes to match. Only after those checks
+  may it parse and validate `plan.trusted_launcher_binding`.
 - Launch the parent Attractor CLI only after the launching process has changed
   its OS CWD to the canonical `target_repo`; require the parent process CWD,
   literal `--cwd .` resolution, invoked parent DOT realpath, DOT bytes/hash,
@@ -172,6 +180,11 @@ orchestration.
 - Keep the complete compiled pipeline directory byte-immutable throughout the
   run; source mutation is infrastructure failure, never corrective lane work.
 - Accept lane completion only after an exact non-interactive verifier passes.
+- Run every dirty lane/correction child verifier through a distinct
+  `ChildAttemptVerifierEnvelope` that snapshots the exact post-attempt lane
+  HEAD, index, staged set, full tracked/untracked/ignored filesystem, compiled
+  source, and external output-root baseline immediately before verification,
+  then proves the same dirty product state remains byte-identical afterward.
 - Require a durable commit before a lane can be integrated.
 - Have the parent independently rerun each lane verifier against the exact
   commit proposed for integration through the shared read-only verifier
@@ -190,6 +203,10 @@ orchestration.
   into a supervised child running in a clean disposable final-HEAD worktree
   whose generated state is rooted only at external `delivery_state_root`, then
   independently verify that the remote PR points at the exact integrated HEAD.
+- Compile one immutable canonical `delivery_branch`, its exact
+  `refs/heads/<delivery_branch>` ref, remote mapping, collision policy, and
+  final-HEAD creation source into the plan and every delivery/recovery record.
+  Never force-push or accept a same-named branch owned by another run.
 - Recover by reconciling durable state with real git, worktree, verifier,
   merge, and remote PR state, but only after the validated external trusted
   bootstrap runs `rehydrate-runtime` against exact Git blobs at
@@ -208,6 +225,10 @@ orchestration.
 - Route every intended terminal state through `PreTerminalCleanup`, let that
   phase choose the final status from real process/worktree state, and only then
   publish durable terminal result/status/token/carrier evidence.
+- Route the durable finalizer to four exact parent-graph carrier nodes.
+  `COMPLETE` alone exits success; `RESIDUALS`, `INFRA`, and `ABORTED` emit their
+  exact `GOAL_PLAN:*` token and reach the terminal `Msquare` on `outcome=fail`.
+  Carrier validation failure routes to `INFRA` rather than dead-ending.
 - End in one of four explicit terminal states:
   `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or `ABORTED`.
 
@@ -295,37 +316,115 @@ pipelines/PLAN_SLUG/
 scheduling manifest: runtime must not iterate its `lanes` or `waves` to decide
 what runs next. The generated DOT owns dispatch and contains the actual program.
 
+#### Harness-owned `launch_descriptor.json`
+
+The bootstrap trust root is a required immutable
+`launch_descriptor.json` created and owned by the trusted invoking harness or
+production deployment configuration. It is never stored in the target
+repository, `state_root`, `worktree_root`, any Git worktree, or
+`delivery_state_root`, and no target-repository or plan-directed process may
+create, replace, repair, or select it. The canonical location is exact
+`launch_control_root/launch_descriptor.json`, where `launch_control_root` is a
+deployment-owned absolute directory pairwise disjoint from all of those roots.
+
+The descriptor uses exact schema `goal-plan.launch-descriptor/v1`, rejects
+unknown fields, and contains:
+
+| Field | Contract |
+|---|---|
+| `schema_version`, `descriptor_version` | Exact values `goal-plan.launch-descriptor/v1` and `1`. |
+| `execution_source_sha` | Full commit SHA selected from trusted compile/commit output, not from checked-out plan bytes. |
+| `repository_identity` | Canonical compile-time repository identity object, including identity mode and normalized remote or history-anchor value. |
+| `target_repo` | Expected canonical absolute Git top-level realpath and Git common-directory identity. |
+| `plan_path` | Exact normalized repository-relative path `pipelines/PLAN_SLUG/plan.json`; no absolute path, `..`, symlink, or alternate spelling. |
+| `plan_blob_id`, `plan_blob_sha256`, `plan_blob_length` | Exact blob object ID, SHA-256, and byte length resolved at `execution_source_sha:plan_path` by the trusted harness. |
+| `trusted_launcher_argv_prefix`, `trusted_launcher_prefix_sha256`, `trusted_launcher_identity` | Exact external absolute launcher prefix, canonical prefix hash, and executable or interpreter-plus-script path/realpath/mode/length/SHA-256 identity. |
+| `trusted_git_argv_prefix`, `trusted_git_prefix_sha256`, `trusted_git_identity` | Exact absolute Git argv prefix, canonical prefix hash, executable path/realpath/mode/length/SHA-256, and closed environment hash. |
+| `trusted_interpreter_or_executable_argv_prefix`, `trusted_interpreter_or_executable_prefix_sha256`, `trusted_interpreter_or_executable_identity` | Exact absolute prefix and path/realpath/mode/length/SHA-256 used to execute the launcher and later sealed runtime. |
+| `provider` | Exact compiled provider copied from trusted compile output and later required to equal the committed plan. |
+| `closed_environment` | Complete allowed key/value-or-value-hash representation and canonical environment hash for descriptor validation/bootstrap. |
+| `created_from` | Immutable compile-output hash, commit-output hash, harness/deployment configuration hash, and `descriptor_creation_request_sha256`. It contains no hash of post-creation evidence. |
+| `descriptor_sha256` | SHA-256 of canonical JSON excluding only this field. |
+
+The harness creates the descriptor only after the compiled pipeline commit
+exists. Using the Git identity already pinned by trusted harness/deployment
+configuration (which it then records in the descriptor), it resolves the exact
+plan blob from `execution_source_sha`, records that object/byte identity and the
+trusted external launcher/Git/interpreter identities, writes with
+create-no-replace plus fsync, seals it non-writable, and
+rereads/revalidates the complete hash. It then writes separate immutable
+creation evidence that references the already-final descriptor hash; the
+descriptor does not hash that later evidence, avoiding a second self-cycle. The
+descriptor is not derived by parsing the checked-out `plan.json`; plan bytes are
+opaque commit output at this stage. Production installation must supply the
+same descriptor as a deployment prerequisite.
+
+Every bootstrap subcommand receives exact `--launch-descriptor
+<absolute-launch-control-root>/launch_descriptor.json`. Before reading
+`plan.json` or any plan-controlled path, prefix, hash, Git identity, interpreter,
+provider, or environment field, the external launcher:
+
+1. opens the descriptor without symlink traversal, validates schema/hash,
+   canonical location, non-writable identity, and unambiguous
+   `launch_control_root`;
+2. proves its current external executable/interpreter/script identity and argv
+   prefix equal the descriptor;
+3. proves the exact Git and interpreter/executable prefixes, realpaths, bytes,
+   permissions, and closed environment equal the descriptor;
+4. uses only descriptor-bound Git to resolve
+   `execution_source_sha:plan_path`, requires the object ID to equal
+   `plan_blob_id`, reads it with `cat-file blob`, and requires exact length and
+   SHA-256;
+5. reads the checked-out file only at
+   `canonical_target_repo/plan_path` and requires byte-for-byte equality with
+   the committed blob; and
+6. only then parses the authenticated plan and validates its
+   `trusted_launcher_argv_prefix`, `trusted_launcher_binding`, target-repository
+   identity, provider, source SHA binding, and all later plan contracts against
+   the descriptor.
+
+The working-copy plan cannot authenticate itself. A missing descriptor, wrong
+descriptor hash/schema/path, ambiguous repository or launcher identity,
+working-copy plan tampering, wrong plan blob/path/SHA, wrong
+`execution_source_sha`, or launcher/Git/interpreter identity mismatch is
+`PRELAUNCH_INFRASTRUCTURE_BLOCKED` before any plan-directed code, parent
+process, Git mutation, repository mutation, or runtime materialization.
+
 #### `plan.json` contract
 
 `plan.json` has these required typed fields:
 
 | Field | Type and invariant |
 |---|---|
-| `schema_version` | String with exact value `goal-plan.plan/v4`. |
+| `schema_version` | String with exact value `goal-plan.plan/v5`. |
 | `plan_id` | Slug string equal to `PLAN_SLUG`; stable across runs of the same compiled plan. |
 | `source_request` | Non-empty string containing the originating request or its durable reference. |
 | `target_repo` | Object with `vcs: "git"`, `identity_mode: "remote"` or `"history_anchor"`, and the mode-specific fields defined below. |
 | `product_base_sha` | Full immutable commit SHA of the approved product baseline used for requirement provenance and product-level delta reporting. It must be an ancestor of the admitted `execution_source_sha`. |
 | `execution_source` | Object with exact `mode: "containing_commit"`, required runtime binding name `execution_source_sha`, and no embedded SHA value. Admission resolves the exact containing commit as described below, avoiding a self-referential Git hash while still binding the exact SHA through the plan contract. |
-| `trusted_launcher_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/external/path/to/goal-plan-bootstrap"]` or `["/absolute/path/to/python", "/absolute/external/path/to/goal_plan_bootstrap.py"]`. The bootstrap executable/script must be the externally installed byte-exact copy bound below. PATH lookup, `/usr/bin/env`, relative paths, `-m`, shell strings, wrappers, and extra prefix tokens are forbidden. |
-| `trusted_launcher_binding` | Object with exact schema `goal-plan.trusted-launcher-binding/v1`; bootstrap CLI schema/version; exact absolute external launcher path; repository-relative source path `pipelines/PLAN_SLUG/python/goal_plan_bootstrap.py`; source Git blob ID/mode/length/SHA-256 at `execution_source_sha`; external byte length/SHA-256; executable or interpreter path/realpath/mode/hash; closed environment schema/hash; canonical `trusted_launcher_argv_prefix` hash; exact absolute Git/interpreter/system-call allowlist and identities; supported subcommands and closed suffix schemas; installation-evidence schema/path policy; per-invocation validation policy; and `binding_sha256`. The external launcher path must be outside `target_repo`, its Git common directory, `state_root`, `worktree_root`, every registered worktree, and conditional `delivery_state_root`. |
+| `trusted_launcher_argv_prefix` | Required immutable non-empty `list[str]` authenticated only after descriptor/plan-blob validation. The only permitted exact forms are `["/absolute/external/path/to/goal-plan-bootstrap"]` or `["/absolute/path/to/python", "/absolute/external/path/to/goal_plan_bootstrap.py"]`. It must equal the descriptor prefix. PATH lookup, `/usr/bin/env`, relative paths, `-m`, shell strings, wrappers, and extra prefix tokens are forbidden. This plan field is a post-authentication consistency contract, never the bootstrap trust root. |
+| `trusted_launcher_binding` | Object with exact schema `goal-plan.trusted-launcher-binding/v2`; required launch-descriptor schema plus symbolic runtime binding names `launch_descriptor_path`/`launch_descriptor_sha256` (no embedded descriptor hash); bootstrap CLI schema/version; exact absolute external launcher path; repository-relative source path `pipelines/PLAN_SLUG/python/goal_plan_bootstrap.py`; source Git blob ID/mode/length/SHA-256 at `execution_source_sha`; external byte length/SHA-256; executable or interpreter path/realpath/mode/hash; closed environment schema/hash; canonical `trusted_launcher_argv_prefix` hash; exact descriptor-authenticated absolute Git/interpreter/system-call allowlist and identities; supported subcommands and closed suffix schemas; installation-evidence schema/path policy; per-invocation validation policy; and `binding_sha256`. It is validated only after descriptor-bound Git authenticates the committed plan blob. |
 | `lanes` | Non-empty array of lane objects described below. |
 | `waves` | Non-empty ordered array of objects with unique `id` and non-empty `lane_ids`; every lane appears in exactly one wave. |
 | `integration_order` | Array containing every lane ID exactly once in deterministic integration order, with every dependency before its dependents. |
 | `integration_seams` | Array of repository-relative path patterns explicitly writable by late integration correction. No pattern may equal, contain, or overlap `pipelines/PLAN_SLUG/**`. |
 | `verifier_execution_envelope` | Shared immutable `VerifierExecutionEnvelope` contract defined below, including checked-in implementation path/hash, canonical HEAD/status commands, output-root policy, evidence schema, token mapping, and `definition_sha256`. |
+| `child_attempt_verifier_envelope` | Distinct immutable `ChildAttemptVerifierEnvelope` definition for dirty lane/correction worktrees: checked-in implementation path/hash, exact HEAD/index/staged/full-filesystem/compiled-source snapshot algorithms, external output-root baseline/containment policy, evidence schema/token mapping, and `definition_sha256`. |
 | `aggregate_verifier` | Aggregate-verifier contract defined below. |
 | `attractor_runner_argv_prefix` | Required immutable non-empty `list[str]`. The only permitted exact forms are `["/absolute/path/to/attractor"]` or `["/absolute/path/to/python", "-m", "amplifier_module_pipeline_runner.cli"]`. PATH lookup, `/usr/bin/env`, relative executables, wrapper shell strings, and extra prefix tokens are forbidden. |
 | `attractor_runner_identity` | Object binding the prefix's canonical JSON SHA-256, executable realpath/hash, exact module name, module-source realpath/hash, expected `doctor` contract, and required `run` flags. |
-| `parent_runner_invocation` | Object with exact schema `goal-plan.parent-runner-invocation-definition/v3` binding the parent to the same runner prefix/identity and compiled `provider`; exact trusted-launcher prefix/binding/installation/self-check/materialization/`launch-parent` evidence hashes; symbolic `os_cwd_policy: "target_repo"`; literal `runner_cwd_arg: "."`; exact parent DOT path `pipelines/PLAN_SLUG/PLAN_SLUG.dot`; `parent_dot_hash_policy: "execution_source_blob_and_compiled_manifest"`; exact parent logs-root policy `state_root/parent-attractor-run`; required runtime-bundle hash and trusted-runtime binding path/hash inputs; canonical Linux process-identity policy; immutable evidence schema `goal-plan.parent-runner-invocation/v3`; and `definition_sha256`. It embeds no parent-DOT digest, avoiding a `plan_sha256`/parent-DOT hash cycle; the trusted bootstrap derives the expected digest from `execution_source_sha` and the compiled-source manifest. |
-| `trusted_runtime_definition` | Object with exact schema `goal-plan.trusted-runtime-definition/v2`; repository-relative runtime and supervisor source paths, Git blob IDs, modes, lengths, and SHA-256 values expected at `execution_source_sha`; canonical `runtime_bundle_hash` derivation; exact external directory/binding paths; atomic write/fsync/non-writable/reread rules executed only by the trusted bootstrap; trusted binding schema; exact runtime and supervisor suffix schemas; and `definition_sha256`. It contains no self-bootstrap entry point: `goal_plan_runtime.py` is materialized runtime only. |
-| `trusted_runtime_binding_policy` | Object requiring exact external path `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`, binding schema `goal-plan.trusted-runtime-binding/v2`, immutable exact `trusted_runtime_argv_prefix` and `trusted_supervisor_argv_prefix`, trusted-launcher binding/installation/materialization evidence, per-invocation validation policy, no in-run replacement/rotation policy, deterministic prelaunch/recovery rehydration only through `trusted_launcher_argv_prefix`, safety-critical command allowlist, separately validated supervisor-only termination exception, and failure token/evidence mapping. |
+| `parent_runner_invocation` | Object with exact schema `goal-plan.parent-runner-invocation-definition/v4` binding the parent to symbolic runtime launch-descriptor path/hash inputs, exact authenticated plan blob, the same runner prefix/identity and compiled `provider`; exact trusted-launcher prefix/binding/installation/self-check/materialization/`launch-parent` evidence hashes; symbolic `os_cwd_policy: "target_repo"`; literal `runner_cwd_arg: "."`; exact parent DOT path `pipelines/PLAN_SLUG/PLAN_SLUG.dot`; `parent_dot_hash_policy: "execution_source_blob_and_compiled_manifest"`; exact parent logs-root policy `state_root/parent-attractor-run`; required runtime-bundle hash and trusted-runtime binding path/hash inputs; canonical Linux process-identity policy; immutable evidence schema `goal-plan.parent-runner-invocation/v4`; and `definition_sha256`. It embeds neither descriptor nor parent-DOT digest, avoiding content-address cycles; the trusted bootstrap resolves both from external descriptor and `execution_source_sha`. |
+| `trusted_runtime_definition` | Object with exact schema `goal-plan.trusted-runtime-definition/v3`; launch-descriptor schema and symbolic runtime path/hash inputs, with no descriptor hash literal; repository-relative runtime and supervisor source paths, Git blob IDs, modes, lengths, and SHA-256 values expected at `execution_source_sha`; canonical `runtime_bundle_hash` derivation; exact external directory/binding paths; atomic write/fsync/non-writable/reread rules executed only by the descriptor-authenticated trusted bootstrap; trusted binding schema; exact runtime and supervisor suffix schemas; and `definition_sha256`. It contains no self-bootstrap entry point: `goal_plan_runtime.py` is materialized runtime only. |
+| `trusted_runtime_binding_policy` | Object requiring exact external path `state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json`, binding schema `goal-plan.trusted-runtime-binding/v3`, immutable launch-descriptor path/hash, exact authenticated plan blob identity, immutable exact `trusted_runtime_argv_prefix` and `trusted_supervisor_argv_prefix`, trusted-launcher binding/installation/materialization evidence, per-invocation validation policy, no in-run replacement/rotation policy, deterministic prelaunch/recovery rehydration only through descriptor-authenticated `trusted_launcher_argv_prefix`, safety-critical command allowlist, separately validated supervisor-only termination exception, and failure token/evidence mapping. |
 | `provider` | Non-empty compiled provider ID. Every parent-spawned lane, correction, and delivery runner argv contains exact `--provider <provider>`; the value is immutable across restart/resume. |
+| `delivery_branch` | Required canonical normalized Git branch name without a `refs/heads/` prefix. Composition and admission require exact success from descriptor-bound `git check-ref-format --branch <delivery_branch>`, reject aliases/whitespace/control characters, and bind the exact string into `plan_sha256`. |
+| `delivery_branch_contract` | Required object with schema `goal-plan.delivery-branch/v1`: exact remote name, exact push/fetch mapping, expected full ref `refs/heads/<delivery_branch>`, collision policy `create_or_same_plan_run_exact_head`, local creation source `exact_final_integrated_head`, no-force policy, same-plan/run ownership evidence requirements, remote query schema, and `definition_sha256`. It is validated even when delivery is disabled and exercised only for `delivery_mode: "pr"`. |
 | `integration_correction_child` | Immutable child-pipeline path/hash, exact prefix/provider/argv contract, `integration_worktree` CWD policy, positive `max_child_seconds`, result schema, and process-supervision contract for bounded integration correction. |
 | `delivery_child` | Required only for `delivery_mode: "pr"`; immutable adapted `deliver_pr.dot` path/hash, exact prefix/provider/argv contract, `delivery_worktree` CWD policy, positive `max_child_seconds`, external-state policy, delivery-result schema, and process-supervision contract. Forbidden for `delivery_mode: "none"`. |
 | `pre_terminal_cleanup` | Object binding the external trusted-runtime definition/binding hashes, exact `trusted_runtime_argv_prefix + pre-terminal-cleanup` argv schemas, fresh trusted-runtime/parent-runner/target-source/compiled-source gate policy, explicit cleanup-record fields `trusted_runtime_binding_verdict`, `parent_binding_verdict`, and `mutation_authority`, bounded identity-safe process-reconciliation policy, authority-scoped run-owned-worktree lifecycle rules including `PRESERVED_RESIDUAL`, required gate-evidence hashes, permitted/attempted/skipped action records, unresolved-resource evidence, cleanup-verdict/final-status mapping, evidence schema `goal-plan.pre-terminal-cleanup/v2`, token mapping, and `definition_sha256`. It forbids execution of the target-repository runtime copy. |
+| `terminal_carriers` | Closed object defining exact parent nodes `CompleteCarrier`, `ResidualsCarrier`, `InfraCarrier`, and `AbortedCarrier`; external result/finalizer input path policies; expected status/routing token; carrier evidence schema `goal-plan.terminal-carrier/v1`; exact stdout token, exit code/outcome, INFRA escalation behavior, terminal `Msquare` routing, and `definition_sha256`. |
 | `engine_step_budget` | Object with exact positive integers `poll_wait_seconds: 30` and `engine_step_multiplier: 50`; compiled parent node/step totals; and, for every lane, correction, and delivery branch, `branch_nonpoll_steps`, `branch_node_count`, and `max_poll_cycles`. |
-| `global_budgets` | Object with positive integer `max_total_attempts` for verification-bearing adaptive attempts only, positive integer `max_process_launches` for supervisor starts/restarts, positive integer `max_integration_corrections` for supervised correction-child launches, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v3`, locked trusted-runtime binding identity, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, correction-reservation state contract, and budget-ledger implementation hash. |
+| `global_budgets` | Object with positive integer `max_total_attempts` for verification-bearing adaptive attempts only, positive integer `max_process_launches` for supervisor starts/restarts, positive integer `max_integration_corrections` for supervised correction-child launches, positive integer `max_pipeline_seconds`, exact ledger schema `goal-plan.run-budget/v4`, locked launch-descriptor/authenticated-plan/trusted-runtime/delivery-branch identities, locking policy `fcntl_flock_exclusive`, clock policy `linux_clock_boottime`, correction-reservation state contract, and budget-ledger implementation hash. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
 | `delivery_mode` | Enum string `none` or `pr`. |
 
@@ -431,8 +530,10 @@ worktree mutation.
 
 Every initial start and resume writes a new immutable, atomically-created
 `state_root/admission/parent-runner-invocations/NNNN.json` record with schema
-`goal-plan.parent-runner-invocation/v3`. The record contains:
+`goal-plan.parent-runner-invocation/v4`. The record contains:
 
+- exact external `launch_descriptor_path`, descriptor schema/hash, authenticated
+  plan path/blob ID/length/SHA-256, and descriptor creation-evidence hash;
 - exact `trusted_launcher_argv_prefix`, binding hash, installation-evidence
   hash, external launcher path/hash, interpreter/executable identity,
   self-check/materialization-or-rehydration evidence hashes, and
@@ -473,9 +574,9 @@ Each `lanes` entry contains:
 | `scope_outs` | String array. |
 | `owned_paths` | Non-empty array of repository-relative path patterns. No pattern may equal, contain, or overlap `pipelines/PLAN_SLUG/**`. |
 | `dependencies` | Array of lane IDs; references must exist and form an acyclic graph. |
-| `verifier` | Object with exactly one of non-empty argv, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "candidate_verification_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; `write_policy: "read_only"`; mandatory `--output-root {verifier_output_root}` argv interface and required containment environment; evidence schema version `goal-plan.lane-verifier/v1`; exit/token mapping; `envelope_definition_sha256`; and `definition_sha256`. |
+| `verifier` | Object with exactly one of non-empty argv, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "candidate_verification_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; `write_policy: "read_only"`; mandatory `--output-root {verifier_output_root}` argv interface and required containment environment; evidence schema version `goal-plan.lane-verifier/v2`; exit/token mapping; both `child_attempt_envelope_definition_sha256` and `parent_envelope_definition_sha256`; and `definition_sha256`. |
 | `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
-| `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v2`, and a hash binding those immutable values. |
+| `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v3`, and a hash binding those immutable values. |
 | `budgets` | Object with positive integer `max_attempts` for local verification-bearing adaptive attempts and positive integer `max_child_seconds`. Process launches are not attempts. |
 | `process_supervision` | Object with exact `schema_version: "goal-plan.process-supervision/v4"`, `platform: "linux"`, `mode: "per_child_reaper"`, exact external `trusted_supervisor_argv_prefix` and prefix hash from the immutable trusted-runtime binding, bound supervisor/interpreter/runtime identity, per-invocation binding validation, exact positive integer `poll_wait_seconds: 30`, `pre_ledger_reconciliation_timeout_seconds`, and `term_grace_seconds`; canonical supervisor/child procfs identity requirements; deterministic intent/ledger/ack/result paths; exact closed suffixes for self-check/run/poll/terminate/reconcile; control-client schemas/tokens; and supervisor-definition hash. |
 
@@ -530,6 +631,7 @@ fail
 --param provider=<compiled-provider>
 --param attractor_runner_argv_prefix_sha256=<full prefix hash>
 --param lane_verifier_definition_sha256=<full verifier contract hash>
+--param child_attempt_envelope_definition_sha256=<full child-attempt-envelope hash>
 --param ownership_contract_sha256=<full ownership contract hash>
 ```
 
@@ -556,7 +658,8 @@ launch-contract hash covers the exact runner-prefix tokens/hash, executable and
 module/source identity, compiled provider, ordered argv template, typed
 parameter schema, environment policy, child DOT hash, symbolic `lane_worktree`
 CWD policy, shared budget-ledger paths, trusted-runtime binding/bundle/prefix
-hashes, and expected lane-result schema.
+hashes, launch-descriptor hash, child-attempt-envelope definition hash, and
+expected lane-result schema.
 
 At launch, the parent records the prefix hash, resolved executable and module
 source realpaths/hashes, provider, exact argv, environment hash, lane-worktree
@@ -602,7 +705,8 @@ fall back to writing generated state beside `goal_lane.dot`.
   path/blob/mode/length/hash identities, external permission policy, and exact
   runtime/supervisor suffix schemas;
 - trusted-launcher definition/binding schema and hash, exact
-  `trusted_launcher_argv_prefix`, source and external bootstrap
+  harness-owned launch-descriptor schema/hash/path, authenticated plan
+  blob/path/hash, `trusted_launcher_argv_prefix`, source and external bootstrap
   path/blob/mode/length/hash identity, installation evidence, closed
   environment, allowed absolute system/Git/interpreter calls, and exact
   `self-check`/`materialize-runtime`/`rehydrate-runtime`/`launch-parent`
@@ -614,9 +718,15 @@ fall back to writing generated state beside `goal_lane.dot`.
   external-only policy;
 - the shared verifier-envelope definition hash, canonical commands, and
   read-only/external-output policies;
+- the child-attempt verifier-envelope definition hash, exact dirty-state
+  snapshot algorithms, canonical Git commands, and external-output policy;
 - the aggregate-verifier definition hash;
 - approval mode/transport requirements, delivery mode, and external
-  `delivery_state_root` policy; and
+  `delivery_state_root` policy;
+- exact `delivery_branch`, full ref, remote mapping, collision policy, and
+  branch-definition hash;
+- terminal-carrier schemas, node IDs, expected statuses/tokens, exit/outcome
+  mapping, evidence locations, escalation routes, and terminal `Msquare`; and
 - all terminal and correction routes.
 
 Embedding the exact `execution_source_sha` inside the commit it identifies would
@@ -629,74 +739,97 @@ exact SHA is the containing commit of those exact bytes, then freezes the exact
 value in run context and durable state. Thus plan/DOT bind the derivation and
 every runtime/evidence artifact binds the resolved SHA without self-reference.
 
+The launch descriptor is created after that containing commit exists, so
+embedding its future `descriptor_sha256` in `plan.json` would create the same
+kind of cycle. The plan/DOT therefore bind the exact descriptor schema and
+required runtime input names `launch_descriptor_path` and
+`launch_descriptor_sha256`, but contain no descriptor hash literal. The
+descriptor binds the committed plan blob in the trust-root direction; admission
+then freezes the observed descriptor hash into runtime binding, launch, ledger,
+recovery, finalizer, result, and carrier evidence.
+
 Admission runs before approval and before any repository/process/worktree
 mutation. It has one externally staged trusted-bootstrap prelude followed by
 the parent graph, and the combined sequence is the first green admission:
 
-1. Before starting the bootstrap process, the deployment/test harness validates
-   the exact external launcher path, bytes, permissions, interpreter/executable
-   identity, prefix hash, and closed environment against
-   `plan.json.trusted_launcher_binding`, then records immutable installation
-   evidence. A mismatch starts no bootstrap, parent, Git mutation, or repository
-   mutation.
-2. The harness invokes exact
-   `trusted_launcher_argv_prefix + self-check --plan ... --evidence ...`.
-   The external bootstrap revalidates its own binding and emits the immutable
-   self-check record; it does not import or execute target-repository Python.
-3. The harness invokes exact
-   `trusted_launcher_argv_prefix + materialize-runtime ...`. Without executing
-   repository code, the bootstrap binds `canonical_target_repo`, canonical
-   external `state_root`, exact parent DOT path, adjacent `plan.json`, parent
-   runner prefix/provider/logs-root contract, and the caller-supplied full
-   `execution_source_sha`. It recomputes `plan_sha256`, schema-validates
-   `plan.json`, proves target-repository/source identity, walks the exact
-   execution-source compiled tree, and persists
+1. The deployment/test harness creates and seals immutable
+   `launch_descriptor.json` from deployment configuration plus trusted
+   compile/commit outputs. It records the exact source SHA, target repository
+   identity, plan path/blob ID/length/hash, provider, external launcher
+   path/prefix/hash, trusted Git prefix/realpath/hash, and trusted
+   interpreter/executable prefix/realpath/hash without parsing checked-out
+   `plan.json`.
+2. Before every bootstrap invocation, the harness validates descriptor
+   location/schema/hash/permissions and the external launcher/Git/interpreter
+   identities against the descriptor. A mismatch writes the harness-only
+   prelaunch result and starts no plan-directed code, parent, runtime
+   materialization, or mutation.
+3. The harness invokes exact `trusted_launcher_argv_prefix + self-check
+   --launch-descriptor ... --plan ... --evidence ...`. The launcher first
+   validates its own descriptor-bound external identity, then uses only
+   descriptor-bound Git to read `execution_source_sha:plan_path`, validates
+   blob ID/length/hash, and requires checked-out plan bytes to be exactly that
+   blob. Only then does it parse and validate
+   `plan.trusted_launcher_binding`, target-repository identity, provider, and
+   remaining plan contract. It imports no target-repository Python.
+4. The harness invokes exact `trusted_launcher_argv_prefix +
+   materialize-runtime --launch-descriptor ...`. The bootstrap repeats the
+   complete descriptor/committed-plan authentication before reading any
+   plan-controlled trust field, then binds `canonical_target_repo`, canonical
+   external `state_root`, exact parent DOT path, authenticated adjacent
+   `plan.json`, parent runner prefix/provider/logs-root contract, and the
+   descriptor-supplied full `execution_source_sha`. It recomputes
+   `plan_sha256`, walks the exact execution-source compiled tree, and persists
    `compiled-source-manifest.json`.
-4. The bootstrap hashes the checked-out parent DOT, bootstrap source, runtime,
+5. The bootstrap hashes the checked-out parent DOT, bootstrap source, runtime,
    and supervisor; requires exact execution-source blob and compiled-manifest
-   equality; and validates every preflight-bound absolute
+   equality; and validates every descriptor-bound absolute
    Git/interpreter/system-call identity without PATH, `/usr/bin/env`, shell
    lookup, relative paths, or target-repository imports.
-5. The bootstrap extracts exact runtime/supervisor Git blobs,
+6. The bootstrap extracts exact runtime/supervisor Git blobs,
    materializes/seals/rereads the external trusted-runtime bundle, atomically
    writes the complete versioned binding and command evidence, and derives exact
    `runtime_bundle_hash`, `trusted_runtime_binding_path`,
    `trusted_runtime_argv_prefix`, and `trusted_supervisor_argv_prefix`. No
    extracted runtime executes before every source, external-byte, permission,
    tool, and binding identity is green.
-6. The harness writes the exact parent argv as canonical JSON, revalidates the
-   external launcher again, and invokes exact
-   `trusted_launcher_argv_prefix + launch-parent --binding ... --target-repo ...
-   --parent-argv-json ...`. The bootstrap validates binding/argv/environment,
+7. The harness writes the exact parent argv as canonical JSON, revalidates the
+   descriptor and external launcher again, and invokes exact
+   `trusted_launcher_argv_prefix + launch-parent --launch-descriptor ...
+   --binding ... --target-repo ... --parent-argv-json ...`. The bootstrap
+   authenticates the committed plan again, validates binding/argv/environment,
    changes its OS CWD to `canonical_target_repo`, and `execve`s the exact parent
    Attractor argv. The first parent safety command uses only
    `trusted_runtime_argv_prefix`, validates that external binding again, then
-   requires `/proc/self/cwd`, literal runner `--cwd .`, canonical target repo,
-   exact parent-DOT realpath, parent prefix/identity/provider/argv/process/logs
-   root, and all trusted-launcher evidence to agree.
-7. The external trusted runtime independently recomputes the plan/DOT/
+   requires descriptor hash/plan blob, `/proc/self/cwd`, literal runner
+   `--cwd .`, canonical target repo, exact parent-DOT realpath, parent
+   prefix/identity/provider/argv/process/logs root, and all trusted-launcher
+   evidence to agree.
+8. The external trusted runtime independently recomputes the plan/DOT/
    execution-source/compiled-manifest relationships and parses the static DOT
    for exact lane IDs, waves, dependency edges, integration order, budgets,
    verifier hashes, both source-SHA contracts, child launch/monitor nodes,
    ordered argv/params, correction expansion, approval transport, delivery
    policy, trusted-runtime definition/binding policy, and every safety-critical
    external prefix-plus-suffix tool command.
-8. It validates the child runner without PATH lookup: exact prefix form/hash,
+9. It validates the child runner without PATH lookup: exact prefix form/hash,
    executable/module/source realpaths/hashes, successful `<prefix> doctor`,
    required `run --help` flags, compiled provider support, and credential.
-9. It runs non-mutating external
+10. It runs non-mutating external
    `<trusted-runtime-prefix> self-check --format json` and
    `<trusted-supervisor-prefix> self-check --format json`; both report exact
    CLI, schema, suffix, permission, and binding support.
-10. It validates poll/branch/parent engine-step arithmetic, external roots,
+11. It validates poll/branch/parent engine-step arithmetic, the immutable
+    delivery branch/ref/remote/collision contract, external roots,
    approval mode/transport, environment schemas, and every no-mutation
    precondition.
-11. It atomically finalizes admission/render/tool/materialization evidence under
+12. It atomically finalizes admission/render/tool/materialization evidence under
     external `state_root` and writes the immutable parent-runner invocation
     record referencing the compiled-source manifest and exact trusted-runtime
     binding path/hash.
 
-No step in this sequence executes any target-repository Python script.
+No step in this sequence executes any target-repository Python script. No step
+before item 3 reads a plan-controlled trust field.
 
 For the Python-module prefix, the absolute interpreter runs a deterministic
 `importlib.util.find_spec("amplifier_module_pipeline_runner.cli")` probe and the
@@ -721,10 +854,13 @@ A trusted-launcher path/byte/interpreter/prefix/environment mismatch, parent
 CWD/`--cwd`/DOT-realpath mismatch, parent DOT byte/hash mismatch, unbound parent
 prefix/provider/process/logs-root value, missing file, schema failure, or
 graph/plan mismatch aborts before mutation. A failure before parent `execve` is
-reported as `PRELAUNCH_INFRASTRUCTURE_BLOCKED` with launcher-owned external
-evidence; it is not fabricated as a pipeline terminal. A failure after parent
-start is `INFRA_FAILURE`. Admission reads `plan.json` only to audit the
-already-static program; it never dispatches work from the JSON.
+reported only through exact external `prelaunch-result.json`, token
+`PRELAUNCH_INFRASTRUCTURE_BLOCKED`, and exit `78`; it is not fabricated as a
+pipeline terminal. A failure after parent start routes to `INFRA_FAILURE` only
+when the trusted finalizer/carrier substrate remains green; otherwise the run is
+incomplete until recovery. Admission reads the already
+descriptor-authenticated `plan.json` only to audit the static program; it never
+dispatches work from the JSON.
 
 #### Runtime invocation interface
 
@@ -732,7 +868,9 @@ Each compiled family member accepts only these runtime inputs:
 
 | Input | Type and rule |
 |---|---|
-| `trusted_launcher_argv_prefix` | Required exact immutable prefix from `plan.json`; supplied by deployment packaging or the canonical smoke harness, never selected by target-repository code. The caller validates the external copy and prefix against `trusted_launcher_binding` before every bootstrap subcommand. |
+| `launch_control_root` | Required harness/deployment-owned canonical absolute directory outside and disjoint from `target_repo`, its Git common directory, `state_root`, `worktree_root`, every worktree, and conditional `delivery_state_root`. It contains the immutable descriptor and harness-only prelaunch/recovery results; plan-directed code cannot select or mutate it. |
+| `launch_descriptor_path` | Required canonical absolute path equal to `launch_control_root/launch_descriptor.json`. The caller and launcher validate it before any plan field; it is never inferred from `plan.json` or `state_root`. |
+| `trusted_launcher_argv_prefix` | Required exact immutable prefix from the already-validated launch descriptor, supplied by deployment packaging or the canonical smoke harness and never selected by target-repository code. After authenticating the committed plan blob, the launcher additionally requires equality with `plan.trusted_launcher_argv_prefix` and `trusted_launcher_binding`. |
 | `target_repo` | Required absolute path to the Git working repository. Before the parent CLI starts, the trusted bootstrap's `launch-parent` must change OS CWD to its canonical realpath. Admission must prove that same realpath is the Git top-level, equals `/proc/self/cwd`, equals the runner's literal `--cwd .` resolution, and satisfies the `remote` or `history_anchor` identity policy from `plan.json.target_repo`. |
 | `execution_source_sha` | Required full Git commit SHA. It must be the containing commit of the exact invoked parent DOT and adjacent `plan.json`, contain every immutable compiled source file, descend from `product_base_sha`, and satisfy the complete byte-manifest gate. The invoked DOT realpath and observed bytes/hash must equal the exact parent-DOT path/blob and compiled-manifest entry for this commit. |
 | `run_id` | Required slug unique within the plan's run directory. |
@@ -745,20 +883,24 @@ Each compiled family member accepts only these runtime inputs:
 | `human_gate_transport` | Required enum `none` or `console`. `preapproved` requires `none`; `required` requires `console`, exact parent runner flag `--on-human-gate console`, and admission evidence for an attached readable/writable standalone TTY. |
 | `delivery_mode` | Required enum `none` or `pr`; must equal the compiled plan value. |
 | `github_repo` | `owner/repo` string required only when `delivery_mode` is `pr`; forbidden otherwise. |
+| `delivery_branch` | Required exact canonical branch from the authenticated plan; no runtime override. The parent derives expected full ref `refs/heads/<delivery_branch>` and remote mapping only from the bound branch contract. |
 
-The canonical unattended smoke stages the external bootstrap before launch,
-validates its bytes independently, records
-`goal-plan.trusted-launcher-installation/v1` evidence, and invokes only these
-closed bootstrap commands (paths and SHAs shown symbolically):
+The canonical unattended smoke stages the external bootstrap and creates the
+immutable launch descriptor before launch, validates both independently,
+records `goal-plan.trusted-launcher-installation/v2` evidence beneath
+`launch_control_root/evidence/`, and invokes only these closed bootstrap
+commands (paths and SHAs shown symbolically):
 
 ```text
 <each token of trusted_launcher_argv_prefix>
 self-check
+--launch-descriptor <absolute-launch-control-root>/launch_descriptor.json
 --plan <absolute-target-repo>/pipelines/goal_plan_smoke/plan.json
---evidence <absolute-state-root>/prelaunch/trusted-launcher-self-check.json
+--evidence <absolute-launch-control-root>/evidence/trusted-launcher-self-check.json
 
 <each token of trusted_launcher_argv_prefix>
 materialize-runtime
+--launch-descriptor <absolute-launch-control-root>/launch_descriptor.json
 --plan <absolute-target-repo>/pipelines/goal_plan_smoke/plan.json
 --target-repo <canonical-absolute-target-repo>
 --execution-source-sha <full-containing-sha>
@@ -767,6 +909,7 @@ materialize-runtime
 
 <each token of trusted_launcher_argv_prefix>
 launch-parent
+--launch-descriptor <absolute-launch-control-root>/launch_descriptor.json
 --binding <absolute-state-root>/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
 --target-repo <canonical-absolute-target-repo>
 --parent-argv-json <absolute-state-root>/prelaunch/parent-argv.json
@@ -792,6 +935,8 @@ absolute-console runner form it contains, in this exact order:
   "--param", "execution_source_sha=<full-containing-sha>",
   "--param", "run_id=<run-id>",
   "--param", "state_root=<absolute-state-root>",
+  "--param", "launch_descriptor_path=<absolute-launch-control-root>/launch_descriptor.json",
+  "--param", "launch_descriptor_sha256=<full-launch-descriptor-hash>",
   "--param", "trusted_launcher_argv_prefix_sha256=<full-trusted-launcher-prefix-hash>",
   "--param", "trusted_launcher_binding_sha256=<full-trusted-launcher-binding-hash>",
   "--param", "runtime_bundle_hash=<full-trusted-runtime-bundle-hash>",
@@ -801,7 +946,8 @@ absolute-console runner form it contains, in this exact order:
   "--param", "approval_mode=preapproved",
   "--param", "human_gate_transport=none",
   "--param", "delivery_mode=pr",
-  "--param", "github_repo=<owner/repo>"
+  "--param", "github_repo=<owner/repo>",
+  "--param", "delivery_branch=<compiled-delivery-branch>"
 ]
 ```
 
@@ -863,19 +1009,22 @@ rejects symlink escapes. `state_root` and, when present,
 equal to, ancestors of, nor descendants of the target repository root, Git
 common directory, compiled-source directory, any registered Git worktree, or
 `worktree_root`.
-The exact external bootstrap realpath is additionally disjoint from all those
-roots and worktrees, including `state_root`; no run-owned root may contain it or
-be contained by it.
+`launch_control_root` and the exact descriptor/bootstrap realpaths are
+additionally disjoint from all those roots and worktrees, including
+`state_root`; no run-owned root may contain them or be contained by them. Only
+the harness writes the launch-control result/evidence subdirectories, and the
+descriptor itself remains create-once, sealed, and immutable.
 
 `worktree_root` has phase-specific safety rules:
 
 1. **Before approval or any repository mutation**, it must be absent or an empty
    directory dedicated to this run. It must not equal, contain, or be contained
    by `state_root`, `delivery_state_root`, the target repository root, the Git
-   common directory, the compiled-source directory, or any pre-existing or
-   foreign registered worktree. Its nearest existing parent must not carry a
-   different run identity. Admission snapshots the complete directory entry set
-   and `git worktree list --porcelain` before approval.
+   common directory, the compiled-source directory, `launch_control_root`, the
+   launch descriptor or external launcher, or any pre-existing or foreign
+   registered worktree. Its nearest existing parent must not carry a different
+   run identity. Admission snapshots the complete directory entry set and
+   `git worktree list --porcelain` before approval.
 2. **After approval**, it may be an ancestor only of exact worktrees created by
    this run and recorded atomically in
    `state_root/run-owned-worktrees.json`. The registry uses schema
@@ -1069,19 +1218,23 @@ retry loop. Composition additionally rejects any lane `owned_paths` or
 The checked-in `goal_plan_bootstrap.py`, `goal_plan_runtime.py`, and
 `goal_plan_supervisor.py` are immutable compiled source, but none is trusted for
 first execution from the target working copy. The deployment or test harness
-must install a byte-exact copy of the bootstrap source blob before launching
-the pipeline. That external bootstrap is the only owner of first admission,
-trusted-runtime materialization, rehydration, and parent `execve` handoff.
+must install a byte-exact copy of the bootstrap source blob and create the
+immutable external launch descriptor before launching the pipeline. The
+descriptor, not `plan.json`, authenticates that launcher and its Git and
+interpreter/executable dependencies. That descriptor-authenticated bootstrap is
+the only owner of first admission, trusted-runtime materialization,
+rehydration, and parent `execve` handoff.
 `goal_plan_runtime.py` begins only after materialization; it has no bootstrap,
 `materialize-runtime`, `rehydrate-runtime`, or `launch-parent` entry point.
 
 The installed bootstrap path must be outside the target repository, its Git
 common directory, `state_root`, `worktree_root`, conditional
 `delivery_state_root`, and every current or future worktree. Target-repository
-code never installs, updates, repairs, or selects it. Production packaging or
-deployment that does not provide this external launcher and its installation
-evidence cannot run `goal_plan`; this is a declared prerequisite, not an
-in-pipeline fallback.
+code never installs, updates, repairs, or selects it or the descriptor.
+Production packaging or deployment that does not provide the external launcher,
+immutable `launch_descriptor.json`, and their creation/installation evidence
+cannot run `goal_plan`; these are declared prerequisites, not in-pipeline
+fallbacks.
 
 The trusted-runtime bundle remains exactly:
 
@@ -1095,14 +1248,21 @@ state_root/trusted-runtime/<runtime-bundle-hash>/
 `runtime-bundle-hash` is the SHA-256 of canonical JSON containing trusted
 runtime definition version, exact `execution_source_sha`, both runtime source
 paths/blob IDs/modes/lengths/SHA-256 values, trusted interpreter identity,
-trusted-launcher binding hash, and closed runtime/supervisor suffix-schema
-hashes. It contains no working-tree absolute path.
+launch-descriptor SHA-256, authenticated plan blob identity, trusted-launcher
+binding hash, and closed runtime/supervisor suffix-schema hashes. It contains no
+working-tree absolute path.
 
 #### Trusted launcher binding and exact CLI
 
-`plan.json.trusted_launcher_binding` is the immutable admission root. Its
-`goal-plan.trusted-launcher-binding/v1` object binds:
+`launch_descriptor.json` is the immutable admission root.
+`plan.json.trusted_launcher_binding` is a second-stage consistency contract
+that supplies no authority until descriptor-bound Git authenticates the
+committed plan blob and checked-out bytes. Its
+`goal-plan.trusted-launcher-binding/v2` object binds:
 
+- exact launch-descriptor schema/version and symbolic runtime path/hash input
+  names, plus authenticated plan path/blob ID/length/SHA-256; the observed
+  descriptor hash is recorded only after descriptor validation;
 - bootstrap CLI schema/version `goal-plan.bootstrap-cli/v1`;
 - exact source path
   `pipelines/PLAN_SLUG/python/goal_plan_bootstrap.py`, its Git blob ID, mode,
@@ -1122,40 +1282,47 @@ hashes. It contains no working-tree absolute path.
   `rehydrate-runtime`, and `launch-parent`, with the ordered suffix schemas
   below; and
 - installation-evidence schema
-  `goal-plan.trusted-launcher-installation/v1`, per-invocation self-check schema
-  `goal-plan.trusted-launcher-self-check/v1`, and `binding_sha256`.
+  `goal-plan.trusted-launcher-installation/v2`, per-invocation self-check schema
+  `goal-plan.trusted-launcher-self-check/v2`, and `binding_sha256`.
 
 The only valid command shapes are:
 
 ```text
-<each token of trusted_launcher_argv_prefix> self-check --plan <absolute-plan.json> --evidence <absolute-external-evidence-path>
-<each token of trusted_launcher_argv_prefix> materialize-runtime --plan <absolute-plan.json> --target-repo <absolute-target-repo> --execution-source-sha <full-sha> --state-root <absolute-state-root> --binding <absolute-trusted-runtime-binding.json>
-<each token of trusted_launcher_argv_prefix> rehydrate-runtime --plan <absolute-plan.json> --target-repo <absolute-target-repo> --execution-source-sha <full-sha> --state-root <absolute-state-root> --binding <absolute-trusted-runtime-binding.json>
-<each token of trusted_launcher_argv_prefix> launch-parent --binding <absolute-trusted-runtime-binding.json> --target-repo <absolute-target-repo> --parent-argv-json <absolute-parent-argv.json>
+<each token of trusted_launcher_argv_prefix> self-check --launch-descriptor <absolute-launch-descriptor.json> --plan <absolute-plan.json> --evidence <absolute-launch-control-evidence-path>
+<each token of trusted_launcher_argv_prefix> materialize-runtime --launch-descriptor <absolute-launch-descriptor.json> --plan <absolute-plan.json> --target-repo <absolute-target-repo> --execution-source-sha <full-sha> --state-root <absolute-state-root> --binding <absolute-trusted-runtime-binding.json>
+<each token of trusted_launcher_argv_prefix> rehydrate-runtime --launch-descriptor <absolute-launch-descriptor.json> --plan <absolute-plan.json> --target-repo <absolute-target-repo> --execution-source-sha <full-sha> --state-root <absolute-state-root> --binding <absolute-trusted-runtime-binding.json>
+<each token of trusted_launcher_argv_prefix> launch-parent --launch-descriptor <absolute-launch-descriptor.json> --binding <absolute-trusted-runtime-binding.json> --target-repo <absolute-target-repo> --parent-argv-json <absolute-parent-argv.json>
 ```
 
 Arguments are positional only as shown and options may not be omitted,
-reordered, repeated, or extended. The harness validates the external launcher
-path/type/mode/bytes, interpreter or executable identity, prefix hash, binding
-hash, and closed environment before **every** invocation. The bootstrap then
-repeats those observations in `self-check` and at the beginning of every other
-subcommand. Any mismatch stops before repository, process, ref, Git common
-directory, worktree, `worktree_root`, or `delivery_state_root` mutation.
+reordered, repeated, or extended. The harness validates the descriptor and its
+external launcher/Git/interpreter path/type/mode/bytes/prefix/environment
+identities before **every** invocation. The bootstrap repeats descriptor
+validation, authenticates the committed and checked-out plan bytes, and only
+then validates the plan binding at the beginning of every subcommand. Any
+mismatch stops before repository, process, ref, Git common directory, worktree,
+`worktree_root`, or `delivery_state_root` mutation.
 
 #### First-admission materialization ownership
 
 Only the externally installed copy of `goal_plan_bootstrap.py` implements this
 algorithm:
 
-1. Validate its `trusted_launcher_binding`, installation record, absolute
-   Git/interpreter prefixes, executable identities, permissions, and closed
-   environment. No PATH lookup, `/usr/bin/env`, shell, relative executable,
-   symlink operand, `-m`, or target-repository import is allowed.
-2. Validate `plan.json`, target-repository identity, exact
+1. Validate `launch_descriptor.json`, then its own external launcher prefix and
+   executable/interpreter/script identity, absolute Git/interpreter prefixes,
+   permissions, and closed environment. No plan field has been read. No PATH
+   lookup, `/usr/bin/env`, shell, relative executable, symlink operand, `-m`, or
+   target-repository import is allowed.
+2. Use descriptor-bound Git to resolve and read exact
+   `execution_source_sha:plan_path`; require descriptor blob ID/length/hash,
+   compare checked-out plan bytes byte-for-byte, then parse and validate
+   `plan.trusted_launcher_binding` plus plan/descriptor equality.
+3. Validate target-repository identity, exact
    `execution_source_sha`, parent DOT identity, the complete compiled-source
    tree, and checked-out bootstrap/runtime/supervisor bytes against their exact
    Git objects and compiled manifest before any mutable action.
-3. With the bound absolute Git prefix and closed environment, run exactly:
+4. With the descriptor-bound absolute Git prefix and closed environment, run
+   exactly:
 
    ```text
    <trusted-git-prefix> --git-dir <canonical-git-common-dir> rev-parse --verify <execution_source_sha>:<repo-relative-source-path>
@@ -1164,37 +1331,41 @@ algorithm:
 
    for runtime and supervisor. The bootstrap source blob is resolved and hashed
    for launcher/source identity but is never copied into `state_root`.
-4. Use only `cat-file blob` stdout bytes to create a unique `0700` staging
+5. Use only `cat-file blob` stdout bytes to create a unique `0700` staging
    directory beneath `state_root/trusted-runtime/`. Write with
    `O_CREAT|O_EXCL|O_NOFOLLOW`, fsync, atomically rename, fsync the directory,
    set runtime/supervisor to `0444`, and reread/hash/length-verify. Working-copy
    bytes are never materialization input.
-5. Write `trusted-runtime-binding.json` with the same
+6. Write `trusted-runtime-binding.json` with the same
    create/fsync/atomic-no-replace/fsync discipline; seal all files `0444` and
    the bundle directory `0555`; install at the exact bundle-hash path; and
    accept an existing directory only after complete validation.
-6. Reread binding/runtime/supervisor with no symlink traversal; require every
-   path, mode, length, hash, launcher/interpreter/Git identity, and prefix to
-   match; only then invoke external runtime and supervisor self-checks.
-7. For `launch-parent`, validate the runtime binding and canonical parent argv
-   JSON, call `chdir(realpath(target_repo))`, prove the new OS CWD, and pass the
-   exact parent array plus closed environment to `execve`. It never executes
-   extracted runtime before all prior identities and hashes are green.
+7. Reread binding/runtime/supervisor with no symlink traversal; require every
+   path, mode, length, hash, launch-descriptor/plan-blob identity,
+   launcher/interpreter/Git identity, and prefix to match; only then invoke
+   external runtime and supervisor self-checks.
+8. For `launch-parent`, reauthenticate descriptor and committed/checked-out
+   plan, validate the runtime binding and canonical parent argv JSON, call
+   `chdir(realpath(target_repo))`, prove the new OS CWD, and pass the exact
+   parent array plus closed environment to `execve`. It never executes extracted
+   runtime before all prior identities and hashes are green.
 
 Every Git command has bounded binary stdout/stderr capture. Materialization
 evidence records launcher binding/installation/self-check hashes, exact
 argv/CWD/environment/executable identity, exit status, expected/observed blob
 ID, stdout length/hash, destination, fsync/rename/chmod observations, and final
 reread. A failure before parent handoff is
-`PRELAUNCH_INFRASTRUCTURE_BLOCKED`, not a pipeline terminal.
+`PRELAUNCH_INFRASTRUCTURE_BLOCKED`, not a pipeline terminal, and the harness
+writes the closed prelaunch result described below.
 
 #### `trusted-runtime-binding.json`
 
-The binding uses exact schema `goal-plan.trusted-runtime-binding/v2` and contains:
+The binding uses exact schema `goal-plan.trusted-runtime-binding/v3` and contains:
 
 | Field | Contract |
 |---|---|
 | `schema_version`, `created_at` | Exact schema and RFC 3339 UTC creation timestamp. |
+| `launch_descriptor_path`, `launch_descriptor_sha256`, `plan_blob_identity` | Exact external descriptor and authenticated plan path/blob ID/length/SHA-256 used before plan parsing. |
 | `execution_source_sha`, `runtime_bundle_hash`, `trusted_runtime_definition_sha256` | Exact admitted source and compiled definition identities. |
 | `trusted_launcher_argv_prefix`, `trusted_launcher_binding_sha256` | Exact externally validated launcher prefix and immutable plan binding hash. |
 | `trusted_launcher_installation`, `trusted_launcher_self_check` | Absolute evidence paths and canonical hashes proving byte-exact external staging and the invocation that created/rehydrated this bundle. |
@@ -1238,20 +1409,23 @@ success.
 #### Deterministic prelaunch and recovery rehydration
 
 Recovery always begins with caller validation of
-`trusted_launcher_argv_prefix`, then exact trusted-launcher `self-check`, then
-exact `rehydrate-runtime` with the same plan/target/source/state/binding inputs
-as `materialize-runtime`. The external bootstrap validates an existing binding
-or, only when the exact bundle directory is absent, reconstructs runtime and
-supervisor from the two exact Git blobs using the same atomic sealed algorithm.
-It never reads materialization bytes from the current working copy and never
-repairs a present-but-mismatching bundle.
+`launch_descriptor.json` and its launcher/Git/interpreter identities, then exact
+trusted-launcher `self-check`, then exact `rehydrate-runtime` with the same
+descriptor/plan/target/source/state/binding inputs as `materialize-runtime`.
+Before any plan field, the external bootstrap authenticates the committed plan
+blob and checked-out bytes through descriptor-bound Git. It then validates an
+existing binding or, only when the exact bundle directory is absent,
+reconstructs runtime and supervisor from the two exact Git blobs using the same
+atomic sealed algorithm. It never reads materialization bytes from the current
+working copy and never repairs a present-but-mismatching bundle.
 
 Only after the recreated/existing binding, runtime, supervisor, interpreter,
 Git executable, and launcher provenance are completely green may the harness
 invoke exact `launch-parent`, which starts recovery through
 `trusted_runtime_argv_prefix`. A missing, unavailable, path-drifted, or
-hash-mismatched external launcher, bad interpreter/executable, invalid
-installation evidence, present bad runtime bundle, or failed exact-blob
+hash-mismatched descriptor/external launcher/Git/interpreter identity, invalid
+installation evidence, wrong authenticated plan blob, present bad runtime
+bundle, or failed exact-blob
 rehydration produces `RECOVERY_INFRASTRUCTURE_BLOCKED` with only external
 launcher evidence. It starts no parent, runtime cleanup, terminal finalizer, or
 Git mutation and never claims that pipeline finalization ran.
@@ -1298,12 +1472,19 @@ replace or rebind either trusted prefix.
 Deployment/test harness
   -> stage external bootstrap from exact execution_source_sha blob
   -> independently hash/install it outside every repository/run/worktree root
-  -> persist trusted-launcher installation evidence
-  -> before every command, validate exact trusted_launcher_argv_prefix/binding
-  -> trusted launcher self-check
+  -> from trusted compile/commit outputs + deployment config, create/seal
+     external launch_descriptor.json with exact plan blob, repo, launcher,
+     Git, interpreter/executable, target-repo, provider, schema/version/hash
+  -> persist descriptor creation + trusted-launcher installation evidence
+  -> before every command, validate descriptor and exact external launcher,
+     Git, interpreter/executable prefixes/realpaths/hashes
+  -> trusted launcher validates itself against descriptor
+  -> descriptor-bound Git reads exact execution_source_sha:plan_path blob
+  -> require checked-out plan bytes == descriptor-bound committed plan blob
+  -> only then validate plan.trusted_launcher_binding + remaining plan contract
   -> materialize-runtime on first admission OR rehydrate-runtime on recovery
-  -> reject as PRELAUNCH/RECOVERY_INFRASTRUCTURE_BLOCKED if launcher,
-     Git/interpreter/blob/runtime-binding proof is red
+  -> reject as PRELAUNCH/RECOVERY_INFRASTRUCTURE_BLOCKED with external result
+     if descriptor/plan/launcher/Git/interpreter/blob/runtime proof is red
   -> launch-parent validates parent argv JSON, chdir(target_repo), execve(parent)
 Start
   -> Bind typed runtime inputs
@@ -1313,8 +1494,8 @@ Start
        /proc/self/cwd == runner --cwd . == canonical target_repo
        invoked DOT == target_repo/pipelines/PLAN_SLUG/PLAN_SLUG.dot
        observed DOT hash == execution_source blob == compiled-manifest entry
-  -> Resolve and validate external state_root + worktree_root
-     + conditional delivery_state_root
+  -> Resolve and validate external launch_control_root + state_root
+     + worktree_root + conditional delivery_state_root
   -> Admission: validate plan/graph/repo + bind product_base_sha/execution_source_sha
   -> Persist immutable parent argv/prefix/provider/cwd/DOT/hash/process/logs evidence
   -> Require trusted-launcher installation/self-check/materialization evidence
@@ -1364,7 +1545,8 @@ Start
   -> Fresh cross-lane coherence review at that exact HEAD
        -> ITERATE: ReserveCorrectionRound(ordinal) + reserve process launch atomically
             -> exact supervisor prefix + run suffix -> valid ack marks correction STARTED
-            -> child ReserveGlobalAttempt -> adaptive correction -> verifier classification
+            -> child ReserveGlobalAttempt -> adaptive correction
+               -> ChildAttemptVerifierEnvelope -> verifier classification
             -> authoritative supervisor terminal consumes correction round
             -> CompiledSourceGate after correction
             -> VerifierExecutionEnvelope for each affected-closure lane
@@ -1383,6 +1565,12 @@ Start
           at exact final HEAD
             -> delivery disabled -> intended COMPLETE
             -> delivery enabled -> clean disposable final-HEAD delivery worktree
+                 -> validate immutable delivery_branch/full ref/remote mapping
+                 -> absent local branch: create from exact final HEAD
+                 -> stale/mismatched local branch: INFRA before network mutation
+                 -> absent remote ref: eligible to create without force
+                 -> existing remote ref: accept only same plan/run + exact final HEAD
+                    else INFRA before push/PR
                  -> pre-HEAD/status/full-filesystem/source gates
                  -> reserve process launch -> supervised adapted deliver_pr.dot child
                     with all generated state under delivery_state_root
@@ -1415,9 +1603,26 @@ Start
           gate hashes, cleanup verdict, and chosen final status
        -> cleanup fault or restricted authority yields INFRA_FAILURE
   -> exact trusted_runtime_argv_prefix + DurableTerminalFinalizer(final status)
-       -> atomically write result.json and goal_plan.status
-       -> emit exactly one terminal token
-  -> explicit terminal carrier publishes matching CLI outcome
+       -> atomically write immutable result.json, goal_plan.status, finalizer record
+       -> emit exactly one routing token TERMINAL_FINALIZED:<STATUS>
+  -> TERMINAL_FINALIZED:COMPLETE -> CompleteCarrier
+       -> validate result/status/hash/token -> emit GOAL_PLAN:COMPLETE
+       -> exit 0/outcome=success -> TerminalExit [shape=Msquare]
+       -> validation failure/outcome=fail -> InfraCarrier
+  -> TERMINAL_FINALIZED:RESIDUALS_READY -> ResidualsCarrier
+       -> valid -> emit GOAL_PLAN:RESIDUALS_READY
+          -> exit nonzero/outcome=fail -> TerminalExit
+       -> invalid -> emit GOAL_PLAN:CARRIER_INFRA
+          -> outcome=fail -> InfraCarrier
+  -> TERMINAL_FINALIZED:INFRA_FAILURE -> InfraCarrier
+       -> validate result or record carrier-escalation evidence
+       -> emit GOAL_PLAN:INFRA_FAILURE
+       -> exit nonzero/outcome=fail -> TerminalExit
+  -> TERMINAL_FINALIZED:ABORTED -> AbortedCarrier
+       -> valid -> emit GOAL_PLAN:ABORTED
+          -> exit nonzero/outcome=fail -> TerminalExit
+       -> invalid -> emit GOAL_PLAN:CARRIER_INFRA
+          -> outcome=fail -> InfraCarrier
 ```
 
 Each dependency wave is drawn explicitly. `shape=component` and
@@ -1487,7 +1692,7 @@ Every lane has the following approved, immutable contract:
 | Dependencies | Lane IDs that must be `PASS` and integrated before this lane starts. |
 | Verifier | Exact, non-interactive command with a defined symbolic CWD policy and timeout. The child uses `lane_worktree`; pre-integration parent verification uses a clean detached `candidate_verification_worktree`; post-merge closure and final-sweep verification use `integration_worktree`. Exit zero means the mechanical condition passed; any other result is evidence to classify. |
 | Qualitative criteria | Optional criteria that require an independent judgment gate after the mechanical verifier passes. |
-| Attempt budget | Maximum local verification-bearing adaptive attempts available to the lane. Every one is reserved by `ReserveGlobalAttempt` and consumed only at verifier-record classification; supervisor starts/restarts are separately bounded by run-wide `max_process_launches`. |
+| Attempt budget | Maximum local verification-bearing adaptive attempts available to the lane. Every one is reserved by `ReserveGlobalAttempt` and consumed only at `ChildAttemptVerifierEnvelope` classification; supervisor starts/restarts are separately bounded by run-wide `max_process_launches`. |
 
 A lane may read outside its owned paths as needed to understand the repository,
 but it may not modify outside them. Generated files and repository-wide files
@@ -1525,8 +1730,9 @@ Their `definition_sha256` covers a canonical serialization of:
   `candidate_verification_worktree`, and `integration_worktree`;
 - the configured timeout;
 - exact `write_policy: "read_only"` and run-scoped external output policy;
-- the shared `envelope_definition_sha256`;
-- lane-verifier evidence schema version `goal-plan.lane-verifier/v1`; and
+- both immutable `child_attempt_envelope_definition_sha256` and
+  `parent_envelope_definition_sha256`;
+- lane-verifier evidence schema version `goal-plan.lane-verifier/v2`; and
 - the exact exit/verdict/token mapping.
 
 No resolved absolute path is part of the immutable hash. A child attempt selects
@@ -1579,6 +1785,103 @@ create failure, red envelope, remove failure, stale registration, or inability
 to reconcile is `INFRA_FAILURE`, regardless of verifier exit. It never becomes
 lane feedback. A verifier failure is product evidence only after the envelope
 remains integral and clean teardown succeeds.
+
+### ChildAttemptVerifierEnvelope
+
+Every lane and integration-correction verifier that runs in an adaptive child
+uses a deterministic `ChildAttemptVerifierEnvelope`. It is distinct from the
+clean parent `VerifierExecutionEnvelope`: child attempts legitimately leave
+product changes, including tracked, untracked, ignored, and staged state, in a
+dirty lane or integration worktree before commit. The child envelope does not
+require cleanliness. It proves instead that the verifier did not create, alter,
+stage, commit, check out, delete, or replace any part of that exact
+post-attempt candidate.
+
+Immediately after `Adaptive Attempt` or `Adaptive Correction` returns and before
+any verifier process starts, the trusted runtime mints a unique external
+`verifier_output_root` beneath the attempt's external state directory and
+persists one post-attempt/pre-verifier snapshot containing:
+
+1. exact `HEAD` from descriptor-bound `git rev-parse --verify HEAD`;
+2. exact raw Git index-file length/SHA-256 plus the canonical
+   `git ls-files --stage -z` index-tree projection and its SHA-256;
+3. exact staged-entry projection from
+   `git diff --cached --raw -z --no-abbrev --full-index` plus its SHA-256;
+4. a complete `lstat` filesystem manifest of the lane worktree excluding only
+   the `.git` file/directory and its internals, and including every tracked,
+   untracked, and ignored file, directory, symlink, mode, length, target, and
+   regular-file SHA-256;
+5. the complete `CompiledSourceGate` record and hash; and
+6. an external output-root baseline proving the unique output root is absent
+   and recording the containing external directory's identity/manifest before
+   creation.
+
+The canonical `candidate_state_sha256` hashes the HEAD, raw index hash,
+index-tree projection, staged-entry projection, full filesystem manifest, and
+compiled-source record in that order. The snapshot binds exact
+`attempt_reservation_id`, immutable `attempt_token`, lane/correction ID,
+`process_run_id`, local attempt number, verifier-definition hash, child-envelope
+definition hash, integration base, and current candidate-state hash. No
+`git write-tree` or other command that writes an object is permitted while
+snapshotting.
+
+Only after the snapshot is durable does the envelope create the unique external
+output root and run the approved verifier with:
+
+```text
+--output-root <absolute-external-verifier-output-root>
+```
+
+and the same closed containment variables used by the parent envelope:
+`GOAL_PLAN_VERIFIER_OUTPUT_ROOT`, `TMPDIR`, `XDG_CACHE_HOME`,
+`PYTHONPYCACHEPREFIX`, and `COVERAGE_FILE`, all beneath that external output
+root. The verifier's contract is exact `write_policy: "read_only"` for the
+worktree and index. Verifier stdout, stderr, results, coverage, cache, and temp
+files must be declared beneath the output root; a definition requiring a
+worktree/index/object-database write is invalid before execution.
+
+Immediately after verifier exit, timeout, or start failure, the trusted runtime
+captures the same HEAD, raw index bytes, index-tree projection, staged-entry
+projection, full non-`.git` filesystem manifest, and compiled-source record
+again. It requires exact canonical equality between every pre-verifier
+post-attempt value and its post-verifier value. It also manifests the external
+output root, proves all verifier-created outputs are contained there, and
+compares that manifest with the recorded absent baseline so only declared
+external output-root creation is attributable to the verifier.
+
+The envelope uses definition schema
+`goal-plan.child-attempt-verifier-envelope-definition/v1` and evidence schema
+`goal-plan.child-attempt-verifier-envelope/v1`. Each evidence record contains:
+
+| Field | Contract |
+|---|---|
+| `attempt_reservation_id`, `attempt_token`, `process_run_id`, `local_attempt` | Exact live attempt identity; all values must match the budget ledger and child launch. |
+| `lane_or_correction_id`, `integration_base_sha` | Exact approved subject and current base. |
+| `pre_head_sha`, `post_head_sha` | Exact equal HEAD values; dirtiness is permitted but HEAD movement is not. |
+| `pre_index`, `post_index` | Raw index identity plus canonical staged index-tree projection paths/hashes; exact equality required. |
+| `pre_staged_entries`, `post_staged_entries` | Exact canonical staged-entry bytes/paths/hashes; exact equality required. |
+| `pre_worktree_manifest`, `post_worktree_manifest` | Complete tracked/untracked/ignored non-`.git` manifests; exact equality required. |
+| `pre_compiled_source`, `post_compiled_source` | Exact green compiled-source records/hashes; exact equality required. |
+| `pre_candidate_state_sha256`, `post_candidate_state_sha256` | Canonical candidate hashes; exact equality required and bound into later lane/correction evidence. |
+| `output_root_baseline`, `verifier_output_root`, `verifier_output_manifest` | Pre-verifier absent baseline, canonical external root, and contained post-verifier outputs. |
+| `verifier_argv`, `verifier_environment`, `verifier_exit_code`, `verifier_timed_out` | Exact read-only invocation and observed result. |
+| `verifier_result_discarded`, `verdict`, `record_sha256` | Integrity disposition, exact `PASS`, `FAIL`, or `INFRA`, and canonical record hash. |
+
+The last non-empty stdout line is exact
+`CHILD_ATTEMPT_VERIFIER:PASS` only when every integrity comparison is green and
+the verifier exits `0`, `CHILD_ATTEMPT_VERIFIER:FAIL` only when integrity is
+green and the verifier exits `1`, or `CHILD_ATTEMPT_VERIFIER:INFRA` for any
+other exit, timeout, execution/evidence fault, output escape, or state delta.
+Any verifier-caused tracked, untracked, ignored, staged, index, commit, checkout,
+HEAD, compiled-source, mode, symlink, or byte delta sets
+`verifier_result_discarded: true`, discards an apparent pass, and routes
+directly to `INFRA_FAILURE`. It never enters product correction.
+
+Legitimate adaptive dirty product changes are present in both snapshots and are
+therefore preserved. A normal dirty-worktree control with read-only verifier
+must retain equal pre/post candidate hashes and may produce either nondiscarded
+`PASS` or `FAIL`. A verifier that mutates the candidate and then reports pass is
+always `INFRA`.
 
 ### VerifierExecutionEnvelope
 
@@ -1791,16 +2094,17 @@ temporary files, fsync, atomic replace, and canonical JSON hashes.
 #### Launch intent and parent spawn
 
 After approval and an atomic process-launch reservation, the parent mints
-`launch-intent.json` with schema `goal-plan.launch-intent/v3` before starting
+`launch-intent.json` with schema `goal-plan.launch-intent/v4` before starting
 the supervisor. It contains:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.launch-intent/v3`. |
+| `schema_version` | Exact value `goal-plan.launch-intent/v4`. |
 | `process_kind`, `process_id`, `process_launch`, `process_run_id` | Exact approved lane/correction/delivery identity, positive process-launch ordinal, and canonical process-run ID. |
 | `launch_contract_path`, `launch_contract_sha256` | Absolute contract path and canonical hash. |
 | `process_launch_reservation_id` | Exact live process-launch reservation from the run-wide budget ledger; never an adaptive-attempt reservation. |
 | `correction_round_id` | Required canonical correction-round reservation ID for `process_kind: "correction"`; null otherwise. |
+| `launch_descriptor_sha256`, `authenticated_plan_blob_sha256` | Exact first-trust identities propagated from admission; no child may replace them. |
 | `attractor_runner_argv_prefix_sha256`, `provider` | Exact immutable compiled child-runner prefix hash and provider. |
 | `trusted_runtime_binding_path`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash` | Exact external binding revalidated by the parent immediately before launch. |
 | `trusted_supervisor_argv_prefix_sha256`, `trusted_supervisor_identity` | Exact immutable external supervisor prefix hash and executable/interpreter/script/CLI/schema identity from the validated trusted-runtime binding. |
@@ -1809,11 +2113,12 @@ the supervisor. It contains:
 | `identity_policy` | Exact value `goal-plan.linux-procfs-identity/v1`. |
 | `supervisor_command_sha256` | Canonical hash of executable/argv/env/CWD/process-run/contract/output identities. |
 
-The `goal-plan.process-launch-contract/v3` is immutable and contains exact
+The `goal-plan.process-launch-contract/v4` is immutable and contains exact
 process kind/ID, correction-round ID when applicable, child
 `attractor_runner_argv_prefix` tokens/hash,
 executable/module/source identity, provider, closed child argv/env/CWD,
-process-run ID, source identities, process-launch reservation,
+process-run ID, launch-descriptor/authenticated-plan identities, source
+identities, process-launch reservation,
 trusted-runtime binding path/hash and runtime-bundle hash,
 `trusted_supervisor_argv_prefix` tokens/hash and identity, exact supervisor
 `run` suffix/environment, log descriptors, child result/evidence paths, wall
@@ -2082,7 +2387,8 @@ Orient
   -> ReserveGlobalAttempt
   -> MarkAttemptStarted
   -> Adaptive Attempt
-  -> Deterministic verifier
+  -> Snapshot exact dirty post-attempt candidate
+  -> ChildAttemptVerifierEnvelope
   -> ClassifyVerifierAndConsumeGlobalAttempt
        -> red -> classify failure
                     -> novel/actionable -> curate feedback -> ReserveGlobalAttempt
@@ -2111,9 +2417,13 @@ before atomically writing `RESERVED`. It never increments or admits against
 `max_integration_corrections`; that ceiling belongs exclusively to the
 parent-side supervised correction-round reservation.
 `MarkAttemptStarted` durably records that the adaptive node began before model
-work starts. The deterministic verifier writes one immutable verifier record;
-`ClassifyVerifierAndConsumeGlobalAttempt` binds that record's path/hash/verdict
-to the reservation and transitions it to `CONSUMED` exactly once. A duplicate
+work starts. Immediately after the adaptive node and before verifier execution,
+the `ChildAttemptVerifierEnvelope` snapshots the exact dirty lane candidate,
+runs the verifier read-only with external output/cache/temp roots, and proves
+the candidate remained byte-identical. It writes one immutable envelope record;
+`ClassifyVerifierAndConsumeGlobalAttempt` binds that record's
+path/hash/verdict, attempt token, and pre/post candidate-state hashes to the
+reservation and transitions it to `CONSUMED` exactly once. A duplicate
 classification is idempotent only when every bound value matches.
 
 A crash after reservation consumes conservatively when
@@ -2124,28 +2434,31 @@ adaptive attempt never started. Process launch/relaunch neither reserves nor
 consumes an adaptive attempt by itself; conversely one healthy child process
 may consume several bounded adaptive attempts.
 
-The cheap deterministic verifier always precedes the expensive qualitative
+The cheap deterministic verifier inside its child-attempt integrity envelope
+always precedes the expensive qualitative
 gate. Feedback records the highest-leverage next correction and replaces stale
 guidance rather than growing an unbounded transcript. Repeated identical
 failure signatures route to diagnosis rather than another blind attempt.
 
 The child lane graph does not mark the batch lane `PASS`, certify integration,
 or certify batch completion. It produces a candidate commit and versioned
-`goal-plan.lane-result/v2` evidence under
+`goal-plan.lane-result/v3` evidence under
 `state_root/lanes/<lane-id>/runs/<process-launch>/`. Parent verification in a
 clean detached candidate worktree assigns the final `PASS` disposition.
 
 ### Integration-correction convergence subgraph
 
-The supervised `integration_correction.dot` uses the same accounting skeleton:
+The supervised `integration_correction.dot` uses the same accounting and
+child-attempt integrity skeleton:
 
 ```text
 OrientCorrection
   -> ReserveGlobalAttempt
   -> MarkAttemptStarted
   -> Adaptive Correction
-  -> Commit correction
-  -> Deterministic correction verifier using aggregate verifier definition/hash
+  -> Snapshot exact dirty post-correction candidate
+  -> ChildAttemptVerifierEnvelope using aggregate verifier definition/hash
+  -> Commit correction only after nondiscarded envelope PASS
   -> ClassifyVerifierAndConsumeGlobalAttempt
        -> red -> curate findings -> ReserveGlobalAttempt
        -> green -> ownership check -> correction-result candidate
@@ -2161,11 +2474,13 @@ pre-coherence sequence. Crash release/consumption rules are identical to lane
 attempts.
 
 The terminal `correction-result.json` uses schema
-`goal-plan.correction-result/v1` and binds correction/process IDs,
+`goal-plan.correction-result/v2` and binds correction/process IDs,
 `correction_round_id`, process launch, both source SHAs, child- and
 supervisor-runner/provider hashes, integration base and candidate correction
-commit, ordered adaptive-attempt reservation/verifier records, ownership
-evidence, and exact candidate disposition. It is a parent routing hint only.
+commit, ordered adaptive-attempt reservation plus
+`ChildAttemptVerifierEnvelope` records, attempt tokens, pre/post candidate
+hashes, ownership evidence, and exact candidate disposition. It is a parent
+routing hint only.
 
 ## Deterministic and LLM Boundaries
 
@@ -2176,8 +2491,9 @@ evidence, and exact candidate disposition. It is a parent routing hint only.
 | Plan-schema validation, dependency-cycle checks, ownership-collision checks, source-SHA/compiled-manifest admission | Deterministic nodes | These are exact predicates. |
 | Lane, candidate-verification, and integration worktree creation, cleanliness, cleanup, branch/source inspection | Deterministic nodes | Git state is observable and must be reproducible. |
 | Child process launch, identity ledger, logs, timeout, TERM/grace/KILL, exit capture, and restart reconciliation | Deterministic supervisor and parent nodes | Process control is exact infrastructure state; artifacts cannot substitute for the real exit status. |
-| `ReserveGlobalAttempt`, attempt-start marking, verifier-record classification, and exact-once consumption | Deterministic child/runtime nodes using the external flocked ledger | Verification-bearing work is the scarce attempt unit; process launches are a separate substrate budget. |
+| `ReserveGlobalAttempt`, attempt-start marking, child-attempt-envelope classification, and exact-once consumption | Deterministic child/runtime nodes using the external flocked ledger | Verification-bearing work is the scarce attempt unit; process launches are a separate substrate budget. |
 | Advancing a lane goal and adapting implementation | LLM lane worker inside the child Attractor process | The implementation path may change as the domain surprises the worker. |
+| Running child-side lane/correction verifiers in dirty adaptive worktrees | Distinct deterministic `ChildAttemptVerifierEnvelope` | Legitimate dirty product state may exist before verification, but exact HEAD/index/staged/full-filesystem/compiled-source snapshots must remain equal afterward; verifier mutation discards the verdict. |
 | Running parent-side lane and aggregate verifiers plus pre/post integrity checks | Shared deterministic `VerifierExecutionEnvelope` | A verifier result is evidence only when immutable HEAD, cleanliness, compiled source, and external-output invariants survive. |
 | Failure-signature comparison and budget accounting | Deterministic nodes | Loop control must not depend on model judgment. |
 | Root-cause diagnosis after repeated failure | Fresh or gate-class LLM context | Classification may require semantic judgment, but its proposed correction is tested by the deterministic verifier. |
@@ -2201,8 +2517,9 @@ Evidence is accepted in this order:
 1. Git object, worktree, source-SHA, and compiled-source-manifest state observed
    by deterministic commands.
 2. Canonical process identity, real process exit, and process-run evidence.
-3. Complete verifier-envelope pre/post HEAD, cleanliness, compiled-source, and
-   external-output integrity evidence.
+3. Complete child-attempt or parent verifier-envelope pre/post HEAD,
+   index/cleanliness, full-filesystem, compiled-source, and external-output
+   integrity evidence.
 4. Non-discarded verifier argv, exit status, timeout status, and captured
    output.
 5. Deterministic ownership and dependency checks.
@@ -2228,7 +2545,8 @@ serialization, but the state must include:
   candidate head SHAs;
 - process-launch record plus every adaptive-attempt reservation/start/verifier
   classification record;
-- latest verifier log and status;
+- latest child-attempt verifier-envelope log, exact attempt token, pre/post
+  candidate-state hashes, and status;
 - curated feedback and diagnosis;
 - ownership diff/check result;
 - optional qualitative verdict;
@@ -2240,7 +2558,7 @@ schema:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.lane-result/v2`. |
+| `schema_version` | Exact value `goal-plan.lane-result/v3`. |
 | `lane_id`, `plan_hash` | Exact compiled lane ID and approved plan hash. |
 | `process_run_id`, `process_launch` | Canonical process-run ID and matching positive process-launch ordinal. |
 | `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
@@ -2250,6 +2568,7 @@ schema:
 | `attempts_used`, `max_attempts` | Non-negative count of classified/consumed verification-bearing adaptive attempts and approved positive local limit; process launches are excluded. |
 | `attempt_reservation_paths` | Ordered non-empty array when an attempt started; every record binds lane ID, process-run ID, local attempt, verifier hash, and exact-once classification. |
 | `candidate_disposition` | One of `CANDIDATE`, named `FAIL`, named `BLOCKED`, `PENDING_HUMAN`, or `BUDGET_EXHAUSTED`; never parent `PASS`. |
+| `child_attempt_envelope_paths`, `attempt_tokens`, `candidate_state_hashes` | Ordered envelope records and exact pre/post candidate hashes for every classified adaptive attempt. |
 | `verifier_evidence_paths`, `review_evidence_paths`, `ownership_evidence_path` | Run-scoped evidence references; arrays may be empty only when the candidate disposition explains why the gate was unreachable. |
 | `feedback_sha256` | Hash of the final curated feedback that informed the last correction, or null when no correction occurred. |
 
@@ -2358,6 +2677,9 @@ Before a wave starts, deterministic preflight confirms:
   `branch_node_count`, and `max_poll_cycles`, plus parent total-step arithmetic,
   match the compiled engine-step contract;
 - the aggregate verifier is runnable;
+- `delivery_branch` passes descriptor-bound `git check-ref-format --branch` and
+  its exact full ref, remote mapping, collision/no-force policy, and
+  definition hash match plan/DOT;
 - lane verifiers are present, non-interactive, read-only, and externally
   output-configured;
 - the envelope implementation/hash and canonical commands match the plan; and
@@ -2619,7 +2941,8 @@ bound to the exact final HEAD; a HEAD change invalidates all three.
 
 Each lane and correction contract declares a local adaptive-attempt budget.
 `max_total_attempts` counts only verification-bearing adaptive attempts whose
-reservation is consumed when the verifier record is classified. Retries caused
+reservation is consumed when the complete child-attempt envelope is classified.
+Retries caused
 by mechanical failure, qualitative refusal, or reintegration failure consume
 only if they reach that verifier-bearing attempt cycle. Merely starting,
 restarting, polling, or reaping a child process never counts as an adaptive
@@ -2640,7 +2963,7 @@ lane-attempt evidence exists.
 
 The parent mints an external run-wide budget ledger at
 `state_root/budgets/run-wide.json` with schema
-`goal-plan.run-budget/v3`. Every read-modify-write by the parent or any
+`goal-plan.run-budget/v4`. Every read-modify-write by the parent or any
 `ReserveGlobalAttempt` node opens the dedicated
 `state_root/budgets/run-wide.lock`, holds `fcntl.flock(LOCK_EX)`, rereads and
 validates the current ledger, writes a same-directory temporary file, fsyncs,
@@ -2651,8 +2974,8 @@ The ledger contains:
 
 | Field | Contract |
 |---|---|
-| `schema_version` | Exact value `goal-plan.run-budget/v3`. |
-| `plan_id`, `run_id`, `product_base_sha`, `execution_source_sha`, `provider`, `trusted_launcher_argv_prefix_sha256`, `trusted_launcher_binding_sha256`, `attractor_runner_argv_prefix_sha256`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash`, `trusted_runtime_argv_prefix_sha256`, `trusted_supervisor_argv_prefix_sha256` | Exact immutable run, trusted-launcher, child-runner, external binding, safety-runtime, and external supervisor identities. |
+| `schema_version` | Exact value `goal-plan.run-budget/v4`. |
+| `plan_id`, `run_id`, `plan_hash`, `product_base_sha`, `execution_source_sha`, `launch_descriptor_sha256`, `authenticated_plan_blob_sha256`, `provider`, `delivery_branch`, `delivery_branch_definition_sha256`, `trusted_launcher_argv_prefix_sha256`, `trusted_launcher_binding_sha256`, `attractor_runner_argv_prefix_sha256`, `trusted_runtime_binding_sha256`, `runtime_bundle_hash`, `trusted_runtime_argv_prefix_sha256`, `trusted_supervisor_argv_prefix_sha256` | Exact immutable run, descriptor/plan, delivery-branch, trusted-launcher, child-runner, external binding, safety-runtime, and external supervisor identities. |
 | `boot_id` | Exact Linux boot ID at run admission. |
 | `started_at_boottime`, `deadline_boottime` | `CLOCK_BOOTTIME` values captured with `clock_gettime`; deadline equals start plus `max_pipeline_seconds`. |
 | `max_pipeline_seconds`, `max_total_attempts`, `max_process_launches`, `max_integration_corrections` | Exact positive compiled limits. `max_total_attempts` excludes all process launches. |
@@ -2769,10 +3092,12 @@ It creates or idempotently reuses one `RESERVED` record keyed by canonical
 serialization of lane/correction ID, `process_run_id`, positive local attempt,
 and verifier-definition SHA-256. A different value reusing any tuple component
 is `INFRA_FAILURE`. Immediately before model work, `MarkAttemptStarted`
-transitions the record to `STARTED`. When the deterministic verifier record is
-complete, `ClassifyVerifierAndConsumeGlobalAttempt` validates its schema,
-verifier hash, subject/process/local-attempt tuple, path, content hash, and
-verdict, then transitions the reservation to `CONSUMED` exactly once.
+transitions the record to `STARTED`. When the deterministic child-attempt
+envelope record is complete, `ClassifyVerifierAndConsumeGlobalAttempt`
+validates its schema, envelope/verifier hashes, attempt token,
+subject/process/local-attempt tuple, path, content hash, equal candidate-state
+hashes, and verdict, then transitions the reservation to `CONSUMED` exactly
+once.
 
 Crash reconciliation is conservative. A `RESERVED` record becomes
 `RELEASED_NO_ATTEMPT` only when durable child-node state, supervisor result,
@@ -2856,7 +3181,8 @@ The only pre-mutation gate presents:
 - child DOT/launch hashes, lane wall limits, and process-supervision policy;
 - budgets;
 - planned integration order; and
-- delivery intent.
+- delivery intent, immutable delivery branch/full ref/remote mapping, and
+  collision/no-force policy.
 
 Before approval, only external `state_root` may be created or written. The
 target repository, Git common directory, refs, branches, registered worktrees,
@@ -2917,18 +3243,26 @@ There are no routine gates between waves.
 
 Recovery is a graph pattern, not an assumption about engine checkpoints. Every
 initial start and resume first validates the external
-`trusted_launcher_argv_prefix`. Recovery then runs the external bootstrap's
-exact `rehydrate-runtime` and `launch-parent` commands, enters graph recovery
-only through `trusted_runtime_argv_prefix`, and satisfies the parent
-target-repository binding before deterministic reconciliation. If launcher
-identity is unavailable or mismatched, no graph starts and the harness reports
-`RECOVERY_INFRASTRUCTURE_BLOCKED`; it does not claim pipeline finalization.
+`launch_descriptor.json`, descriptor-bound launcher/Git/interpreter identities,
+and committed plan blob before any plan trust field. Recovery then runs the
+external bootstrap's exact descriptor-bearing `rehydrate-runtime` and
+`launch-parent` commands, enters graph recovery only through
+`trusted_runtime_argv_prefix`, and satisfies the parent target-repository
+binding before deterministic reconciliation. If descriptor, plan, launcher,
+Git, or interpreter identity is unavailable or mismatched, no graph starts; the
+harness writes `recovery-result.json`, prints
+`RECOVERY_INFRASTRUCTURE_BLOCKED`, and exits `78` without claiming pipeline
+finalization.
 
 ### Durable state
 
 The run persists:
 
 - approved plan snapshot/hash and preapproval/approval evidence;
+- external launch-descriptor path/schema/version/hash and creation evidence;
+  descriptor-bound repository/target/source/provider identity; exact plan
+  path/blob ID/length/SHA-256; and every initial/recovery descriptor-validation
+  record;
 - exact `trusted_launcher_argv_prefix`, `trusted_launcher_binding` content/hash,
   source bootstrap path/blob/mode/length/hash at `execution_source_sha`,
   external bootstrap path/realpath/mode/length/hash, interpreter/executable
@@ -2955,8 +3289,9 @@ The run persists:
   history-anchor proof, exact `product_base_sha`, exact
   `execution_source_sha`, their ancestry proof, and the separated compiled-plan
   and lane-produced delta ranges;
-- canonical external launcher path, `state_root`, `worktree_root`, and
-  conditional `delivery_state_root`, pairwise/root/worktree safety evidence,
+- canonical `launch_control_root`, descriptor/external launcher paths,
+  `state_root`, `worktree_root`, and conditional `delivery_state_root`,
+  pairwise/root/worktree safety evidence,
   XDG/default derivation evidence, approval mode/transport, and approval
   boundary;
 - atomic `run-owned-worktrees.json` with every lane, integration,
@@ -2987,6 +3322,11 @@ The run persists:
   HEAD, pre/post porcelain-v2 status, complete worktree manifests including
   ignored paths, compiled-source evidence, output-root environment/manifest,
   verifier outputs, and final envelope verdict;
+- every `goal-plan.child-attempt-verifier-envelope/v1` record, including attempt
+  token/reservation, pre/post HEAD, raw index and index-tree hashes, staged-entry
+  projections, complete tracked/untracked/ignored filesystem manifests,
+  compiled-source records, external output-root baseline/manifest, pre/post
+  candidate-state hashes, and discarded-result verdict;
 - integration journal whose every entry binds `product_base_sha`,
   `execution_source_sha`, candidate SHA, and pre-merge/post-merge HEADs;
 - integration-correction journal with each
@@ -3011,8 +3351,12 @@ The run persists:
 - versioned `result.json`; and
 - the versioned delivery-attempt ledger, external `delivery_state_root`,
   disposable delivery-worktree lifecycle and pre/post envelope, supervised
-  delivery-child process records, branch, expected head, PR URL, observed remote
-  head, and independent verification result.
+  delivery-child process records, immutable delivery branch/full ref/remote
+  identity/refspec/definition hash/collision evidence, expected head, PR URL,
+  observed remote ref/PR heads, and independent verification result; and
+- finalizer routing evidence plus every terminal-carrier attempt/evidence path,
+  expected status/token, result/evidence hashes, exit code/outcome, and terminal
+  `Msquare` disposition.
 
 State writes must be atomic. Human-readable reports are derived from structured
 state; they are not the source of truth.
@@ -3020,15 +3364,18 @@ state; they are not the source of truth.
 ### Reconciliation rules
 
 On restart, prelaunch recovery runs before the graph compares state with
-reality. The deployment/runtime harness validates the external bootstrap
-against `trusted_launcher_binding`, invokes exact `self-check`, then invokes
-exact `rehydrate-runtime` from the durable plan and Git objects at
-`execution_source_sha`. It never imports target code or materializes from
-current working-copy bytes. A bad/missing launcher, present mismatching runtime
-bundle, or rehydration that cannot prove exact blob, Git/interpreter,
-permission, fsync, and final binding identities stops as
-`RECOVERY_INFRASTRUCTURE_BLOCKED` before the parent; no cleanup/finalizer
-completion is claimed.
+reality. The deployment/runtime harness first validates immutable
+`launch_descriptor.json` and its external launcher/Git/interpreter identities,
+then the launcher authenticates the exact committed plan blob and checked-out
+plan bytes before reading `trusted_launcher_binding`. It invokes exact
+`self-check`, then exact `rehydrate-runtime` from descriptor-bound Git objects
+at `execution_source_sha`. It never imports target code or materializes from
+current working-copy bytes. A bad/missing descriptor or launcher, wrong
+plan/SHA/Git/interpreter identity, present mismatching runtime bundle, or
+rehydration that cannot prove exact blob, permission, fsync, and final binding
+identities atomically writes the harness-only recovery result, prints
+`RECOVERY_INFRASTRUCTURE_BLOCKED`, and exits `78` before the parent; no
+cleanup/finalizer/carrier completion is claimed.
 
 Only after the launcher and external runtime binding are green does exact
 `launch-parent` change into durable canonical `target_repo`, `execve` the exact
@@ -3080,9 +3427,11 @@ termination rule.
    `process_run_id`, local attempt, and verifier hash. Release only when no
    attempt-start evidence exists; consume a started/classified attempt exactly
    once, using a synthetic crash classification when it started but lacks a
-   complete verifier record.
+   complete child-attempt envelope record.
 7. Through exact external `trusted_runtime_argv_prefix`, rerun admission against
-   immutable `plan.json` and embedded `plan_sha256`,
+   the descriptor-authenticated immutable `plan.json` and embedded
+   `plan_sha256`, including launch-descriptor path/hash and authenticated plan
+   blob identity,
    including trusted-launcher installation/self-check/rehydration/launch-parent
    evidence, graph/plan correspondence, child-runner identity/doctor/flags,
    trusted runtime/supervisor prefix/executable/interpreter/external-script/
@@ -3129,44 +3478,57 @@ termination rule.
     correction-round reservations, both immutable runner bindings, provider, and
     real child exit. Nonzero exit, signal, timeout, cancellation, missing
     result, or child-only evidence cannot become `PASS`.
-17. Reconcile every verifier envelope against immutable expected HEAD,
+17. Reconcile every child-attempt envelope against its attempt
+    token/reservation, exact post-attempt pre-verifier and post-verifier
+    HEAD/index/staged/full-filesystem/compiled-source candidate snapshots,
+    external output-root baseline/containment, and equal candidate-state hashes.
+    Any incomplete/red/delta-bearing envelope is `INFRA_FAILURE` and its
+    verifier verdict is discarded.
+18. Reconcile every parent verifier envelope against immutable expected HEAD,
     verifier/envelope hashes, exact output-root interface/environment, output
     containment manifest, pre/post porcelain-v2 status, complete
     tracked/untracked/ignored filesystem manifests, and compiled-source
     evidence. Missing/red/incomplete evidence is `INFRA_FAILURE`.
-18. Start pre-integration parent verification through a newly registered clean
+19. Start pre-integration parent verification through a newly registered clean
     candidate worktree only when no envelope invocation was durably started.
     Once it starts, missing/incomplete postconditions follow rule 17 only.
-19. Reconcile the integration journal against actual HEAD and Git ancestry
+20. Reconcile the integration journal against actual HEAD and Git ancestry
     before another merge. Recompute every correction's affected closure from
     the static DAG and enforce all recorded invalidations.
-20. Before starting or restarting a correction child, atomically reserve one
+21. Before starting or restarting a correction child, atomically reserve one
     statically named correction round and one process launch. Its child graph
     performs `ReserveGlobalAttempt` immediately before each adaptive attempt; no
     parent restart may pre-consume an adaptive attempt or omit a new correction
     round.
-21. If a correction commit exists but proof is incomplete, run
+22. If a correction commit exists but proof is incomplete, run
     `CompiledSourceGate`, affected-closure lane envelopes,
     `affected_closure_aggregate`, and `pre_coherence_aggregate` at current HEAD
     before coherence. Do not rerun the correction worker.
-22. Invoke a new aggregate envelope only when the integration worktree is
+23. Invoke a new aggregate envelope only when the integration worktree is
     independently clean at the intended HEAD and lacks a completed bound record.
-23. Reject a fresh-review artifact whose source SHAs differ or whose
+24. Reject a fresh-review artifact whose source SHAs differ or whose
     `reviewed_head` does not equal actual HEAD.
-24. Restore completion eligibility only when one exact actual integration HEAD
+25. Restore completion eligibility only when one exact actual integration HEAD
     has fresh passing coherence evidence, a complete all-lane final sweep,
     `final-aggregate-after-sweep`, and a current compiled-source pass.
-25. Reconcile any delivery worktree through its exact `delivery` registry entry,
+26. Revalidate `delivery_branch` with `git check-ref-format --branch`, exact
+    full ref/remote/refspec/definition hash, and local collision state. An
+    absent local branch may be created only from exact final HEAD; stale,
+    mismatched, unjournaled, or ambiguously owned local state is
+    `INFRA_FAILURE`.
+27. Reconcile any delivery worktree through its exact `delivery` registry entry,
     pre/post HEAD, full status, complete non-`.git` filesystem manifests, and
     source gates. Dirty, wrong-HEAD, foreign, state-bearing, or unremovable
     worktrees are `INFRA_FAILURE`.
-26. Reconcile every delivery process through the same process-launch/supervisor
+28. Reconcile every delivery process through the same process-launch/supervisor
     rules and exact child-runner/supervisor-runner/provider binding. No generated
     `.resolve` or other delivery state in the delivery worktree is accepted.
-27. Reconcile the external delivery ledger, then independently query remote PR
-    state at its exact expected head if delivery may already have occurred;
-    never open a duplicate merely because local state is incomplete.
-28. If a durable intended-status or partial `PreTerminalCleanup` journal exists
+29. Reconcile the external delivery ledger, then independently query the exact
+    remote full ref and PR state. Accept an existing remote branch only with
+    same-plan/run prior push intent/evidence and exact final HEAD; every other
+    collision fails before push/PR. Never force push or open a duplicate merely
+    because local state is incomplete.
+30. If a durable intended-status or partial `PreTerminalCleanup` journal exists
     but no valid `result.json` exists, validate the external binding and resume
     only `PreTerminalCleanup` through exact `trusted_runtime_argv_prefix`. Every
     retry creates a new cleanup-attempt record and recomputes current
@@ -3181,22 +3543,68 @@ termination rule.
     as skipped, leaves worktrees/refs/registrations unresolved, and chooses
     `INFRA_FAILURE`. Current `NONE` starts no cleanup/finalizer and claims no
     completion. Do not re-enter product work or delivery.
-29. If valid durable terminal `result.json`, `goal_plan.status`, and terminal
-    token evidence exist, verify they match the cleanup record's chosen status,
+31. If valid durable terminal `result.json`, `goal_plan.status`, and finalizer
+    routing-token evidence exist, verify they match the cleanup record's chosen status,
     `trusted_runtime_binding_verdict`, `parent_binding_verdict`,
     `mutation_authority`, current-gate evidence hashes, and cleanup verdict, and
     perform no post-terminal cleanup or repository mutation. If matching CLI
     carrier evidence is absent, revalidate the binding and resume only the
-    idempotent carrier outcome from that final status; do not rewrite
-    result/status/token or rerun cleanup. A mismatch is an externally reported
-    infrastructure inconsistency, never a reason to rewrite a prior `COMPLETE`
-    in place.
+    idempotent exact carrier node from that final status; do not rewrite
+    result/status/finalizer token or rerun cleanup. Missing/mismatched carrier
+    input routes to `InfraCarrier`, which records escalation evidence and exits
+    nonzero without changing result. A mismatch is infrastructure inconsistency,
+    never a reason to rewrite a prior `COMPLETE` in place.
 
 Reconciliation is idempotent. It skips work only when durable evidence and real
 state agree. Ambiguous or contradictory infrastructure state fails loudly as
 `INFRA_FAILURE`.
 
 ## Terminal and Failure Behavior
+
+### Harness-only blocked outcomes before any graph starts
+
+`PRELAUNCH_INFRASTRUCTURE_BLOCKED` and
+`RECOVERY_INFRASTRUCTURE_BLOCKED` are harness-only outcomes, not
+`GOAL_PLAN:*` terminal states. Both use fixed process exit code `78`. They are
+available only before `launch-parent` starts the parent graph and never create
+or rewrite `state_root/result.json`, `goal_plan.status`, finalizer evidence, or
+carrier evidence.
+
+On initial-start failure, the trusted harness atomically writes exact
+`launch_control_root/prelaunch/prelaunch-result.json` with schema
+`goal-plan.prelaunch-result/v1`. On recovery rehydration failure, it atomically
+writes exact `launch_control_root/recovery/recovery-result.json` with schema
+`goal-plan.recovery-result/v1`. Each rejects unknown fields and records:
+
+- launch-descriptor path/schema/version/hash and creation-evidence hash, or the
+  exact missing/unreadable observation when descriptor validation itself
+  failed;
+- operation (`prelaunch` or `recovery`), exact token, and fixed exit code `78`;
+- target repository, repository identity, `execution_source_sha`, plan path and
+  expected plan blob identity from harness configuration/descriptor when
+  available;
+- expected/observed external launcher, Git, and interpreter/executable
+  path/realpath/prefix/hash/permission identities;
+- checked-out versus committed plan byte/blob/hash observations when reached;
+- exact failed phase/reason, command/closed-environment hashes, stdout/stderr
+  evidence paths/hashes, and boottime; and
+- canonical `record_sha256`.
+
+After the record is durable, the harness prints exactly
+`PRELAUNCH_INFRASTRUCTURE_BLOCKED` or
+`RECOVERY_INFRASTRUCTURE_BLOCKED` as the last non-empty line and exits `78`.
+The caller interprets only the matching tuple
+`(exit 78, exact token, schema-valid record at the exact launch-control path)`
+as a recognized blocked outcome. Missing/mismatched tuple or record is a
+caller/harness infrastructure error, never a pipeline terminal.
+
+A descriptor/launcher/bootstrap/Git/interpreter/plan failure on initial start
+always uses the prelaunch result. The same class discovered while
+rehydrating/resuming always uses the recovery result. After the parent graph has
+started, neither blocked token is legal: an in-graph failure routes through the
+four `GOAL_PLAN` terminal states when the trusted finalizer/carrier substrate
+remains available, or leaves an incomplete run requiring a later recovery
+attempt when it does not.
 
 The four terminals below exist only after trusted `launch-parent` starts the
 parent graph. A missing or mismatched external launcher, failed launcher
@@ -3208,9 +3616,9 @@ claimed because the pipeline terminal machine did not run.
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Trusted-launcher installation/handoff evidence, both source SHAs, the immutable external trusted-runtime/parent/child/supervisor bindings, provider, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and externally invoked `PreTerminalCleanup` records `mutation_authority: "FULL"`, proves no live supervisor/child process group or foreign path, and marks every run-owned lane/candidate/delivery/integration worktree and Git registration `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
+| `COMPLETE` | Launch descriptor/authenticated plan, trusted-launcher installation/handoff evidence, both source SHAs, the immutable external trusted-runtime/parent/child/supervisor bindings, provider, delivery branch/ref/collision evidence, and current parent invocation remain bound; all product and delivery proof is green at one exact final HEAD; and externally invoked `PreTerminalCleanup` records `mutation_authority: "FULL"`, proves no live supervisor/child process group or foreign path, and marks every run-owned lane/candidate/delivery/integration worktree and Git registration `REMOVED`. | May auto-deliver one PR before cleanup/finalization. |
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked and every residual has evidence. Under current `FULL` authority, `PreTerminalCleanup` proves no live process group, marks only explicitly named residual worktrees `PRESERVED_RESIDUAL` with evidence/recovery commands, removes every other run-owned worktree/registration, and finds no unidentified or foreign path. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | After parent start, any external-root/approval boundary, trusted-runtime/parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. With a green trusted-runtime binding, `PreTerminalCleanup` records `FULL` or `EXTERNAL_ONLY`, performs only bounded actions that authority permits, and names every unresolved resource. Red/unknown parent, target/source, or compiled-source binding yields `EXTERNAL_ONLY` and leaves all Git/repository resources untouched. Red/unknown trusted runtime yields `NONE`; the external trusted-launcher harness reports infrastructure-blocked without claiming cleanup/finalizer completion. | No delivery. |
+| `INFRA_FAILURE` | After parent start, any external-root/approval boundary, trusted-runtime/parent/child/supervisor runner binding, source/compiled identity, accounting, process, Git/worktree, verifier, delivery, cleanup, or recovery state cannot be trusted. With a green trusted-runtime binding, `PreTerminalCleanup` records `FULL` or `EXTERNAL_ONLY`, performs only bounded actions that authority permits, and names every unresolved resource. Red/unknown parent, target/source, or compiled-source binding yields `EXTERNAL_ONLY` and leaves all Git/repository resources untouched. Red/unknown trusted runtime yields `NONE`; the started graph remains incomplete and claims no result/finalizer/carrier. A later pre-graph recovery may itself become harness-only `RECOVERY_INFRASTRUCTURE_BLOCKED`. | No delivery. |
 | `ABORTED` | The plan was rejected or cancelled before mutation, current cleanup authority is `FULL`, and `PreTerminalCleanup` proves no run-owned process, worktree, Git registration, `worktree_root`, or `delivery_state_root` mutation exists. A red/unknown binding yields `INFRA_FAILURE`, not `ABORTED`. | No delivery. |
 
 ### `PreTerminalCleanup` and durable finalizer machine contract
@@ -3218,8 +3626,8 @@ claimed because the pipeline terminal machine did not run.
 Every intended terminal route first enters the explicit deterministic
 `PreTerminalCleanup` phase. The phase runs after the final
 cleanup-authority decision, before durable terminal finalization, and before any
-terminal token, `goal_plan.status`, `result.json`, or CLI carrier outcome is
-published.
+finalizer routing token, `goal_plan.status`, `result.json`, `GOAL_PLAN:*`
+carrier token, or CLI carrier outcome is published.
 
 Every cleanup attempt freshly recomputes and durably hashes:
 
@@ -3265,8 +3673,10 @@ The required `mutation_authority` is derived, not supplied:
   invocation, or becomes red during the attempt. It permits no Git mutation,
   general signalling, cleanup publication, or terminal finalizer. Only the
   separately still-valid trusted-supervisor termination exception may stop one
-  exact identity-valid process group. The external trusted-launcher harness records
-  infrastructure-blocked evidence and makes no completion claim.
+  exact identity-valid process group. The started graph remains incomplete and
+  makes no completion claim. A later descriptor-authenticated recovery attempt
+  may continue the terminal machine; if that pre-graph recovery bootstrap is
+  blocked, the harness uses only `RECOVERY_INFRASTRUCTURE_BLOCKED`.
 
 No prior cleanup record, lifecycle state, or prior `FULL`/`EXTERNAL_ONLY`
 authority can satisfy this decision. A later retry with a freshly green
@@ -3398,10 +3808,12 @@ terminal-finalize
 It rejects extra/reordered arguments and atomically writes the run root's
 versioned `result.json` with, at minimum:
 
-- `schema_version` with exact value `goal-plan.result/v3`;
+- `schema_version` with exact value `goal-plan.result/v4`;
 - `status` with exact value `COMPLETE`, `RESIDUALS_READY`, `INFRA_FAILURE`, or
   `ABORTED`;
 - `plan_hash`;
+- `launch_descriptor_path`, `launch_descriptor_sha256`, and authenticated
+  `plan_blob_id`/`plan_blob_sha256`;
 - `product_base_sha` and `execution_source_sha`;
 - `trusted_launcher_argv_prefix_sha256`,
   `trusted_launcher_binding_sha256`, external launcher/interpreter-or-executable
@@ -3445,46 +3857,132 @@ versioned `result.json` with, at minimum:
 - `residual_evidence_paths`;
 - `delivery_state_root`, `delivery_worktree_evidence_path`,
   `delivery_supervisor_result_paths`, and `delivery_ledger_path`; and
+- immutable `delivery_branch`, expected full ref, remote name/identity/refspec,
+  delivery-branch definition hash, collision verdict/evidence, and observed
+  remote ref head; and
 - `delivery_pr_url` and `delivery_verified_head_sha` when delivery was
   requested, otherwise `null`.
 
 The finalizer copies only the cleanup record's chosen final status into
-`result.json`, sets `goal_plan.status` to that same exact value, and emits
-exactly one of these strings as its last non-empty stdout line, with no prose
-after it:
+`result.json`, sets `goal_plan.status` to that same exact value, records the
+immutable result SHA-256 plus cleanup/finalizer evidence hash, and emits exactly
+one routing token as its last non-empty stdout line, with no prose after it:
 
-| `goal_plan.status` | Last-line token |
+| `goal_plan.status` | Finalizer routing token |
 |---|---|
-| `COMPLETE` | `GOAL_PLAN:COMPLETE` |
-| `RESIDUALS_READY` | `GOAL_PLAN:RESIDUALS_READY` |
-| `INFRA_FAILURE` | `GOAL_PLAN:INFRA_FAILURE` |
-| `ABORTED` | `GOAL_PLAN:ABORTED` |
+| `COMPLETE` | `TERMINAL_FINALIZED:COMPLETE` |
+| `RESIDUALS_READY` | `TERMINAL_FINALIZED:RESIDUALS_READY` |
+| `INFRA_FAILURE` | `TERMINAL_FINALIZED:INFRA_FAILURE` |
+| `ABORTED` | `TERMINAL_FINALIZED:ABORTED` |
 
 The finalizer completes its writes successfully so the graph can route on
-`tool.last_line`; only then does the explicit terminal carrier publish the
-matching CLI outcome. `COMPLETE` is the only successful and deliverable outcome.
-The other three remain distinct non-success, evidence-bearing outcomes rather
-than aliases for a generic failure.
+`tool.last_line`; it never prints a `GOAL_PLAN:*` token. Only the explicit
+terminal carriers publish those caller-facing tokens. `COMPLETE` is the only
+successful and deliverable outcome. The other three remain distinct
+non-success, evidence-bearing outcomes rather than aliases for a generic
+failure.
 
 If trusted-runtime validation fails before or during the finalizer, it writes no
-valid finalizer record and cannot claim `result.json`, status, token, cleanup, or
-finalizer completion. The external harness/carrier may report only
-`INFRASTRUCTURE_BLOCKED` with the external validation/rehydration evidence; it
-must not synthesize `GOAL_PLAN:INFRA_FAILURE` as though the durable terminal
-machine completed.
+valid finalizer record and cannot claim `result.json`, status, routing token,
+cleanup, carrier, or finalizer completion. Because the graph already started,
+the caller does not synthesize either harness-only blocked outcome. The run
+remains incomplete and a later descriptor-authenticated recovery attempt must
+resume cleanup/finalization or produce the harness-only
+`RECOVERY_INFRASTRUCTURE_BLOCKED` before a graph starts.
+
+#### Exact terminal carrier contracts and DOT routing
+
+The parent graph contains exactly four deterministic carrier nodes:
+`CompleteCarrier`, `ResidualsCarrier`, `InfraCarrier`, and `AbortedCarrier`.
+Every carrier invokes only the sealed external trusted runtime:
+
+```text
+<each token of trusted_runtime_argv_prefix>
+terminal-carrier
+--trusted-runtime-binding <absolute trusted-runtime-binding.json>
+--result <absolute-state-root>/result.json
+--status <absolute-state-root>/goal_plan.status
+--finalizer <absolute-state-root>/terminal/finalizer.json
+--expected-status <COMPLETE|RESIDUALS_READY|INFRA_FAILURE|ABORTED>
+--expected-finalizer-token <TERMINAL_FINALIZED:...>
+--evidence <absolute-state-root>/terminal/carriers/<node-id>.json
+```
+
+The command rejects extra/reordered values. Each carrier opens the immutable
+external files without symlink traversal, validates result schema
+`goal-plan.result/v4`, exact status, result SHA-256, cleanup/finalizer evidence
+hashes, expected finalizer routing token, current run/plan/source/descriptor
+identity, and carrier definition hash, then writes one immutable
+`goal-plan.terminal-carrier/v1` evidence record. A carrier can never create,
+replace, repair, or mutate `result.json`, `goal_plan.status`, cleanup evidence,
+or finalizer evidence.
+
+The exact outcomes are:
+
+| Node | Valid result/status | Last line | Exit/outcome |
+|---|---|---|---|
+| `CompleteCarrier` | `COMPLETE` | `GOAL_PLAN:COMPLETE` | `0` / `success` |
+| `ResidualsCarrier` | `RESIDUALS_READY` | `GOAL_PLAN:RESIDUALS_READY` | `20` / `fail` |
+| `InfraCarrier` | `INFRA_FAILURE`, or a bound carrier-escalation record for missing/mismatched terminal input | `GOAL_PLAN:INFRA_FAILURE` | `21` / `fail` |
+| `AbortedCarrier` | `ABORTED` | `GOAL_PLAN:ABORTED` | `22` / `fail` |
+
+For `CompleteCarrier`, `ResidualsCarrier`, or `AbortedCarrier`, a missing result,
+schema/status/hash/token mismatch, or evidence mismatch writes carrier
+validation-failure evidence, prints exact `GOAL_PLAN:CARRIER_INFRA`, and exits
+`21`; the graph routes that failure to `InfraCarrier`. `InfraCarrier` repeats
+all available validation, binds the prior carrier evidence, records whether a
+valid `INFRA_FAILURE` result existed or terminal input was missing/mismatched,
+prints `GOAL_PLAN:INFRA_FAILURE`, and exits `21`. It reports the infrastructure
+failure without changing the immutable result.
+
+The parent DOT contains one terminal node
+`TerminalExit [shape=Msquare]` and these normative edges:
+
+```dot
+TerminalFinalizer -> CompleteCarrier
+  [condition="tool.last_line == 'TERMINAL_FINALIZED:COMPLETE'"];
+TerminalFinalizer -> ResidualsCarrier
+  [condition="tool.last_line == 'TERMINAL_FINALIZED:RESIDUALS_READY'"];
+TerminalFinalizer -> InfraCarrier
+  [condition="tool.last_line == 'TERMINAL_FINALIZED:INFRA_FAILURE'"];
+TerminalFinalizer -> AbortedCarrier
+  [condition="tool.last_line == 'TERMINAL_FINALIZED:ABORTED'"];
+TerminalFinalizer -> InfraCarrier [outcome=fail];
+
+CompleteCarrier -> TerminalExit [outcome=success];
+CompleteCarrier -> InfraCarrier [outcome=fail];
+
+ResidualsCarrier -> TerminalExit
+  [outcome=fail,
+   condition="tool.last_line == 'GOAL_PLAN:RESIDUALS_READY'"];
+ResidualsCarrier -> InfraCarrier
+  [outcome=fail,
+   condition="tool.last_line == 'GOAL_PLAN:CARRIER_INFRA'"];
+
+AbortedCarrier -> TerminalExit
+  [outcome=fail, condition="tool.last_line == 'GOAL_PLAN:ABORTED'"];
+AbortedCarrier -> InfraCarrier
+  [outcome=fail,
+   condition="tool.last_line == 'GOAL_PLAN:CARRIER_INFRA'"];
+
+InfraCarrier -> TerminalExit [outcome=fail];
+```
+
+Thus every non-success carrier reaches the terminal `Msquare` on
+`outcome=fail`; validation faults route through `InfraCarrier`; and no carrier
+depends on a nonexistent success edge, a “successful failure” sentinel, or a
+`no_matching_edge` dead end.
 
 There is no post-terminal repository/process/worktree cleanup phase. After
-`result.json`, `goal_plan.status`, terminal token, and carrier outcome are
+`result.json`, `goal_plan.status`, finalizer routing token, and carrier outcome are
 published, only immutable external evidence retention is permitted. In
 particular, no later cleanup can downgrade an already-written `COMPLETE`; all
 conditions capable of changing it to `INFRA_FAILURE` are resolved inside
 `PreTerminalCleanup` first.
 
-Terminal nodes must route explicitly to the graph exit with the cleanup-chosen
-final machine status. They must not dead-end and become `no_matching_edge`
-authoring errors.
-Failure routes must account for real node outcomes; no "successful failure"
-sentinel may rely on an unreachable `outcome=fail` edge.
+The carrier edges above are the exact terminal routing contract; implementations
+must preserve the node IDs, status/token map, exit codes, evidence paths, and
+explicit `outcome=fail` routes.
 
 ## PR Delivery
 
@@ -3499,6 +3997,56 @@ no live process group or foreign path. Red/unknown binding grants
 `EXTERNAL_ONLY`, leaves those Git resources untouched, and finalizes
 `INFRA_FAILURE`.
 
+### Immutable delivery branch and collision policy
+
+`plan.json.delivery_branch` is required, immutable, and included in
+`plan_sha256`, the parent DOT correspondence hash, approval packet, parent/child
+launch contracts, run/delivery ledgers, recovery state, final result, and every
+remote exact-head query. It is a canonical normalized branch name with no
+`refs/heads/` prefix. Composition and every admission/recovery/delivery gate run
+descriptor-bound:
+
+```text
+<trusted-git-prefix> check-ref-format --branch <delivery_branch>
+```
+
+and require exit `0` plus exact normalized output equality. The expected full
+ref is mechanically `refs/heads/<delivery_branch>`. The immutable
+`goal-plan.delivery-branch/v1` contract also binds one exact remote name, the
+exact fetch/push remote identity, exact no-force refspec
+`refs/heads/<delivery_branch>:refs/heads/<delivery_branch>`, local creation
+source `exact_final_integrated_head`, and collision policy
+`create_or_same_plan_run_exact_head`.
+
+The v1 state machine is closed:
+
+1. **Local branch absent:** after final HEAD is frozen, create the branch once
+   from that exact SHA with descriptor-bound Git and record the before/after ref
+   query and command. No other source is allowed.
+2. **Local branch present:** accept it only when the same immutable
+   delivery-attempt ledger proves it was created by this exact
+   `plan_id`/`plan_hash`/`run_id` and its full ref resolves to exact final HEAD.
+   Any stale, mismatched, unjournaled, ambiguous, or differently owned local
+   branch is `INFRA_FAILURE` before delivery child or network mutation.
+3. **Remote branch absent:** record the exact absent `ls-remote --heads` result
+   and permit one ordinary no-force push of the exact refspec.
+4. **Remote branch present:** accept it only when immutable same-run delivery
+   intent/attempt evidence proves a **prior** attempt durably recorded
+   `push_command_started` or `push_command_completed` for this exact plan/run,
+   branch/refspec/remote/final HEAD before the current query, the remote mapping
+   and branch owner identity are the same, and the observed remote full ref
+   points to exact expected final HEAD. A current attempt's generic `started`
+   entry is insufficient. This is only the idempotent crash/retry case.
+5. **Every other collision:** fail loud before push or PR creation. A branch
+   belonging to another plan/run, an initial unexplained existing ref, a wrong
+   remote/head/mapping, or ambiguous query can never be adopted.
+
+Force push, force-with-lease, ref deletion, alternate refspec, default-branch
+reuse, branch renaming, and branch selection from runtime input are forbidden.
+The canonical smoke compiler emits one deterministic unique branch such as
+`goal-plan/goal-plan-smoke/<compile-output-id>` from its immutable compile
+output; it is not selected by the running worker.
+
 The implementation starts from the proven portable `deliver_pr.dot` topology,
 as required by `AGENTS.md` and `docs/RUBRIC.md` section 5, but adapts every
 generated-state edge. Checkpoints, events, session metadata, logs, request/
@@ -3510,7 +4058,9 @@ exact-head remote assertion.
 
 For each delivery attempt, the parent creates a clean disposable registered
 delivery worktree at exact `worktree_root/delivery-ATTEMPT`, at the frozen final
-HEAD, on the validated delivery branch. It first writes the exact
+HEAD, on the validated immutable `delivery_branch`. Before `git worktree add`,
+it applies the local-branch state machine above and requires the branch's full
+ref to equal the final HEAD. It first writes the exact
 `delivery` `CREATING` entry to `run-owned-worktrees.json`, then marks it
 `ACTIVE` only after path/registration/common-directory/branch/HEAD proof.
 Before child launch it:
@@ -3546,7 +4096,11 @@ fail
 --param delivery_state_root=<absolute delivery_state_root>
 --param delivery_result_path=<absolute delivery_state_root/runs/<attempt>/delivery-result.json>
 --param delivery_ledger_path=<absolute delivery_state_root/attempts.jsonl>
---param delivery_branch=<validated-delivery-branch>
+--param delivery_branch=<exact-compiled-delivery-branch>
+--param delivery_full_ref=refs/heads/<exact-compiled-delivery-branch>
+--param delivery_remote_name=<exact-compiled-remote-name>
+--param delivery_refspec=refs/heads/<branch>:refs/heads/<branch>
+--param delivery_branch_definition_sha256=<full-delivery-branch-contract-hash>
 --param expected_head_sha=<exact frozen final HEAD>
 --param github_repo=<owner/repo>
 --param product_base_sha=<full product base SHA>
@@ -3563,16 +4117,19 @@ The launch contract forbids extra/reordered argv and binds the exact adapted
 delivery DOT hash, child-runner prefix/module/source/provider,
 trusted-runtime binding/bundle/prefix hashes, trusted-supervisor
 prefix/identity/suffix/environment, `delivery_worktree` CWD, external delivery
-roots, closed environment, final HEAD, and result schema.
+roots, closed environment, immutable branch/full-ref/remote/refspec/collision
+contract, final HEAD, and result schema.
 Delivery has no adaptive `Attempt` node and consumes no
 `max_total_attempts`; each supervisor start/restart consumes
 `max_process_launches`.
 
-`delivery-result.json` uses schema `goal-plan.delivery-result/v1` and binds
+`delivery-result.json` uses schema `goal-plan.delivery-result/v2` and binds
 delivery attempt, process-run/launch IDs, both source SHAs, exact expected HEAD,
 child-runner/supervisor-runner/provider hashes, external ledger/result/log
-paths, push/open action, candidate PR URL, and child disposition. It is not
-remote proof and cannot override supervisor exit or parent query evidence.
+paths, plan/run identity, immutable branch/full-ref/remote/refspec/definition
+hash, collision verdict/evidence, no-force push/open action, candidate PR URL,
+and child disposition. It is not remote proof and cannot override supervisor
+exit or parent query evidence.
 
 After an authoritative zero-exit supervisor result, the parent reruns the exact
 HEAD and full status commands, rebuilds the complete non-`.git` filesystem
@@ -3593,17 +4150,21 @@ worktree/registration remains unresolved evidence, and final status is
 Delivery has a hard limit of two attempts total for the run, including across
 crash recovery. Before any network mutation, each attempt appends a durable
 `started` entry to `delivery_state_root/attempts.jsonl`. Every ledger entry
-uses schema version `goal-plan.delivery-attempt/v2` and records:
+uses schema version `goal-plan.delivery-attempt/v3` and records:
 
-- `schema_version` with exact value `goal-plan.delivery-attempt/v2`;
+- `schema_version` with exact value `goal-plan.delivery-attempt/v3`;
 - `attempt` as integer `1` or `2`;
+- exact `plan_id`, `plan_hash`, and `run_id`;
 - `product_base_sha` and `execution_source_sha`;
 - `provider`, `attractor_runner_argv_prefix_sha256`,
   `trusted_supervisor_argv_prefix_sha256`, and `process_run_id`;
 - `compiled_source_manifest_sha256`;
-- `branch` as the delivery branch;
+- `branch`, `full_ref`, `remote_name`, `remote_identity`, `refspec`,
+  `delivery_branch_definition_sha256`, and exact collision-policy verdict;
 - `expected_head_sha` as the exact expected head SHA;
-- `phase` as `started` or `completed`;
+- `phase` as `started`, `push_command_started`, `push_command_completed`, or
+  `completed`; the two push phases bind exact no-force argv/refspec and are
+  durable before/after the network command;
 - `existing_pr_query` as the remote query result;
 - `action` as the action taken;
 - `pr_url`, if any;
@@ -3611,13 +4172,16 @@ uses schema version `goal-plan.delivery-attempt/v2` and records:
 - `verified` as a boolean; and
 - `failure_reason`, if any.
 
-Before each attempt, the parent queries the remote for an existing PR whose head
-is the recorded branch at exact expected HEAD. If one exists, the child performs
-no duplicate open operation. If none exists, the adapted delivery child may
-push/open the PR. In both cases, after local postconditions the parent performs
-a separate authenticated remote query and requires the PR to exist with remote
-head SHA exactly equal to the frozen final HEAD. Child output, delivery-result
-JSON, and `OpenPR` self-report are never sufficient.
+Before each attempt, the parent queries the exact remote full ref and applies
+the collision state machine before querying for an existing PR whose head is
+that recorded immutable branch at exact expected HEAD. An existing branch or PR
+is idempotent only with same-plan/run ownership evidence and exact final HEAD.
+If the remote branch is absent, the adapted delivery child may perform one
+ordinary no-force exact-refspec push and open the PR. In both cases, after local
+postconditions the parent performs separate authenticated full-ref and PR
+queries and requires both observed heads to equal the frozen final HEAD. Child
+output, delivery-result JSON, `Push`, and `OpenPR` self-report are never
+sufficient.
 
 Immediately before and after any delivery query/mutation, both source SHAs,
 child-runner/supervisor-runner/provider binding, final-sweep evidence,
@@ -3630,8 +4194,9 @@ is reconciled against remote state before another attempt can start. No third
 attempt is possible. If neither attempt obtains independent exact-head
 verification, the integrated branch, verifier/review evidence, and ledger are
 preserved, and the graph selects intended `INFRA_FAILURE`, runs bounded
-`PreTerminalCleanup`, and only then finalizes `GOAL_PLAN:INFRA_FAILURE`; the
-pipeline does not claim `COMPLETE`. Delivery network attempts cannot
+`PreTerminalCleanup`, finalizes immutable `INFRA_FAILURE` result/status, and
+only then lets `InfraCarrier` emit `GOAL_PLAN:INFRA_FAILURE`; the pipeline does
+not claim `COMPLETE`. Delivery network attempts cannot
 consume/reset adaptive attempt budget, and delivery process launches cannot
 exceed `max_process_launches`.
 
@@ -3687,12 +4252,14 @@ after trusted-bootstrap handoff: parent target-repository/CWD/DOT invocation
 revalidation and immutable invocation evidence, trusted-runtime binding
 validation, compiled-source manifests/gates, ownership-pattern rejection,
 candidate-verification worktree lifecycle, the shared
-`VerifierExecutionEnvelope`, phase-split external-root safety,
+`VerifierExecutionEnvelope`, the distinct dirty-worktree
+`ChildAttemptVerifierEnvelope`, phase-split external-root safety,
 `run-owned-worktrees.json` lifecycle/recovery, run-budget
 process-launch/correction-round/adaptive-attempt reservation/reconciliation,
 child-runner/trusted-supervisor/provider preflight, engine-step admission,
-delivery-worktree envelope, `PreTerminalCleanup`, durable final-status
-selection, and delta reporting. It exposes no `materialize-runtime`,
+immutable delivery-branch/ref/collision enforcement, delivery-worktree
+envelope, `PreTerminalCleanup`, durable final-status selection, terminal
+carriers, and delta reporting. It exposes no `materialize-runtime`,
 `rehydrate-runtime`, or `launch-parent` command and never installs itself. Every
 parent safety-critical
 DOT node calls only its sealed external trusted-runtime copy rather than
@@ -3707,6 +4274,10 @@ The implementation also materializes run-scoped external artifacts, not checked
 in repository files:
 
 ```text
+launch_control_root/launch_descriptor.json
+launch_control_root/evidence/trusted-launcher-installation.json
+launch_control_root/prelaunch/prelaunch-result.json       # only on blocked initial launch
+launch_control_root/recovery/recovery-result.json         # only on blocked recovery
 state_root/trusted-runtime/<runtime-bundle-hash>/goal_plan_runtime.py
 state_root/trusted-runtime/<runtime-bundle-hash>/goal_plan_supervisor.py
 state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
@@ -3715,10 +4286,12 @@ state_root/trusted-runtime/<runtime-bundle-hash>/trusted-runtime-binding.json
 The deployment/test harness stages the external bootstrap copy from exact
 `execution_source_sha:pipelines/goal_plan_smoke/python/goal_plan_bootstrap.py`
 blob bytes, independently hashes and seals the installed file before execution,
-and writes `goal-plan.trusted-launcher-installation/v1` evidence. Production
-packaging/deployment must perform the same installation before invoking the
-pipeline; target-repository code has no installation path. The bootstrap
-contains no product scheduler or model logic.
+creates/seals `goal-plan.launch-descriptor/v1` from trusted compile/commit
+outputs plus deployment configuration, and writes
+`goal-plan.trusted-launcher-installation/v2` evidence. Production
+packaging/deployment must supply the same descriptor and installation before
+invoking the pipeline; target-repository code has no installation path. The
+bootstrap contains no product scheduler or model logic.
 
 The smoke exemplar proves orchestration rather than product behavior. In a
 temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
@@ -3729,7 +4302,10 @@ Attractor process. Its graph is fixed and self-contained. The existing
 real plans to the same directory and contract; it is not reimplemented here.
 The canonical compiled `provider` is `anthropic`; the smoke runs headless with
 `approval_mode=preapproved`, `human_gate_transport=none`, and external
-`state_root`, `worktree_root`, and `delivery_state_root`.
+`launch_control_root`, `state_root`, `worktree_root`, and
+`delivery_state_root`. The compiler emits one deterministic unique
+`delivery_branch` from the smoke compile-output identity and records its exact
+full ref, remote mapping, and collision-contract hash.
 
 This design-document revision does not implement those files.
 
@@ -3742,13 +4318,15 @@ orchestration behavior, not a library-only change.
 
 | Claim | Verification level | Required proof |
 |---|---|---|
-| First trust is outside the target repository | Packaging/harness + unit + prelaunch faults | Harness stages the exact bootstrap Git blob outside every repository/run/worktree root, independently hashes it, records installation evidence, validates it before every subcommand, and proves wrong launcher bytes/path/interpreter/prefix/environment stop before Git/repository/process mutation. |
-| Adaptive attempts, process launches, and correction rounds are separate | Unit + concurrent live fault injection | Flocked v3 ledger binds the trusted runtime and shows `ReserveGlobalAttempt` consumed at verifier classification, every supervised correction-child launch transitions its own `correction_round_id`, and every supervisor start changes `max_process_launches`; no counter borrows from another. |
+| First trust is outside the target repository | Packaging/harness + unit + prelaunch faults | Harness creates immutable external descriptor from compile/commit outputs and deployment config without parsing checked-out plan; launcher validates itself/Git/interpreter against it, reads exact plan blob, and rejects working-copy plan tampering, wrong SHA/bootstrap/Git/interpreter before plan-controlled code or mutation. |
+| Adaptive attempts, process launches, and correction rounds are separate | Unit + concurrent live fault injection | Flocked v4 ledger binds descriptor/plan/trusted runtime and shows `ReserveGlobalAttempt` consumed at verifier classification, every supervised correction-child launch transitions its own `correction_round_id`, and every supervisor start changes `max_process_launches`; no counter borrows from another. |
+| Dirty child verification cannot manufacture product state | Unit + dirty-worktree live faults | `ChildAttemptVerifierEnvelope` snapshots exact post-attempt HEAD/index/staged/full tracked-untracked-ignored filesystem/compiled source, runs read-only with external output root, and proves exact equality afterward; mutation-plus-pass is discarded as INFRA while a normal dirty read-only control preserves state. |
 | Parent runner is bound to `target_repo` | Trusted-launcher/admission/recovery faults | Exact `launch-parent` validates canonical parent argv JSON, calls `chdir(realpath(target_repo))`, and `execve`s without a shell; `/proc/self/cwd`, runner `--cwd .`, and canonical target repo are equal; parent DOT realpath/hash and immutable launcher/argv/provider/process/logs evidence agree before mutation. |
 | Terminal runtime remains trustworthy after source failure | First-admission + live mutation/recovery faults | Checked-out bootstrap/runtime/supervisor bytes equal exact plan/manifest/Git blobs before mutation; only the external bootstrap materializes sealed runtime/supervisor copies and `trusted-runtime-binding.json` from `cat-file blob`; every later safety command uses external runtime prefixes; source mutation reaches external-only final INFRA evidence, while launcher/runtime/interpreter/hash drift blocks action. |
-| Final proof and cleanup order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep` -> optional delivery -> intended status -> `PreTerminalCleanup` -> durable terminal publication. |
+| Final proof, cleanup, and carrier order is sound | Static topology + live smoke | Current-HEAD closure lanes -> affected-closure aggregate -> pre-coherence aggregate -> coherence -> one-HEAD final sweep -> `final-aggregate-after-sweep` -> optional delivery -> intended status -> `PreTerminalCleanup` -> immutable finalizer -> exact carrier; COMPLETE exits 0, every non-success carrier reaches `Msquare` on outcome=fail. |
 | Long polling cannot exhaust engine steps prematurely | Static arithmetic + timed live run | Recomputed branch inequality, parent total-step inequality, exact 30-second poll argv, identity checks, and observed deadline-capped waits. |
-| Delivery preserves verified source | Live Git/remote probe | Disposable final-HEAD worktree has equal pre/post HEAD/status/full-filesystem/source records, no generated `.resolve` delta, external delivery evidence, and parent-observed PR exact head. |
+| Delivery preserves verified source and branch identity | Live Git/remote probe | Canonical `delivery_branch` passes `check-ref-format`, local branch is created only from exact final HEAD, unexplained/mismatched collisions fail before network mutation, idempotent same-run exact-head remote state is accepted, no force push occurs, and disposable worktree/remote PR retain exact final HEAD. |
+| Harness-only blocked results are distinct from graph terminals | Prelaunch/recovery + caller contract tests | Prelaunch/recovery write exact external result schema, print exact blocked token, and exit 78 before graph; in-graph carriers alone print `GOAL_PLAN:*`, validate immutable final result, and use their documented success/failure exits. |
 | Trusted-launcher, child-runner, trusted-supervisor, and provider identity cannot drift | Admission/recovery faults | Allowed launcher/child-runner forms and exact external launcher/supervisor prefixes pass; PATH/shell/executable/interpreter/source-blob/external-script/hash/permission/environment/CLI/schema/subcommand/flag/credential faults and any binding/prefix/provider change on resume fail before mutation. |
 | Worktree ownership and terminal cleanup are phase-safe | Unit + live Git recovery/finalization faults | Preapproval rejects every overlap; postapproval accepts only the exact mapping; fresh all-green trusted-runtime/parent/target-source/compiled gates grant `FULL`; a green trusted runtime plus red repository/source binding grants `EXTERNAL_ONLY`; red trusted runtime grants `NONE`; complete removes exact run-owned worktrees only under `FULL`; residual preserves only named `PRESERVED_RESIDUAL` entries under `FULL`; restricted cleanup touches no Git state, may stop only fully procfs-identity-valid process groups, records skipped/unresolved resources, and publishes no terminal first. |
 | Approval modes are operationally honest | Standalone admission probes | Preapproved unattended headless passes; required attached standalone console/TTY passes; required without TTY or on unattended/hosted headless execution fails before mutation. |
@@ -3776,11 +4354,13 @@ orchestration behavior, not a library-only change.
 6. Confirm every terminal is reachable and routes explicitly to the exit.
 7. Confirm the README and companion guide describe the actual graph.
 8. Validate the aggregate-verifier evidence schema, all verification kinds,
-   exit/token normalization, shared envelope schema/hash/token map,
-   verifier-hash guard, fresh-review schema, finalizer token map, and
-   two-attempt delivery ledger.
+   exit/token normalization, child-attempt and parent envelope
+   schemas/hashes/token maps, verifier-hash guard, fresh-review schema,
+   finalizer routing-token map, exact four-carrier status/token/exit/evidence
+   map, and two-attempt delivery ledger.
 9. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
    graph/plan correspondence, both target-repository identity modes,
+   required external launch-descriptor schema/hash/path/plan-blob identity,
    required `trusted_launcher_argv_prefix`, complete
    `trusted_launcher_binding`, `trusted_runtime_definition`, binding policy,
    exact runtime-bundle-hash derivation, and typed runtime-input rejection
@@ -3789,7 +4369,12 @@ orchestration behavior, not a library-only change.
     canonical prefix hash, executable/module/source identity, `doctor`,
     required run flags, exact compiled provider support/credential, explicit
     `--provider` on every child argv, and immutable provider/prefix on resume.
-    Validate the two permitted `trusted_launcher_argv_prefix` forms, external
+    Validate descriptor creation uses trusted compile/commit outputs and
+    deployment configuration without parsing checked-out plan. Validate
+    descriptor schema/version/hash, plan path/blob ID/length/hash, repository
+    and target identity, provider, launcher/Git/interpreter prefixes and
+    realpaths/hashes, and closed environment before every plan read. Validate
+    the two permitted `trusted_launcher_argv_prefix` forms, external
     location exclusion, source path/blob/mode/length/hash, external byte hash,
     executable/interpreter realpath/hash, closed environment schema/hash,
     prefix/binding hashes, supported bootstrap CLI/schema versions, exact
@@ -3841,10 +4426,15 @@ orchestration behavior, not a library-only change.
     `--wait-seconds 30` long-poll/deadline cap, log hashes,
     timeout/cancellation/group cleanup, control-client schemas/tokens,
     pre-ledger `/proc` discovery, and result atomicity.
-19. Unit-test verifier and delivery envelopes' immutable expected-HEAD binding,
-    pre/post HEAD/status/full-filesystem/source gates, exact external output
-    roots, `.resolve` rejection, discarded-result behavior, token mapping,
-    teardown, and recovery classification.
+19. Unit-test `ChildAttemptVerifierEnvelope` separately from parent/delivery
+    envelopes: exact dirty post-attempt pre/post HEAD, raw index/index-tree,
+    staged-entry set, full tracked/untracked/ignored filesystem,
+    compiled-source and candidate-state hashes; external output-root baseline
+    and containment; attempt-token/reservation binding; mutation-plus-apparent-
+    pass discard; and a normal dirty-worktree read-only `PASS`/`FAIL` control.
+    Also test parent/delivery immutable expected-HEAD binding, pre/post
+    HEAD/status/full-filesystem/source gates, `.resolve` rejection, token
+    mapping, teardown, and recovery classification.
 20. Unit-test `fcntl.flock` serialization and atomic replacement for separate
     process-launch, correction-round, and adaptive-attempt maps; simultaneous
     correction reservation at the ceiling; exact correction key/process binding;
@@ -3854,10 +4444,15 @@ orchestration behavior, not a library-only change.
     active process-run tracking; all budget ceilings; `CLOCK_BOOTTIME` deadline
     closure; boot-ID failure; and restart recovery.
 21. In `test_goal_plan_bootstrap.py`, unit-test launcher `self-check`; wrong
-    external bytes, interpreter realpath/hash, executable hash, prefix hash, and
-    environment; source/external bootstrap path exclusion; exact
-    checked-out-byte/blob/manifest identity; target working-copy bootstrap and
-    runtime mutation; exact Git-blob materialization; atomic/no-replace writes;
+    descriptor missing/schema/hash/path/identity, wrong plan path/blob/SHA,
+    working-copy plan tampering, wrong `execution_source_sha`, wrong external
+    bootstrap bytes, Git executable realpath/hash, interpreter realpath/hash,
+    executable hash, prefix hash, and environment; prove descriptor and
+    launcher/Git/interpreter validation plus committed-plan read happen before
+    any `plan.trusted_launcher_binding` read; source/external bootstrap path
+    exclusion; exact checked-out-byte/blob/manifest identity; target
+    working-copy bootstrap and runtime mutation; exact Git-blob materialization;
+    atomic/no-replace writes;
     fsync ordering; non-writable permissions; final reread; complete
     `trusted-runtime-binding.json`; no imports from target-repository runtime
     modules; absent-bundle `rehydrate-runtime`; present-mismatch refusal; and
@@ -3870,9 +4465,11 @@ orchestration behavior, not a library-only change.
     modified, and explicitly fail if any changed path resolves beneath a managed
     cache.
 23. Validate the parent launch definition and every immutable invocation record:
-    external launcher installation and per-invocation validation precede every
-    bootstrap command; `materialize-runtime` or `rehydrate-runtime` precedes
-    parent start; exact `launch-parent` changes CWD before `execve`;
+    immutable descriptor creation/validation and committed/checked-out plan
+    equality precede every plan binding read and bootstrap command; external
+    launcher installation and per-invocation validation follow descriptor
+    identity; `materialize-runtime` or `rehydrate-runtime` precedes parent
+    start; exact descriptor-bearing `launch-parent` changes CWD before `execve`;
     `/proc/self/cwd`, runner `--cwd .`, and canonical `target_repo` are equal;
     parent argv equals canonical parent JSON token-for-token; the parent DOT
     realpath and observed/execution-source/compiled-manifest hashes agree;
@@ -3890,8 +4487,21 @@ orchestration behavior, not a library-only change.
     attempted, skipped, and unresolved action records; rejection of stale prior
     `FULL` on retry; final cleanup verdict/chosen-status token; refusal to claim
     cleanup/finalizer completion when trusted-runtime binding is red; and strict
-    ordering before `result.json`, `goal_plan.status`, terminal token, and CLI
-    carrier publication.
+    ordering before `result.json`, `goal_plan.status`, finalizer routing token,
+    and CLI carrier publication. Validate exact `CompleteCarrier`,
+    `ResidualsCarrier`, `InfraCarrier`, `AbortedCarrier`, result/hash/token
+    validation, immutable carrier evidence, exit codes `0/20/21/22`, INFRA
+    escalation, and every explicit `outcome=fail` edge to terminal `Msquare`.
+25. Validate canonical `delivery_branch` with descriptor-bound
+    `git check-ref-format --branch`, exact full ref/remote/refspec/definition
+    hash in plan/DOT/launch/result/ledger/recovery, absent-branch creation at
+    exact final HEAD, same-plan/run exact-head idempotence, local/remote
+    collision rejection, exact-head queries, and prohibition of every force
+    push form.
+26. Validate harness-only `goal-plan.prelaunch-result/v1` and
+    `goal-plan.recovery-result/v1` exact paths/schemas/hashes, fixed exit `78`,
+    exact blocked tokens, caller interpretation, and proof that no parent graph,
+    `GOAL_PLAN:*` token, result/status/finalizer/carrier, or mutation exists.
 
 ### Primary live smoke scenario
 
@@ -3901,11 +4511,14 @@ fixture lanes. Before execution, the smoke harness uses its preflight-bound
 absolute Git binary to read the exact
 `execution_source_sha:pipelines/goal_plan_smoke/python/goal_plan_bootstrap.py`
 blob, stages those bytes at the plan-bound external launcher path outside every
-repository/run/worktree root, independently hashes/seals/rereads that file, and
-records installation evidence. Its immutable `trusted_launcher_argv_prefix`
-and `attractor_runner_argv_prefix` each use one permitted absolute form, its
-compiled `provider` is `anthropic`, and admission proves the Anthropic
-credential before the headless `preapproved` run:
+repository/run/worktree root, independently hashes/seals/rereads that file,
+then creates and records immutable external `launch_descriptor.json` from the
+smoke compile/commit outputs and deployment configuration without parsing the
+checked-out plan. Its immutable `trusted_launcher_argv_prefix` and
+`attractor_runner_argv_prefix` each use one permitted absolute form, its
+compiled provider is `anthropic`, its deterministic unique delivery branch is
+compile-bound, and admission proves descriptor/plan/credential identity before
+the headless `preapproved` run:
 
 - `lane_a` and `lane_b` each produce one fixture file in disjoint owned paths
   and run concurrently in Wave 1 as separate child Attractor processes launched
@@ -3925,9 +4538,14 @@ credential before the headless `preapproved` run:
 The live smoke passes only if direct observation proves:
 
 1. The harness's independently generated launcher-installation evidence proves
-   external bytes equal the exact bootstrap source blob. It validates the
-   trusted-launcher binding before exact `self-check`, `materialize-runtime`,
-   and `launch-parent`. The bootstrap imports no target module, validates
+   external bytes equal the exact bootstrap source blob. Descriptor evidence
+   binds source SHA, repo/target, exact plan path/blob, external launcher,
+   Git/interpreter, provider, and hash. Before any plan field, the launcher
+   validates itself against the descriptor, reads the exact plan blob through
+   descriptor-bound Git, and proves working-copy equality; only then does it
+   validate the trusted-launcher binding before exact descriptor-bearing
+   `self-check`, `materialize-runtime`, and `launch-parent`. The bootstrap
+   imports no target module, validates
    checked-out bootstrap/runtime/supervisor source identity, materializes exact
    runtime/supervisor Git blobs, and writes the sealed binding. `launch-parent`
    changes into canonical `target_repo` then `execve`s the exact canonical
@@ -3963,55 +4581,63 @@ The live smoke passes only if direct observation proves:
    normalized exit/signal, cleanup proof, and log hashes.
 6. `lane_b`'s first failure is visible and causes a corrective cycle rather
    than a silent pass or blind restart.
-7. Before each lane/correction adaptive attempt, `ReserveGlobalAttempt` binds
+7. The first lane attempt leaves legitimate dirty product state. Its
+   `ChildAttemptVerifierEnvelope` records equal pre/post HEAD, raw index,
+   staged entries, complete tracked/untracked/ignored filesystem,
+   compiled-source and candidate-state hashes while verifier outputs remain
+   external; this normal dirty read-only control is nondiscarded.
+8. Before each lane/correction adaptive attempt, `ReserveGlobalAttempt` binds
    lane/correction ID, `process_run_id`, local attempt, and verifier hash. Its
    reservation is consumed exactly once at verifier classification; process
    launches do not change `max_total_attempts`.
-8. The correction is genuinely dependent on the changed verifier feedback: a
+9. The correction is genuinely dependent on the changed verifier feedback: a
    control run with unchanged/withheld feedback remains red, while the changed
    feedback produces a different candidate hash and later green evidence.
-9. Parent verification creates a clean detached
+10. Parent verification creates a clean detached
    `candidate_verification_worktree` at the exact candidate SHA, runs the
    shared envelope only there, proves expected/pre/post HEAD equality and clean
    pre/post status, records both compiled-source checks, then
    removes/reconciles it with separately durable teardown evidence.
-10. Ownership checks pass, reject an out-of-scope write, and categorically
+11. Ownership checks pass, reject an out-of-scope write, and categorically
    reject any compiled-pipeline write or integration seam.
-11. Integration occurs in stable order, with an
+12. Integration occurs in stable order, with an
     `aggregate_after_merge` envelope after each merge. Its immutable expected,
     pre-, and post-HEADs are equal; pre/post porcelain-v2 status records and
     complete ignored-aware worktree manifests match; both compiled-source
     checks pass; all verifier outputs are contained beneath its output root; and
     its aggregate token agrees with the envelope verdict.
-12. `lane_c` starts only after both dependencies are integrated and green.
-13. Cross-lane `ITERATE` atomically reserves one exact
+13. `lane_c` starts only after both dependencies are integrated and green.
+14. Cross-lane `ITERATE` atomically reserves one exact
     `correction_round_id` and one process launch, invokes one supervised
     `IntegrationCorrection` child on the integration branch, marks correction
     `STARTED` only after valid ack and `CONSUMED` on authoritative terminal
     result, and never uses old lane branches; its internal attempts use only
     `ReserveGlobalAttempt`, and its write set is limited to responsible
     ownership plus seams.
-14. Correction invalidates prior proof, then at one current HEAD runs all
+15. Correction invalidates prior proof, then at one current HEAD runs all
     affected-closure lane envelopes, `affected_closure_aggregate`,
     `pre_coherence_aggregate`, and a fresh coherence review in that order.
-15. After coherence passes, the final sweep runs every lane verifier through a
+16. After coherence passes, the final sweep runs every lane verifier through a
     `final_sweep_lane` envelope at one frozen final HEAD, followed by
     `final-aggregate-after-sweep`; both and the coherence record name that exact
     SHA and both source SHAs.
-16. The pre-delivery and pre-`PreTerminalCleanup` trusted-runtime,
+17. The pre-delivery and pre-`PreTerminalCleanup` trusted-runtime,
     parent-runner, target/source-identity, and compiled-source gates freshly
     match immutable admission evidence; the cleanup record binds their hashes,
     `trusted_runtime_binding_verdict: "PASS"`,
     `parent_binding_verdict: "PASS"`, and `mutation_authority: "FULL"`.
-17. Delivery runs through a separately supervised child in a clean disposable
+18. Delivery validates the compile-bound branch/full ref/remote/refspec and
+    creates the absent local branch only from exact final HEAD. The initial
+    remote ref is absent; the child uses a non-force exact refspec. The
+    disposable delivery run is separately supervised in a clean
     final-HEAD worktree. Pre/post HEAD, full status, complete non-`.git`
     filesystem manifests, and source gates remain equal/green; every generated
     file is beneath `delivery_state_root`, and no new/changed `.resolve` entry
     appears relative to final HEAD.
-18. The external delivery ledger records no more than two attempts, both source
+19. The external delivery ledger records no more than two attempts, both source
     SHAs, runner/provider/process identities, and manifest hash; the parent's
     independent remote query observes a PR head equal to exact final HEAD.
-19. Under the current `FULL` authority, the exact external
+20. Under the current `FULL` authority, the exact external
     `trusted_runtime_argv_prefix + pre-terminal-cleanup` invocation reconciles
     every supervisor/process group to terminal, removes exact
     lane/candidate/delivery/integration worktrees without force,
@@ -4019,27 +4645,35 @@ The live smoke passes only if direct observation proves:
     `REMOVED`, finds no foreign path, records permitted/attempted/skipped actions
     and no unresolved resource, and durably chooses `FULL_COMPLETE` plus
     `COMPLETE`.
-20. Only after item 19, the exact external
+21. Only after item 20, the exact external
     `trusted_runtime_argv_prefix + terminal-finalize` invocation writes
-    `result.json` with both delta ranges, trusted-runtime binding, and cleanup
-    evidence; `result.json`, `goal_plan.status`, the last-line token, and CLI
-    carrier outcome agree on `COMPLETE` only after all nineteen preceding
-    observations hold.
+    `result.json` with descriptor/plan, both delta ranges, immutable delivery
+    branch, trusted-runtime binding, and cleanup evidence; its finalizer token
+    routes to `CompleteCarrier`, which validates the immutable result, writes
+    carrier evidence, emits `GOAL_PLAN:COMPLETE`, and exits `0` to terminal
+    `Msquare` only after all twenty preceding observations hold.
 
 ### Fault and recovery probes
 
 The implementation is not ready until live probes also demonstrate:
 
+- creating the immutable descriptor from trusted compile/commit outputs and
+  deployment configuration records exact source SHA, repository/target
+  identity, plan path/blob ID/length/hash, launcher/Git/interpreter identities,
+  provider, schema/version/hash, and does not parse checked-out `plan.json`;
 - staging the external bootstrap from exact execution-source blob bytes,
   independently hashing/sealing/rereading it, and recording installation
   evidence succeeds without importing target-repository code; a working-copy
   bootstrap mutation is detected as source drift and is never used as the
   installed executable or materialization input;
-- wrong external bootstrap bytes/path/permissions, wrong
-  executable/interpreter realpath or hash, wrong launcher-prefix/environment
-  hash, or unsupported/reordered bootstrap subcommand fails caller validation
-  or launcher self-check before any parent/Git/repository/process mutation and
-  records `PRELAUNCH_INFRASTRUCTURE_BLOCKED`;
+- missing/wrong descriptor, wrong plan path/blob/hash, a tampered working-copy
+  plan, wrong `execution_source_sha`, wrong external bootstrap
+  bytes/path/permissions, wrong Git realpath/hash, wrong
+  executable/interpreter realpath/hash, wrong launcher-prefix/environment hash,
+  ambiguous repository/launcher identity, or unsupported/reordered bootstrap
+  subcommand fails before any plan trust field, parent, runtime materialization,
+  Git/repository/process mutation; exact external `prelaunch-result.json`,
+  token, and exit `78` prove `PRELAUNCH_INFRASTRUCTURE_BLOCKED`;
 - deleting one lane's required result before fan-in yields `CRASHED`, not a
   clean result;
 - launching the parent from the repository's parent directory, a symlink alias,
@@ -4054,8 +4688,9 @@ The implementation is not ready until live probes also demonstrate:
   intact makes the source gate red but never executes the changed source;
   `PreTerminalCleanup` runs only through the external runtime, derives
   `mutation_authority: "EXTERNAL_ONLY"`, performs no Git/worktree mutation, and
-  writes final `INFRA_FAILURE` cleanup/result/status/token evidence through the
-  externally pinned runtime.
+  writes final `INFRA_FAILURE` cleanup/result/status/finalizer evidence through
+  the externally pinned runtime, then `InfraCarrier` writes carrier evidence
+  and emits the caller token.
   The same probe is repeated for target-repository `goal_plan_runtime.py` and
   `goal_plan_supervisor.py`;
 - byte-mutating, permission-widening, path-replacing, or deleting the external
@@ -4073,8 +4708,10 @@ The implementation is not ready until live probes also demonstrate:
   then exact `launch-parent` starts recovery only through the recreated external
   runtime prefix;
 - unavailable, deleted, or mismatched external bootstrap identity during
-  recovery reports `RECOVERY_INFRASTRUCTURE_BLOCKED`, starts no parent/runtime/
-  cleanup/finalizer command, and never synthesizes a pipeline terminal;
+  recovery, or a recovery descriptor/plan/Git/interpreter mismatch, writes exact
+  external `recovery-result.json`, prints
+  `RECOVERY_INFRASTRUCTURE_BLOCKED`, exits `78`, starts no parent/runtime/
+  cleanup/finalizer/carrier command, and never synthesizes a pipeline terminal;
 - a wrong plan-declared blob ID, Git object whose bytes do not match the
   expected hash, substituted interpreter realpath or bytes, wrong Git
   executable hash, widened materialized-file permissions, or mismatched
@@ -4119,6 +4756,16 @@ The implementation is not ready until live probes also demonstrate:
   crash-left incomplete envelope evidence yields `INFRA_FAILURE`; a clean
   crash-left worktree is removed/reconciled and verification starts in a new
   detached worktree only when no envelope invocation had begun;
+- a normal dirty lane worktree containing legitimate adaptive tracked,
+  untracked, ignored, and staged product changes runs a read-only child verifier
+  with exact external output root and retains equal pre/post
+  HEAD/index/staged/full-filesystem/compiled-source/candidate hashes; its
+  `ChildAttemptVerifierEnvelope` verdict is nondiscarded;
+- a child verifier mutates a tracked, untracked, ignored, staged, index, HEAD,
+  commit, checkout, mode, symlink, or compiled-source value and then apparently
+  passes; the child envelope records unequal candidate hashes, discards the
+  pass, emits `CHILD_ATTEMPT_VERIFIER:INFRA`, and enters no product-correction
+  loop;
 - a normal read-only verifier receives the exact output-root interface and
   environment, writes all outputs beneath `verifier_output_root`, leaves
   expected/pre/post HEAD equal, leaves porcelain-v2 status and complete
@@ -4166,8 +4813,8 @@ The implementation is not ready until live probes also demonstrate:
   extra correction;
 - simultaneous lane/correction `ReserveGlobalAttempt` calls bind distinct
   subject/process/local-attempt/verifier tuples and never exceed
-  `max_total_attempts`; each consumes exactly once only when its verifier record
-  is classified;
+  `max_total_attempts`; each consumes exactly once only when its complete
+  child-attempt envelope record is classified;
 - process crash after reservation but before creation releases only with proof
   of no process; crash after creation consumes. Adaptive crash after reservation
   releases only with proof no attempt started; any start/ambiguity writes a
@@ -4306,12 +4953,29 @@ The implementation is not ready until live probes also demonstrate:
   current integration HEAD rather than duplicating the correction;
 - restarting after a lane commit but before integration reconciles the commit
   without duplicate work or duplicate merge;
+- the canonical deterministic delivery branch passes `git check-ref-format`,
+  is absent locally/remotely, is created locally from exact final HEAD, and is
+  pushed with the exact non-force full-ref mapping;
+- a stale or wrong-HEAD local delivery branch, unexplained existing remote
+  branch, remote branch owned by another plan/run, wrong remote mapping, or
+  same-name wrong remote head fails before push/PR and performs no force push;
+- an existing remote branch from the same plan/run's prior started delivery
+  attempt at exact expected final HEAD is accepted idempotently, and exact-head
+  remote/PR queries prove no duplicate push/open;
 - a delivery child runs under the accountable supervisor in a clean disposable
   final-HEAD worktree, preserves pre/post HEAD/status/full-filesystem/source
   gates, writes generated state only below `delivery_state_root`, and is
   rejected if it creates `.resolve`;
 - restarting after remote PR creation discovers the existing PR and the parent
   independently verifies its exact final head instead of opening another;
+- each valid final result routes to its exact carrier: COMPLETE exits `0`, while
+  RESIDUALS/INFRA/ABORTED exit `20`/`21`/`22` and reach terminal `Msquare` on
+  `outcome=fail`; deleting or hash/status/token-mismatching carrier input routes
+  through `InfraCarrier`, writes external carrier evidence, emits
+  `GOAL_PLAN:INFRA_FAILURE`, and never changes `result.json`;
+- prelaunch and recovery descriptor faults each produce only their exact
+  harness-owned external result, exact blocked token, and exit `78`, with no
+  parent graph, finalizer, carrier, or `GOAL_PLAN:*` token;
 - two unverifiable delivery attempts preserve the integrated branch and end
   with `GOAL_PLAN:INFRA_FAILURE`, with no third attempt; and
 - an unavailable or untrustworthy verifier/git/remote substrate reaches
