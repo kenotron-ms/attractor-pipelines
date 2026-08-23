@@ -132,15 +132,17 @@ orchestration.
 - Accept lane completion only after an exact non-interactive verifier passes.
 - Require a durable commit before a lane can be integrated.
 - Have the parent independently rerun each lane verifier against the exact
-  commit proposed for integration.
+  commit proposed for integration through the shared read-only verifier
+  envelope.
 - Enforce declared path ownership before integration.
 - Integrate passing lane commits sequentially.
-- Run the aggregate verifier after every integration and again at final HEAD.
+- Run the aggregate verifier through the same envelope after every integration
+  and again at final HEAD.
 - Run a fresh cross-lane coherence review against the fully integrated result.
 - Route late multi-owner findings through one bounded integration-branch
   correction loop.
-- Rerun every lane verifier against exact final integration HEAD before
-  completion.
+- Rerun every lane verifier through the envelope against exact final integration
+  HEAD before completion.
 - Optionally deliver one PR through the proven `deliver_pr.dot` pattern and
   independently verify that the remote PR points at the exact integrated HEAD.
 - Recover by reconciling durable state with real git, worktree, verifier,
@@ -243,6 +245,7 @@ what runs next. The generated DOT owns dispatch and contains the actual program.
 | `waves` | Non-empty ordered array of objects with unique `id` and non-empty `lane_ids`; every lane appears in exactly one wave. |
 | `integration_order` | Array containing every lane ID exactly once in deterministic integration order, with every dependency before its dependents. |
 | `integration_seams` | Array of repository-relative path patterns explicitly writable by late integration correction. No pattern may equal, contain, or overlap `pipelines/PLAN_SLUG/**`. |
+| `verifier_execution_envelope` | Shared immutable `VerifierExecutionEnvelope` contract defined below, including checked-in implementation path/hash, canonical HEAD/status commands, output-root policy, evidence schema, token mapping, and `definition_sha256`. |
 | `aggregate_verifier` | Aggregate-verifier contract defined below. |
 | `global_budgets` | Object with positive integer `max_total_attempts`, positive integer `max_integration_corrections`, and positive integer `max_pipeline_seconds`. |
 | `approval_mode` | Enum string `required` or `preapproved`. |
@@ -328,7 +331,7 @@ Each `lanes` entry contains:
 | `scope_outs` | String array. |
 | `owned_paths` | Non-empty array of repository-relative path patterns. No pattern may equal, contain, or overlap `pipelines/PLAN_SLUG/**`. |
 | `dependencies` | Array of lane IDs; references must exist and form an acyclic graph. |
-| `verifier` | Object with exactly one of non-empty `command`, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "candidate_verification_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; evidence schema version `goal-plan.lane-verifier/v1`; exit/token mapping; and `definition_sha256`. |
+| `verifier` | Object with exactly one of non-empty argv, or checked-in `script_path` plus `script_sha256`; exact symbolic `cwd_policies: ["lane_worktree", "candidate_verification_worktree", "integration_worktree"]`; positive integer `timeout_seconds`; `write_policy: "read_only"`; run-scoped external output policy; evidence schema version `goal-plan.lane-verifier/v1`; exit/token mapping; `envelope_definition_sha256`; and `definition_sha256`. |
 | `review_criteria` | Array of qualitative criterion objects, or an empty array when no lane review is required. |
 | `child_pipeline` | Object with repository-relative `dot_path`, exact `dot_sha256`, exact executable identity and argv/parameter contract defined below, symbolic `cwd_policy: "lane_worktree"`, expected evidence schema `goal-plan.lane-result/v1`, and a hash binding those immutable values. |
 | `budgets` | Object with positive integer `max_attempts` and positive integer `max_child_seconds`. |
@@ -418,6 +421,8 @@ fall back to writing generated state beside `goal_lane.dot`.
 - every child DOT path/hash, launch-command contract, symbolic worktree-CWD
   policy, exact ordered parameter schema, expected child-evidence schema, and
   Linux process-supervision policy;
+- the shared verifier-envelope definition hash, canonical commands, and
+  read-only/external-output policies;
 - the aggregate-verifier definition hash;
 - approval and delivery modes; and
 - all terminal and correction routes.
@@ -445,8 +450,8 @@ Admission runs before approval and before any mutation. It deterministically:
 6. parses the static DOT to require exact correspondence for lane IDs, waves,
    dependency edges, integration order, budget values, aggregate-verifier hash,
    both source-SHA contracts, child launch/monitor nodes, exact child argv/param
-   ordering, child DOT/command/supervision hashes, approval mode, and delivery
-   mode; and
+   ordering, child DOT/command/supervision hashes, verifier-envelope hash and
+   policies, approval mode, and delivery mode; and
 7. records the complete compiled-directory byte manifest and its canonical hash
    under `state_root/admission/`.
 
@@ -534,8 +539,8 @@ only `COMPILED_SOURCE:PASS` or `COMPILED_SOURCE:INFRA`. The gate runs:
 1. at admission in the execution-source checkout;
 2. against each lane worktree immediately after every child exit;
 3. against the candidate commit before parent candidate verification;
-4. against the integration worktree after every merge and every
-   `IntegrationCorrection`;
+4. against the integration worktree before and after every post-merge aggregate
+   envelope, and after every `IntegrationCorrection`;
 5. against all existing run worktrees during restart reconciliation; and
 6. against the integration worktree immediately before finalization or
    delivery.
@@ -564,24 +569,23 @@ Start
   -> CompiledSourceGate on every exited lane worktree
   -> For each candidate: CompiledSourceGate on candidate commit
        -> create clean detached candidate_verification_worktree at exact candidate SHA
-       -> parent reruns lane verifier there
-       -> require clean after verifier; remove/reconcile detached worktree
+       -> VerifierExecutionEnvelope(candidate_lane, expected candidate SHA)
+       -> after envelope postconditions: remove/reconcile detached worktree
   -> Enforce ownership
   -> Integrate passing commits one at a time
-       -> aggregate verifier after each merge
-       -> CompiledSourceGate after each merge
+       -> VerifierExecutionEnvelope(aggregate_after_merge, expected merged HEAD)
        -> on failure: undo candidate merge, return evidence to owning lane
   -> Prepare next explicit dependency wave
   -> ...
-  -> Aggregate verifier at final HEAD
+  -> VerifierExecutionEnvelope(final_aggregate, expected final HEAD)
   -> Fresh cross-lane coherence review at final HEAD
        -> ITERATE: one IntegrationCorrection on integration branch
             -> CompiledSourceGate after correction
-            -> affected-closure lane verifiers at current integration HEAD
-            -> aggregate verifier
+            -> VerifierExecutionEnvelope for each affected-closure lane
+            -> VerifierExecutionEnvelope(aggregate_after_merge, expected current HEAD)
             -> fresh coherence review
        -> residual classification when no bounded correction remains
-       -> PASS: final sweep of every lane verifier at exact final HEAD
+       -> PASS: VerifierExecutionEnvelope for every final-sweep lane
             -> red: IntegrationCorrection within integration budget
             -> all green: completion-eligible
   -> CompiledSourceGate before finalization/delivery
@@ -652,10 +656,12 @@ its disposition.
 Lane-verifier definitions are immutable across runs and worktree locations.
 Their `definition_sha256` covers a canonical serialization of:
 
-- the exact command string, or the checked-in script's content SHA-256;
+- the exact argv, or the checked-in script's content SHA-256;
 - the exact ordered symbolic CWD policies `lane_worktree`,
   `candidate_verification_worktree`, and `integration_worktree`;
 - the configured timeout;
+- exact `write_policy: "read_only"` and run-scoped external output policy;
+- the shared `envelope_definition_sha256`;
 - lane-verifier evidence schema version `goal-plan.lane-verifier/v1`; and
 - the exact exit/verdict/token mapping.
 
@@ -690,26 +696,134 @@ directly from Git and runs `CompiledSourceGate` against its tree. It then:
    which must itself descend from `execution_source_sha`;
 2. creates a clean disposable detached worktree at the exact candidate SHA under
    the dedicated external worktree root;
-3. proves `HEAD == candidate_sha`, the common Git directory matches, and
-   `git status --porcelain=v1 --untracked-files=all` is empty before verification;
-4. runs the immutable lane verifier only in that worktree using
-   `candidate_verification_worktree`;
-5. records the canonical path, candidate SHA, `product_base_sha`,
-   `execution_source_sha`, verifier-definition hash, command/exit/log, and
-   clean-before result;
-6. requires the same full status command to remain empty after verification;
-7. removes the detached worktree without `--force`, prunes/reconciles its Git
+3. invokes the shared `VerifierExecutionEnvelope` with immutable
+   `expected_head_sha = candidate_sha` and
+   `cwd_policy = candidate_verification_worktree`;
+4. records the complete envelope postconditions before any teardown begins;
+5. removes the detached worktree without `--force`, prunes/reconciles its Git
    registration, and proves both filesystem path and worktree-list entry are
    absent; and
-8. atomically records clean-after, removal command/result, registration
-   reconciliation, and final disposition in the parent-verification evidence.
+6. atomically records teardown command/result, registration reconciliation, and
+   final candidate-verification disposition separately from envelope evidence.
 
-These fields extend `goal-plan.lane-verifier/v1` whenever
-`cwd_policy == "candidate_verification_worktree"`. A dirty verifier worktree,
-wrong HEAD, path escape, create failure, remove failure, stale registration, or
-inability to reconcile is `INFRA_FAILURE`, regardless of verifier exit. It never
-becomes lane feedback. A verifier failure is product evidence only after clean
-teardown succeeds.
+Envelope teardown never starts until its post-HEAD, post-status, and
+post-compiled-source records are durable. A wrong initial HEAD, path escape,
+create failure, red envelope, remove failure, stale registration, or inability
+to reconcile is `INFRA_FAILURE`, regardless of verifier exit. It never becomes
+lane feedback. A verifier failure is product evidence only after the envelope
+remains integral and clean teardown succeeds.
+
+### VerifierExecutionEnvelope
+
+Every parent-side lane or aggregate verifier runs through one checked-in
+deterministic `VerifierExecutionEnvelope`. It is mandatory for:
+
+- pre-integration candidate lane verification;
+- aggregate verification immediately after each merge;
+- every affected-closure lane and aggregate verification;
+- the final all-lane verifier sweep; and
+- final aggregate verification.
+
+The caller supplies immutable `expected_head_sha`, one symbolic CWD policy, the
+approved verifier argv/hash/timeout, and a run-scoped external evidence
+directory at
+`state_root/verifications/VERIFICATION_KIND/INVOCATION_ID/`. Candidate
+verification selects
+`candidate_verification_worktree`; every aggregate, affected-closure,
+final-sweep, and final-aggregate invocation selects `integration_worktree`.
+The caller cannot replace the envelope's HEAD, cleanliness, compiled-source, or
+output-root policies.
+
+#### Immutable envelope definition
+
+`plan.json.verifier_execution_envelope` declares:
+
+- schema version `goal-plan.verifier-envelope-definition/v1`;
+- checked-in implementation path and content SHA-256;
+- exact HEAD command `git rev-parse --verify HEAD`;
+- exact full non-ignored status command
+  `git status --porcelain=v1 --untracked-files=all`;
+- compiled-source gate definition/hash;
+- exact symbolic CWD policy allowlist;
+- external output-root policy `state_root_only`;
+- evidence schema `goal-plan.verifier-envelope/v1`;
+- verdict/token mapping; and
+- `definition_sha256`.
+
+The definition hash covers all values above in canonical order. Each lane and
+aggregate verifier definition includes
+`envelope_definition_sha256`, `write_policy: "read_only"`, and an explicit
+contract that all verifier stdout, stderr, structured results, coverage,
+temporary output, caches, and reports are directed beneath the invocation's
+run-scoped `state_root` evidence directory. A verifier definition that requires
+any index or worktree write is invalid at composition/admission and is never
+executed.
+
+#### Execution sequence
+
+For each invocation the envelope performs exactly:
+
+1. Resolve the symbolic CWD policy to its recorded worktree, canonicalize the
+   path with `realpath`, prove the expected Git common directory, and require
+   the evidence/output directory to be outside that worktree and beneath
+   run-scoped `state_root`.
+2. Run the exact HEAD command, record stdout/stderr/exit as `pre_head`, and
+   require `pre_head == expected_head_sha`.
+3. Run the exact status command, record stdout/stderr/exit as `pre_status`, and
+   require successful exit and empty stdout. Because ignored paths are excluded
+   by Git and `--untracked-files=all` is explicit, any tracked/index/worktree
+   dirtiness or non-ignored untracked path is red.
+4. Run `CompiledSourceGate`, persist `pre_compiled_source`, and require exact
+   admission-manifest match.
+5. Run the verifier argv with the verified worktree as CWD and timeout from its
+   immutable definition. Redirect every log/result/output path beneath the
+   caller's run-scoped external evidence directory.
+6. Run the exact HEAD command again, persist `post_head`, and require
+   `post_head == expected_head_sha == pre_head`.
+7. Run the same exact status command again, persist `post_status`, and require
+   successful exit and empty stdout.
+8. Run `CompiledSourceGate` again, persist `post_compiled_source`, and require
+   exact admission-manifest match.
+9. Atomically write the complete evidence record and emit exactly one envelope
+   token.
+
+Postconditions run even when the verifier exits nonzero, times out, or cannot be
+started. The verifier result is not classified until every postcondition has
+finished.
+
+#### Evidence and verdict contract
+
+Every invocation writes one atomic record with:
+
+| Field | Contract |
+|---|---|
+| `schema_version` | Exact value `goal-plan.verifier-envelope/v1`. |
+| `invocation_id`, `verification_kind` | Unique run-scoped ID and one of `candidate_lane`, `aggregate_after_merge`, `affected_closure_lane`, `affected_closure_aggregate`, `final_sweep_lane`, or `final_aggregate`. |
+| `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
+| `expected_head_sha`, `pre_head_sha`, `post_head_sha` | Full SHAs; all three must be equal for a non-infrastructure verdict. |
+| `cwd_policy`, `cwd` | Approved symbolic token and canonical worktree realpath. |
+| `pre_head_command`, `post_head_command` | Exact canonical HEAD argv plus stdout/stderr paths, exit codes, and captured values. |
+| `pre_status_command`, `post_status_command` | Exact canonical status argv plus stdout/stderr paths, exit codes, and complete outputs. |
+| `pre_compiled_source_record`, `post_compiled_source_record` | Paths and hashes of both exact manifest-gate records. |
+| `envelope_definition_sha256`, `verifier_definition_sha256` | Recomputed immutable definition hashes. |
+| `verifier_argv`, `verifier_cwd`, `verifier_exit_code`, `verifier_timed_out` | Exact observed verifier invocation and result. |
+| `verifier_stdout_path`, `verifier_stderr_path`, `verifier_result_paths` | Absolute paths beneath run-scoped `state_root`, never beneath the worktree. |
+| `verifier_result_discarded` | Boolean true whenever any envelope integrity check is red. |
+| `verdict` | Exact value `PASS`, `FAIL`, or `INFRA`. |
+
+The last non-empty stdout line is exactly:
+
+| Condition | Verdict | Token |
+|---|---|---|
+| All envelope checks green; verifier exits `0` before timeout | `PASS` | `VERIFIER_ENVELOPE:PASS` |
+| All envelope checks green; verifier exits `1` before timeout | `FAIL` | `VERIFIER_ENVELOPE:FAIL` |
+| Any pre/post integrity check red; verifier exits `2+`; timeout; execution/hash/evidence failure | `INFRA` | `VERIFIER_ENVELOPE:INFRA` |
+
+Any tracked mutation, index change, non-ignored untracked file, commit, checkout,
+HEAD movement, worktree dirtiness, or compiled-source mismatch sets
+`verifier_result_discarded = true` and routes directly to `INFRA_FAILURE`.
+Even a verifier exit `0` is discarded. Envelope `INFRA` never enters lane or
+integration correction and can never become `PASS`.
 
 ### Child launch and process-supervision contract
 
@@ -819,60 +933,66 @@ Attractor events, `process_run_id`, and optional child box-session IDs.
 The approved plan also contains one immutable aggregate-verifier contract. It
 declares:
 
-- either the exact non-interactive command string or the repository-relative
-  path and content SHA-256 of a checked-in executable script;
+- either the exact non-interactive argv or the repository-relative path and
+  content SHA-256 of a checked-in executable script;
 - the symbolic cwd policy token `integration_worktree`;
 - a configured timeout in seconds;
+- exact `write_policy: "read_only"` and external run-scoped output paths;
+- the shared `envelope_definition_sha256`;
 - a SHA-256 verifier-definition hash;
 - the stdout/stderr log location; and
 - the JSON evidence-record location.
 
 The immutable verifier-definition hash covers a canonical serialization of:
 
-- the exact command string, or the checked-in script's content SHA-256;
+- the exact argv, or the checked-in script's content SHA-256;
 - exact symbolic cwd policy token `integration_worktree`;
 - the configured timeout;
+- the read-only/external-output policy;
+- the shared envelope-definition hash;
 - evidence schema version `goal-plan.aggregate-verifier/v1`; and
 - the exact exit/verdict/last-line-token mapping below.
 
 The canonical hash input never contains a resolved absolute worktree path, so
 the same approved verifier contract has the same hash across runs. Before every
-aggregate run, the wrapper recomputes the immutable definition hash and
+aggregate run, the envelope recomputes the immutable definition hash and
 compares it with the approved value. A mismatch is infrastructure failure; the
 changed verifier is not run as though it were the approved definition of done.
 
-At runtime, the wrapper resolves `integration_worktree` from `target_repo`,
+At runtime, the envelope resolves `integration_worktree` from `target_repo`,
 `state_root`, and `run_id`, canonicalizes it with `realpath`, requires equality
 with the integration-worktree realpath in the durable run record, and confirms
 that it uses the target repository's Git common object database. That resolved
 absolute path is runtime evidence, not immutable contract input.
 
-Every invocation runs from that verified absolute integration-worktree path.
-Combined stdout and stderr are written to an `attempt-N.log` file under the
-run's integration evidence directory. An adjacent `attempt-N.json` evidence
-record is written atomically with these required fields:
+Every invocation supplies immutable `expected_head_sha` and
+`cwd_policy = integration_worktree` to `VerifierExecutionEnvelope`. No aggregate
+node executes the verifier directly. The envelope writes verifier stdout,
+stderr, results, and integrity evidence beneath the run's integration evidence
+directory. An adjacent aggregate projection is written atomically with:
 
 | Field | Contract |
 |---|---|
 | `schema_version` | Exact value `goal-plan.aggregate-verifier/v1`. |
 | `attempt` | Positive integer for this aggregate-verifier invocation. |
 | `product_base_sha`, `execution_source_sha` | Exact admitted source SHAs. |
-| `head_sha` | Full SHA returned by `git rev-parse HEAD` immediately before the run. |
+| `expected_head_sha` | Immutable full SHA supplied by the caller. |
 | `verifier_hash` | Recomputed SHA-256 verifier-definition hash. |
+| `envelope_hash` | Recomputed shared envelope-definition hash. |
+| `envelope_evidence_path` | Path to the complete `goal-plan.verifier-envelope/v1` record. |
 | `cwd_policy` | Exact value `integration_worktree`. |
-| `cwd` | Absolute, `realpath`-canonicalized integration-worktree path verified for this run. |
-| `exit_code` | Child exit code; a timeout records wrapper exit code `124`. |
-| `timed_out` | Boolean that is `true` only when the configured timeout fired. |
+| `cwd` | Absolute, `realpath`-canonicalized integration-worktree path from envelope evidence. |
+| `exit_code`, `timed_out` | Verifier result copied from envelope evidence only after integrity classification. |
 | `verdict` | Exact value `PASS`, `FAIL`, or `INFRA`. |
 
-The deterministic wrapper captures the child result, writes the log and JSON
-record, and emits exactly one of these tokens as its last non-empty stdout line:
+The deterministic aggregate classifier validates the envelope schema and hashes
+and emits exactly one aggregate token:
 
 | Observed result | JSON verdict | Last-line token |
 |---|---|---|
-| Exit `0` before timeout | `PASS` | `AGGREGATE_VERIFY:PASS` |
-| Exit `1` before timeout | `FAIL` | `AGGREGATE_VERIFY:FAIL` |
-| Exit `2` or greater, timeout, definition-hash mismatch, or inability to execute the verifier | `INFRA` | `AGGREGATE_VERIFY:INFRA` |
+| Envelope `PASS` | `PASS` | `AGGREGATE_VERIFY:PASS` |
+| Envelope `FAIL` | `FAIL` | `AGGREGATE_VERIFY:FAIL` |
+| Envelope `INFRA`, missing/stale evidence, or hash/schema mismatch | `INFRA` | `AGGREGATE_VERIFY:INFRA` |
 
 Graph edges route on `tool.last_line`. Only `AGGREGATE_VERIFY:PASS` may advance
 to another dependency wave, final coherence review, delivery eligibility, or
@@ -919,7 +1039,7 @@ clean detached candidate worktree assigns the final `PASS` disposition.
 | Lane, candidate-verification, and integration worktree creation, cleanliness, cleanup, branch/source inspection | Deterministic nodes | Git state is observable and must be reproducible. |
 | Child process launch, identity ledger, logs, timeout, TERM/grace/KILL, exit capture, and restart reconciliation | Deterministic supervisor and parent nodes | Process control is exact infrastructure state; artifacts cannot substitute for the real exit status. |
 | Advancing a lane goal and adapting implementation | LLM lane worker inside the child Attractor process | The implementation path may change as the domain surprises the worker. |
-| Running lane and aggregate verifier commands | Deterministic nodes | Exit status and captured output are the primary machine evidence. |
+| Running parent-side lane and aggregate verifiers plus pre/post integrity checks | Shared deterministic `VerifierExecutionEnvelope` | A verifier result is evidence only when immutable HEAD, cleanliness, compiled source, and external-output invariants survive. |
 | Failure-signature comparison and budget accounting | Deterministic nodes | Loop control must not depend on model judgment. |
 | Root-cause diagnosis after repeated failure | Fresh or gate-class LLM context | Classification may require semantic judgment, but its proposed correction is tested by the deterministic verifier. |
 | Optional qualitative lane critique | Independent LLM gate plus deterministic artifact classifier | Some acceptance criteria cannot be reduced to a command; the reviewer must be outside the worker context, and its versioned artifact must be schema-valid and tied to the exact commit. |
@@ -940,11 +1060,14 @@ Evidence is accepted in this order:
 1. Git object, worktree, source-SHA, and compiled-source-manifest state observed
    by deterministic commands.
 2. Canonical process identity, real process exit, and process-run evidence.
-3. Verifier command, exit status, timeout status, and captured output.
-4. Deterministic ownership and dependency checks.
-5. Independent qualitative review tied to an exact commit, only for criteria
+3. Complete verifier-envelope pre/post HEAD, cleanliness, compiled-source, and
+   external-output integrity evidence.
+4. Non-discarded verifier argv, exit status, timeout status, and captured
+   output.
+5. Deterministic ownership and dependency checks.
+6. Independent qualitative review tied to an exact commit, only for criteria
    that genuinely require judgment.
-6. Remote API state for delivery.
+7. Remote API state for delivery.
 
 Worker self-report is never in this hierarchy.
 
@@ -1081,7 +1204,9 @@ Before a wave starts, deterministic preflight confirms:
 - the process ledger and lane evidence directories resolve beneath the approved
   ignored `state_root`;
 - the aggregate verifier is runnable;
-- lane verifiers are present and non-interactive; and
+- lane verifiers are present, non-interactive, read-only, and externally
+  output-configured;
+- the envelope implementation/hash and canonical commands match the plan; and
 - declared ownership for concurrently running lanes does not overlap and no
   owned path or integration seam can match `pipelines/PLAN_SLUG/**`.
 
@@ -1123,8 +1248,9 @@ For each candidate lane in stable plan order, the parent:
 5. runs `CompiledSourceGate` against the candidate tree;
 6. creates the clean disposable detached
    `candidate_verification_worktree` at that exact commit;
-7. reruns the immutable lane verifier only there, proves clean before and after,
-   removes/reconciles the worktree, and records all lifecycle evidence;
+7. invokes `VerifierExecutionEnvelope(candidate_lane)` there with immutable
+   `expected_head_sha`, then records postconditions before separately
+   removing/reconciling the worktree;
 8. records the cumulative candidate tree delta from `execution_source_sha`,
    subtracts the already-journaled cumulative delta through the exact current
    integration base to isolate this lane's mutation, and checks that isolated
@@ -1132,10 +1258,12 @@ For each candidate lane in stable plan order, the parent:
 9. checks required qualitative evidence, when declared;
 10. records the parent verdict;
 11. integrates only a `PASS` candidate into the integration branch;
-12. runs the aggregate verifier immediately after the integration; and
-13. runs `CompiledSourceGate` against the resulting integration HEAD.
+12. invokes `VerifierExecutionEnvelope(aggregate_after_merge)` immediately
+    after integration with expected post-merge HEAD; its pre/post
+    compiled-source checks satisfy the required post-merge gate.
 
-If candidate integration or the aggregate verifier fails:
+If candidate integration fails mechanically, or the aggregate envelope returns
+`FAIL` with every integrity check green:
 
 - the integration branch returns to the recorded pre-candidate HEAD;
 - the failed candidate is not recorded as integrated;
@@ -1144,9 +1272,9 @@ If candidate integration or the aggregate verifier fails:
   base; and
 - parent verification repeats before another integration attempt.
 
-A compiled-source failure, candidate-verification worktree lifecycle failure, or
-other infrastructure verdict bypasses this correction loop and routes directly
-to `INFRA_FAILURE`.
+A compiled-source failure, candidate-verification worktree lifecycle failure,
+or envelope `INFRA` bypasses rollback-as-product-correction and routes directly
+to `INFRA_FAILURE`; the verifier's apparent result is discarded.
 
 This is the integration-level corrective cycle. It prevents a lane-local green
 result from poisoning the shared branch.
@@ -1189,18 +1317,22 @@ After `IntegrationCorrection` writes and commits a correction, the graph:
 
 1. runs `CompiledSourceGate` against the current integration HEAD and routes any
    mismatch directly to `INFRA_FAILURE`;
-2. reruns every affected-closure lane verifier against the current integration
-   HEAD, in static integration order restricted to that closure;
-3. rejects any verifier evidence whose `head_sha` is not that current HEAD;
-4. reruns the aggregate verifier;
+2. invokes `VerifierExecutionEnvelope(affected_closure_lane)` for every
+   affected-closure lane against immutable expected current integration HEAD,
+   in static integration order restricted to that closure;
+3. rejects any envelope evidence whose expected/pre/post HEAD is not that
+   current HEAD;
+4. invokes `VerifierExecutionEnvelope(affected_closure_aggregate)` against that
+   same expected current HEAD;
 5. reruns fresh cross-lane coherence review; and
 6. repeats only through the one `IntegrationCorrection` loop when product evidence is
    red.
 
-An affected-closure lane-verifier failure adds that lane ID to the next
-responsible set and routes back to `IntegrationCorrection`. Each worker entry
-consumes one `global_budgets.max_integration_corrections` unit and also counts
-toward `max_total_attempts`. Exhaustion writes named
+An affected-closure lane envelope `FAIL` with all integrity checks green adds
+that lane ID to the next responsible set and routes back to
+`IntegrationCorrection`. Envelope `INFRA` routes only to `INFRA_FAILURE`. Each
+worker entry consumes one `global_budgets.max_integration_corrections` unit and
+also counts toward `max_total_attempts`. Exhaustion writes named
 `BUDGET_EXHAUSTED(integration_correction:SORTED_LANE_IDS)` residuals with the
 last findings, closure, ownership check, verifier logs, and integration HEAD.
 
@@ -1208,13 +1340,15 @@ last findings, closure, ownership check, verifier logs, and integration HEAD.
 
 After coherence returns `PASS`, and before delivery eligibility or
 `COMPLETE`, `CompiledSourceGate` passes and the graph runs every lane verifier
-once more against the exact current integration HEAD in full static integration
-order. Each final-sweep record is bound to that one SHA,
+once more through `VerifierExecutionEnvelope(final_sweep_lane)` against the
+exact current integration HEAD in full static integration order. Each
+final-sweep envelope is bound to that one SHA,
 `product_base_sha`, and `execution_source_sha`.
 
-If any final-sweep lane verifier is red, its lane ID becomes the responsible
-set for `IntegrationCorrection`; the graph computes its transitive-dependent
-closure and re-enters the same bounded correction loop. After correction it
+If any final-sweep lane envelope returns `FAIL` with integrity green, its lane
+ID becomes the responsible set for `IntegrationCorrection`; the graph computes
+its transitive-dependent closure and re-enters the same bounded correction
+loop. Envelope `INFRA` routes only to `INFRA_FAILURE`. After correction the run
 must again pass closure verification, aggregate verification, coherence review,
 and the complete final sweep. No pre-merge, lane-branch, or pre-correction
 verifier evidence can satisfy completion.
@@ -1223,7 +1357,8 @@ verifier evidence can satisfy completion.
 
 After all runnable waves finish:
 
-1. The deterministic aggregate verifier runs at final integrated HEAD.
+1. `VerifierExecutionEnvelope(final_aggregate)` runs at immutable expected final
+   integrated HEAD and must return an integrity-preserving aggregate `PASS`.
 2. A fresh independent reviewer reads the approved plan, lane evidence, final
    lane-produced diff `execution_source_sha..final_integrated_head`, the
    separately labeled compiled-plan delta
@@ -1244,9 +1379,10 @@ verifier sweep. If responsibility is ambiguous or correction budget is
 exhausted, the finding becomes an evidence-backed residual rather than an
 invented pass.
 
-Final coherence review is unreachable until the aggregate wrapper emitted
-`AGGREGATE_VERIFY:PASS` for the same HEAD. A coherence `PASS` therefore cannot
-mask a red or stale mechanical result.
+Final coherence review is unreachable until a complete final-aggregate envelope
+and classifier emitted `AGGREGATE_VERIFY:PASS` for the same expected/pre/post
+HEAD. A coherence `PASS` therefore cannot mask a red, stale, discarded, or
+mutation-tainted mechanical result.
 
 ## Budgets and Exhaustion
 
@@ -1321,7 +1457,8 @@ The only pre-mutation gate presents:
   known compiled-plan delta between them;
 - the compiled-source manifest hash;
 - ownership and collision analysis;
-- lane and aggregate verifiers;
+- lane and aggregate verifiers plus the shared envelope hash, canonical
+  HEAD/status commands, read-only policy, and external output roots;
 - child DOT/launch hashes, lane wall limits, and process-supervision policy;
 - budgets;
 - planned integration order; and
@@ -1377,7 +1514,11 @@ The run persists:
   log path, start/end times, timeout/cancellation state, and real exit status;
 - lane contracts, evidence, and dispositions;
 - parent-verification records, including detached candidate SHA/path,
-  verifier hash, clean-before/after results, and removal/reconciliation proof;
+  verifier/envelope hashes, complete envelope evidence, and
+  removal/reconciliation proof;
+- every `goal-plan.verifier-envelope/v1` record, including immutable expected
+  HEAD, pre/post HEAD/status/compiled-source evidence, verifier outputs, and
+  final envelope verdict;
 - integration journal whose every entry binds `product_base_sha`,
   `execution_source_sha`, candidate SHA, and pre-merge/post-merge HEADs;
 - integration-correction journal with each round's responsible set, affected
@@ -1411,11 +1552,11 @@ On restart, the graph compares state with reality:
    each with `realpath` and require equality with its recorded path and Git
    common object database.
 5. Reconcile any disposable candidate-verification worktree left by a crash.
-   Require its recorded candidate SHA/path, exact detached HEAD, and clean full
-   status; dirty, wrong, or unremovable state is `INFRA_FAILURE`. Remove and
-   prune a valid leftover, record reconciliation evidence, and restart parent
-   candidate verification from worktree creation rather than trusting a partial
-   verifier result.
+   Require its recorded candidate SHA/path, exact detached HEAD, and empty output
+   from the canonical full non-ignored status command; dirty, wrong, or
+   unremovable state is `INFRA_FAILURE`. Remove and prune a valid leftover,
+   record reconciliation evidence, and restart parent candidate verification
+   from worktree creation only when no envelope invocation had started.
 6. Reconcile every nonterminal child process ledger. Before polling, adoption,
    or signalling, reread and match for both supervisor and child the canonical
    Linux boot-ID/PID/starttime token, exact cmdline hash, PGID, executable
@@ -1435,26 +1576,35 @@ On restart, the graph compares state with reality:
    substrate is untrustworthy.
 11. Require the persisted child exit status even when candidate artifacts exist;
    a missing or nonzero exit cannot be normalized to `PASS`.
-12. Rerun pre-integration parent verification only through a newly created
-   clean `candidate_verification_worktree` when its lifecycle evidence is
-   absent, stale, incomplete, or not bound to the candidate commit.
-13. Reconcile the integration journal against the actual integration HEAD and
+12. Reconcile every envelope record against its immutable expected HEAD,
+   verifier/envelope hashes, external output paths, and complete pre/post
+   evidence. A missing postcondition, red integrity check, worktree mutation, or
+   interrupted envelope is `INFRA_FAILURE`; recovery never infers a verifier
+   result or reruns over a possibly mutated integration worktree.
+13. Start pre-integration parent verification through a newly created clean
+   `candidate_verification_worktree` only when no envelope invocation was
+   durably started for that candidate. Once envelope execution starts, missing
+   or incomplete postconditions are handled only by rule 12 as
+   `INFRA_FAILURE`.
+14. Reconcile the integration journal against the actual integration HEAD and
    Git ancestry before attempting another merge.
-14. Recompute every recorded integration-correction affected closure from the
+15. Recompute every recorded integration-correction affected closure from the
    static DAG and require it to match the durable journal. Preserve prior
    artifacts but enforce all recorded invalidations.
-15. If an integration-correction commit exists but its proof sequence is
+16. If an integration-correction commit exists but its proof sequence is
    incomplete, first run `CompiledSourceGate`, then resume at affected-closure
    verification against current integration HEAD rather than rerunning the
    worker.
-16. Rerun the aggregate verifier if the actual HEAD lacks a bound passing
-   record.
-17. Reject a fresh-review artifact whose source SHAs differ or whose
+17. Invoke a new aggregate envelope only when the integration worktree is
+   independently proven clean at the intended expected HEAD and lacks a
+   completed bound envelope record.
+18. Reject a fresh-review artifact whose source SHAs differ or whose
    `reviewed_head` does not equal actual HEAD.
-18. Require a complete all-lane final sweep and a current compiled-source pass
+19. Require a complete all-lane final sweep of passing envelope records and a
+    current compiled-source pass
     at actual integration HEAD before
     restoring completion eligibility.
-19. Reconcile the delivery ledger, then query remote PR state at the ledger's
+20. Reconcile the delivery ledger, then query remote PR state at the ledger's
    exact expected head if delivery may already have occurred; never open a
    duplicate merely because local state is incomplete.
 
@@ -1466,9 +1616,9 @@ state agree. Ambiguous or contradictory infrastructure state fails loudly as
 
 | Terminal | Required condition | Delivery behavior |
 |---|---|---|
-| `COMPLETE` | Both source SHAs remain bound; the compiled-source manifest passes immediately before finalization; all work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; every lane verifier passes in the final sweep at exact final integration HEAD; the aggregate verifier and fresh coherence review pass at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
+| `COMPLETE` | Both source SHAs remain bound; the compiled-source manifest passes immediately before finalization; all work is integrated; no proof invalidation or integration-correction exhaustion residual remains unsatisfied; every final-sweep lane and final aggregate has a passing, non-discarded envelope bound to exact final integration HEAD; fresh coherence review passes at that same HEAD; and, when delivery is enabled, the PR is independently confirmed at exact HEAD. | May auto-deliver one PR. |
 | `RESIDUALS_READY` | All lanes are terminal or dependency-blocked, but at least one is not `PASS`, or final aggregate/coherence criteria remain unsatisfied. Passing work and every residual have evidence. | Never auto-delivers; requires residual disposition. |
-| `INFRA_FAILURE` | Source-SHA/compiled-byte identity, Git/worktree state, candidate-verification worktree lifecycle, Linux procfs process identity/supervision, verifier execution substrate, credentials, remote API, or recovery state cannot be trusted enough to classify product work honestly. | No delivery. |
+| `INFRA_FAILURE` | Source-SHA/compiled-byte identity, Git/worktree state, verifier-envelope integrity, candidate-verification worktree lifecycle, Linux procfs process identity/supervision, verifier execution substrate, credentials, remote API, or recovery state cannot be trusted enough to classify product work honestly. | No delivery. |
 | `ABORTED` | The plan was rejected/cancelled before mutation, or the operator explicitly stopped the run at an allowed gate. | No delivery. |
 
 ### Finalizer machine contract
@@ -1489,6 +1639,7 @@ writes the run root's versioned `result.json` with, at minimum:
   exists;
 - `lane_dispositions`;
 - `child_process_evidence_paths`;
+- `verifier_envelope_evidence_paths`;
 - `integration_correction_records`;
 - `aggregate_evidence_path`;
 - `fresh_review_evidence_paths`;
@@ -1622,9 +1773,10 @@ README.md
 
 `goal_plan_runtime.py` is the single deterministic home for source-SHA
 admission, compiled-source manifests/gates, ownership-pattern rejection,
-candidate-verification worktree lifecycle, and delta reporting. DOT nodes call
-that module rather than duplicating shell logic. `process_supervisor.py` remains
-the single home for Linux process identity and child lifecycle.
+candidate-verification worktree lifecycle, the shared
+`VerifierExecutionEnvelope`, and delta reporting. DOT nodes call that module
+rather than duplicating shell logic. `process_supervisor.py` remains the single
+home for Linux process identity and child lifecycle.
 
 The smoke exemplar proves orchestration rather than product behavior. In a
 temporary repository, two Wave 1 fixture lanes each produce a file in disjoint
@@ -1651,8 +1803,9 @@ orchestration behavior, not a library-only change.
 5. Confirm every terminal is reachable and routes explicitly to the exit.
 6. Confirm the README and companion guide describe the actual graph.
 7. Validate the aggregate-verifier evidence schema, exit/token normalization,
-   verifier-hash guard, shared fresh-review schema, finalizer token map, and
-   two-attempt delivery ledger against the contracts above.
+   shared envelope schema/hash/token map, verifier-hash guard, shared
+   fresh-review schema, finalizer token map, and two-attempt delivery ledger
+   against the contracts above.
 8. Validate `plan.json` schema and exact-byte hash, embedded `plan_sha256`,
    graph/plan correspondence, both target-repository identity modes, and typed
    runtime-input rejection cases.
@@ -1677,6 +1830,10 @@ orchestration behavior, not a library-only change.
     argv/env/CWD hashing, real exit capture, timeout escalation, cancellation,
     stale-PID rejection, and restart reconciliation in
     `process_supervisor.py`.
+15. Unit-test the envelope's immutable expected-HEAD binding, canonical
+    pre/post HEAD and full-status commands, external output-root enforcement,
+    pre/post compiled-source gates, discarded-result behavior, token mapping,
+    and recovery classification in `goal_plan_runtime.py`.
 
 ### Primary live smoke scenario
 
@@ -1727,27 +1884,27 @@ The live smoke passes only if direct observation proves:
    feedback produces a different candidate hash and later green evidence.
 8. Parent verification creates a clean detached
    `candidate_verification_worktree` at the exact candidate SHA, runs the
-   verifier only there, proves clean before and after, removes/reconciles it,
-   and records canonical path, SHA, verifier hash, and lifecycle evidence.
+   shared envelope only there, proves expected/pre/post HEAD equality and clean
+   pre/post status, records both compiled-source checks, then
+   removes/reconciles it with separately durable teardown evidence.
 9. Ownership checks pass, reject an out-of-scope write, and categorically
    reject any compiled-pipeline write or integration seam.
-10. Integration occurs in stable order, with an aggregate-verifier record and
-   passing `CompiledSourceGate` after
-   each merge that names the exact HEAD and verifier hash and whose last-line
-   token agrees with its JSON verdict. The immutable hash contains
-   `integration_worktree`, while the evidence separately records the verified
-   absolute cwd.
+10. Integration occurs in stable order, with an
+    `aggregate_after_merge` envelope after each merge. Its immutable expected,
+    pre-, and post-HEADs are equal; both status outputs are empty; both
+    compiled-source checks pass; and its aggregate token agrees with the
+    envelope verdict.
 11. `lane_c` starts only after both dependencies are integrated and green.
 12. Cross-lane `ITERATE` invokes one `IntegrationCorrection` on the integration
    branch, never the old lane branches; its write set is limited to the
    responsible lanes' ownership union plus declared integration seams.
 13. Correction invalidates prior proof for the affected closure, passes
-    `CompiledSourceGate`, then reruns
-    all three closure lane verifiers at current integration HEAD before
-    aggregate and coherence gates pass.
-14. The final sweep reruns every lane verifier at one exact final integration
-    HEAD; final aggregate and fresh-review records name that SHA and both source
-    SHAs.
+    `CompiledSourceGate`, then reruns all three closure lane verifiers through
+    separate `affected_closure_lane` envelopes at current integration HEAD
+    before an aggregate envelope and coherence gate pass.
+14. The final sweep runs every lane verifier through a `final_sweep_lane`
+    envelope at one exact final integration HEAD; the `final_aggregate`
+    envelope and fresh-review record name that SHA and both source SHAs.
 15. The pre-finalization and pre-delivery compiled-source gates match the
     admission manifest.
 16. The delivery ledger records no more than two attempts, both source SHAs,
@@ -1784,9 +1941,25 @@ The implementation is not ready until live probes also demonstrate:
   interprets absence alone as success;
 - a candidate-verification worktree with wrong HEAD, dirty-before state,
   dirty-after state, failed non-force removal, stale worktree registration, or
-  crash-left incomplete lifecycle evidence yields `INFRA_FAILURE`; a clean
-  crash-left worktree is removed/reconciled and verification restarts in a new
-  detached worktree;
+  crash-left incomplete envelope evidence yields `INFRA_FAILURE`; a clean
+  crash-left worktree is removed/reconciled and verification starts in a new
+  detached worktree only when no envelope invocation had begun;
+- a normal read-only verifier writes all outputs beneath `state_root`, leaves
+  expected/pre/post HEAD equal, leaves both status outputs empty, preserves both
+  compiled-source checks, and returns the expected envelope `PASS` or `FAIL`;
+- a verifier that modifies a tracked file and then exits `0` produces envelope
+  `INFRA`, discards the apparent pass, and enters no correction loop;
+- a verifier that creates any non-ignored untracked file and then exits `0`
+  produces envelope `INFRA`;
+- a verifier that stages a file and then exits `0` produces envelope `INFRA`
+  because post-status exposes index dirtiness;
+- a verifier that commits a change and then exits `0` produces envelope `INFRA`
+  because post-HEAD differs from immutable expected/pre HEAD;
+- a verifier that checks out another commit and then exits `0` produces envelope
+  `INFRA` because post-HEAD moved; and
+- a verifier that mutates any compiled-source byte and then exits `0` produces
+  envelope `INFRA` even when ordinary status output is empty, because the post
+  manifest gate is independently authoritative;
 - two consecutive runs leave source DOT, scripts, and committed fixtures
   byte-clean, with every generated log, event, checkpoint, feedback, and result
   beneath `state_root/lanes/<lane-id>/`;
