@@ -17,7 +17,13 @@
 //   $lane_id            - "lane_a" | "lane_b" | "lane_c"
 //   $marker_file         - e.g. "SMOKE_MARKER_lane_a.txt"
 //   $marker_content      - e.g. "lane_a:ok"
-//   $seeded_failure       - "true" | "false" (lane_b only, per plan.json)
+//   $seeded_failure       - OPTIONAL legacy/test-only param. No longer
+//                          consumed: the seeded-failure smoke fixture that
+//                          used it was removed so this subgraph is reusable
+//                          for arbitrary lanes. Retained here only because
+//                          the existing goal_plan_smoke.dot parent still
+//                          passes it; new callers may omit it (default /
+//                          omitted == run the normal real task).
 //   $runtime_py_dir      - absolute path to pipelines/goal_plan_smoke/python
 //   $output_root         - external per-attempt verifier output root
 //   $evidence_path        - external evidence JSON path for this lane
@@ -62,13 +68,15 @@ digraph goal_lane {
   // LLM judgment node -- the only place in this graph a model is asked to
   // do more than type a deterministic string. Writes the lane's candidate
   // marker file, reading and addressing any curated feedback left by a
-  // prior failed iteration. The seeded-failure branch is an explicit,
-  // documented test fixture for Wave 3 (lane convergence proof) -- not a
-  // hidden fault: see plan.json's lanes.lane_b.seeded_failure_note.
+  // prior failed iteration. (A smoke-test-only seeded-failure fixture,
+  // conditioned on $seeded_failure=true, was removed from this prompt so the
+  // subgraph carries no dead test-fixture weight into reuse by arbitrary
+  // lanes; the original fixture is still described in plan.json's
+  // lanes.lane_b.seeded_failure_note for historical reference.)
   Attempt [
     shape=box, fidelity="full",
     label="Attempt",
-    prompt="You are lane $lane_id in the goal_plan_smoke static graph family's smoke test. Your ONLY job: write a file named $marker_file in the current directory containing exactly the text: $marker_content (no trailing content beyond a single optional trailing newline). First check whether a file named .goal_lane_feedback.txt exists in the current directory -- if it does, it holds one curated critique of your PREVIOUS attempt; read it and make sure this attempt addresses it. SEEDED TEST FIXTURE (only applies when $seeded_failure=true, i.e. lane_b): if $seeded_failure=true AND .goal_lane_feedback.txt does NOT yet exist (this is your first attempt), deliberately write the WRONG content 'lane_b:seeded-fail' to $marker_file instead of the correct content -- this is an intentional, documented fault used to prove the correction loop for real, not a mistake to avoid. On every subsequent attempt (whenever .goal_lane_feedback.txt exists), write the correct content $marker_content regardless of $seeded_failure. After writing the file, append 1 to the integer in .goal_lane_iteration (idempotent: read the current integer, add 1, overwrite). Print the single line: attempted"
+    prompt="You are lane $lane_id in the goal_plan_smoke static graph family's smoke test. Your ONLY job: write a file named $marker_file in the current directory containing exactly the text: $marker_content (no trailing content beyond a single optional trailing newline). First check whether a file named .goal_lane_feedback.txt exists in the current directory -- if it does, it holds one curated critique of your PREVIOUS attempt; read it and make sure this attempt addresses it. After writing the file, append 1 to the integer in .goal_lane_iteration (idempotent: read the current integer, add 1, overwrite). Print the single line: attempted"
   ];
 
   Attempt -> ChildVerify;
