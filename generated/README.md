@@ -60,6 +60,17 @@ the ephemeral branches, not ephemeral artifacts themselves. Everything else
 that ever appears under `generated/` is machine-generated and belongs on a
 `resolve/goal-plan-*` branch, never here on `main`.
 
+**No `.gitignore` entry is used for `generated/`, by design.** There is no
+local-only scratch path here to ignore: the compiled `plan.json` + parent
+`.dot` are the deliverable and *must* be committed (onto a disposable branch,
+then fetched over `git+https://`), while this `README.md` and
+`prune-branches.sh` are intentional `main` content. The same artifact is
+forbidden on `main` but required on `resolve/goal-plan-*` branches — a
+distinction `.gitignore` cannot make, since it is branch-blind. Keeping those
+artifacts off `main` is therefore a **branch-discipline** guarantee (always
+commit them on `resolve/goal-plan-<run-id>`, never `main`), not something a
+`.gitignore` rule could or should enforce.
+
 ## Retention / prune policy
 
 There is **no CI cron in this repo** (verified: `.github/workflows/` contains

@@ -369,3 +369,32 @@ trusted bootstrap, launch descriptor, and process-supervision prerequisites
 described in `goal_plan_smoke.md`. It is included here as the reference
 example for a multi-lane, worktree-isolated, supervisor-verified parallel
 goal/plan attractor.
+
+## Namespace: generated/ (machine-generated, NOT curated)
+
+`generated/` is the one deliberate exception to this repo's identity. Every
+pipeline above is hand-authored, reviewed content "shared for reference and
+reuse." `generated/` is the opposite: a **machine-generated, ephemeral
+fallback landing zone** for the goal-plan compiler, used *only* when a
+compiled goal-plan pipeline's target repo is **not** GitHub-hosted (the
+normal, GitHub-hosted case commits the artifact into the target repo itself,
+never here). Task-specific `plan.json` + compiled parent `.dot` artifacts land
+here on disposable `resolve/goal-plan-<run-id>` branches — **never on `main`**,
+never reviewed, never meant to be copied as an example.
+
+Do not mistake anything that appears under `generated/` for a reviewed
+reference pipeline. The only files that live there on `main` are its own
+`README.md` and the `prune-branches.sh` retention tool; the actual generated
+artifacts exist only on those disposable branches and are pruned on a
+documented schedule (default: older than 30 days).
+
+See [`generated/README.md`](generated/README.md) for the full contract, the
+GitHub-vs-non-GitHub placement rule, and the prune policy. Background:
+[`docs/plans/2026-08-24-goal-plan-compiler-resolve-design.md`](docs/plans/2026-08-24-goal-plan-compiler-resolve-design.md)
+("Repository placement decision rule").
+
+```
+generated/
+  README.md              # the contract: fallback-only, never main, not curated
+  prune-branches.sh       # manual retention tool (dry-run by default)
+```
