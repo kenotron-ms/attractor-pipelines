@@ -14,8 +14,10 @@ What it generalizes from the hand-authored exemplar
 * the wave-gating edges -- a lane in wave N+1 is reachable *only* via wave N's
   ``ACCEPTED`` edges, exactly as the exemplar does today, but constructed rather
   than copied;
-* the aggregation / coherence shell loops -- ``for f in <lane ids>`` becomes
-  data-driven from the spec instead of the literal ``lane_a lane_b lane_c``.
+* the aggregation / coherence shell checks -- per-lane ``test -f <marker_file>``
+  (and, for the final sweep, a matching ``marker_content`` check) become
+  data-driven from the spec's actual lane fields instead of the literal
+  ``lane_a lane_b lane_c`` / ``SMOKE_MARKER_$f.txt`` smoke-fixture convention.
 
 Execution model (faithful to the exemplar):
 
@@ -27,11 +29,19 @@ Execution model (faithful to the exemplar):
   exemplar's ``LaunchLaneC`` (Wave 2, sequential, forks the integration HEAD).
 * All lanes are parent-verified and integrated one at a time in
   ``integration_order``.
+
+Security note -- every spec value is charset/denylist-validated in
+``compiler/plan.py`` *before* it reaches this module. The escaping performed
+here (``_dot_escape``, ``_pyliteral``, ``shlex.quote``) is defense-in-depth: it
+must hold even if a value somehow arrived here unvalidated.
 """
 
 from __future__ import annotations
 
-from .plan import Plan, build_plan
+import re
+import shlex
+
+from .plan import Lane, Plan, PlanValidationError, build_plan
 
 # --------------------------------------------------------------------------
 # Position -> letter suffix (0 -> A, 1 -> B, ... 25 -> Z, 26 -> AA, ...).
@@ -59,6 +69,7 @@ def _dot_escape(s: str) -> str:
     """
     s = s.replace("\\", "\\\\")
     s = s.replace('"', '\\"')
+    s = s.replace("\r", "\\r")
     s = s.replace("\n", "\\n")
     return s
 
@@ -70,6 +81,23 @@ def _pyliteral(items: tuple[str, ...] | list[str]) -> str:
     (``[ "$(cat x)" = "y" ]``) readable and avoids nested-quote escaping.
     """
     return "[" + ", ".join(repr(a) for a in items) + "]"
+
+
+# A DOT graph/digraph id used *unquoted* (e.g. ``digraph <id> {``) must be a
+# bare identifier -- letters, digits, underscore, not starting with a digit.
+# Hyphens (which plan_id's charset otherwise allows, since plan_id is also
+# usable inside quoted contexts elsewhere) are NOT valid there.
+_BARE_DOT_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _require_bare_dot_id(value: str) -> None:
+    if not _BARE_DOT_ID_RE.match(value):
+        raise PlanValidationError(
+            f"plan_id {value!r} cannot be used as a bare DOT graph id (used "
+            f"unquoted in 'digraph {{value}} {{'); must match "
+            f"{_BARE_DOT_ID_RE.pattern!r} (letters, digits, underscore only -- "
+            "no hyphens)"
+        )
 
 
 class _Emitter:
@@ -134,7 +162,7 @@ contract = {
                    "--param", "ledger_lock_path=$state_root/budgets/@@LANE@@.lock",
                    "--param", "run_id=$run_id", "--param", "max_attempts=@@MAX_ATTEMPTS@@"],
     "child_cwd": wt, "child_env": {"PYTHONPATH": "$runner_pythonpath"},
-    "wall_timeout_seconds": 600, "term_grace_seconds": 10,
+    "wall_timeout_seconds": @@WALL_TIMEOUT@@, "term_grace_seconds": 10,
     "stdout_path": "$state_root/logs/@@LANE@@.stdout", "stderr_path": "$state_root/logs/@@LANE@@.stderr",
 }
 import os
@@ -181,7 +209,7 @@ contract = {
                    "--param", "ledger_lock_path=$state_root/budgets/@@LANE@@.lock",
                    "--param", "run_id=$run_id", "--param", "max_attempts=@@MAX_ATTEMPTS@@"],
     "child_cwd": wt, "child_env": {"PYTHONPATH": "$runner_pythonpath"},
-    "wall_timeout_seconds": 600, "term_grace_seconds": 10,
+    "wall_timeout_seconds": @@WALL_TIMEOUT@@, "term_grace_seconds": 10,
     "stdout_path": "$state_root/logs/@@LANE@@.stdout", "stderr_path": "$state_root/logs/@@LANE@@.stderr",
 }
 os.makedirs("$state_root/contracts", exist_ok=True)
@@ -237,7 +265,7 @@ else:
         worktree_root="$worktree_root", worktree_id="candidate-@@LANE@@",
         candidate_sha=lane_result["candidate_sha"],
         verifier_argv=@@VERIFIER@@,
-        timeout_seconds=30, output_root="$state_root/verify-out/candidate-@@LANE@@",
+        timeout_seconds=@@VERIFIER_TIMEOUT@@, output_root="$state_root/verify-out/candidate-@@LANE@@",
         evidence_path="$state_root/evidence/candidate-@@LANE@@.json",
     )
     print(result.verdict)
@@ -255,7 +283,7 @@ entry = gpr.integrate_candidate(
     git_argv_prefix=("$git_bin",), integration_worktree="$target_repo", journal=journal,
     lane_id="@@LANE@@", candidate_sha=lane_result["candidate_sha"],
     aggregate_verifier_argv=@@AGG@@,
-    aggregate_timeout_seconds=30, output_root="$state_root/verify-out/aggregate-after-@@LANE@@",
+    aggregate_timeout_seconds=@@VERIFIER_TIMEOUT@@, output_root="$state_root/verify-out/aggregate-after-@@LANE@@",
     evidence_path="$state_root/evidence/aggregate-after-@@LANE@@.json",
 )
 print(entry["result"])
@@ -286,7 +314,7 @@ contract = {
                    "--param", "evidence_path=$state_root/evidence/correction.json",
                    "--param", "correction_result_path=$state_root/lane-results/correction.json"],
     "child_cwd": "$target_repo", "child_env": {"PYTHONPATH": "$runner_pythonpath"},
-    "wall_timeout_seconds": 600, "term_grace_seconds": 10,
+    "wall_timeout_seconds": @@WALL_TIMEOUT@@, "term_grace_seconds": 10,
     "stdout_path": "$state_root/logs/correction.stdout", "stderr_path": "$state_root/logs/correction.stderr",
 }
 with open("$state_root/contracts/correction.json", "w") as f:
@@ -374,47 +402,45 @@ PYEOF"""
 
 
 # --------------------------------------------------------------------------
-# Shell-loop builders (data-driven from the spec's lane ids).
+# Shell-check builders (data-driven from the spec's REAL per-lane marker
+# fields -- never a synthesized SMOKE_MARKER_<id>.txt template).
 # --------------------------------------------------------------------------
 
 
-def _marker_pattern() -> str:
-    return "SMOKE_MARKER_$f.txt"
-
-
-def _aggregate_argv(lane_ids: list[str]) -> list[str]:
-    """Cumulative existence-aggregate over lane ids, family convention
-    (SMOKE_MARKER_<id>.txt). One lane -> a plain ``test -f``; many -> a loop.
+def _lane_marker_check(lane: Lane, *, with_content: bool) -> str:
+    """Shell boolean expression checking one lane's ACTUAL marker file (and,
+    if requested, that its content exactly matches). Both the marker file
+    path and its expected content are shell-quoted (belt-and-suspenders --
+    ``compiler/plan.py`` already charset/denylist-validates both).
     """
-    if len(lane_ids) == 1:
-        return ["/bin/sh", "-c", f"test -f SMOKE_MARKER_{lane_ids[0]}.txt"]
-    ids = " ".join(lane_ids)
-    return [
-        "/bin/sh",
-        "-c",
-        f"for f in {ids}; do test -f {_marker_pattern()} || exit 1; done",
-    ]
+    qfile = shlex.quote(lane.marker_file)
+    if not with_content:
+        return f"test -f {qfile}"
+    qcontent = shlex.quote(lane.marker_content)
+    return f'test -f {qfile} && [ "$(cat {qfile})" = {qcontent} ]'
 
 
-def _aggregate_gate_body(lane_ids: list[str]) -> str:
-    ids = " ".join(lane_ids)
+def _aggregate_argv(lanes: list[Lane]) -> list[str]:
+    """Cumulative existence-aggregate over the given lanes' REAL marker files."""
+    checks = " && ".join(_lane_marker_check(lane, with_content=False) for lane in lanes)
+    return ["/bin/sh", "-c", checks]
+
+
+def _aggregate_gate_body(lanes: list[Lane]) -> str:
+    checks = " && ".join(_lane_marker_check(lane, with_content=False) for lane in lanes)
     return (
         "#!/bin/sh\nset -e\n"
-        f"for f in {ids}; do test -f {_marker_pattern()} || {{ printf 'aggregate_fail'; exit 0; }}; done\n"
-        "printf 'aggregate_ok'"
+        f"if {checks}; then printf 'aggregate_ok'; else printf 'aggregate_fail'; fi"
     )
 
 
-def _final_freeze_body(lane_ids: list[str]) -> str:
-    ids = " ".join(lane_ids)
+def _final_freeze_body(lanes: list[Lane]) -> str:
+    checks = " && ".join(_lane_marker_check(lane, with_content=True) for lane in lanes)
     return (
         "#!/bin/sh\nset -e\n"
         "final_head=$($git_bin rev-parse HEAD)\n"
         'printf \'%s\' "$final_head" > "$state_root/final_head.txt"\n'
-        f"for f in {ids}; do\n"
-        f'  test -f {_marker_pattern()} && [ "$(cat {_marker_pattern()})" = "$f:ok" ] || {{ printf \'sweep_fail\'; exit 0; }}\n'
-        "done\n"
-        "printf 'sweep_ok'"
+        f"if {checks}; then printf 'sweep_ok'; else printf 'sweep_fail'; fi"
     )
 
 
@@ -450,6 +476,7 @@ def compile_plan(spec: dict | Plan) -> str:
     ``goal_plan_smoke``-family parent ``.dot`` source string.
     """
     plan = spec if isinstance(spec, Plan) else build_plan(spec)
+    _require_bare_dot_id(plan.plan_id)
 
     order = list(plan.integration_order)
     fw = plan.first_wave()
@@ -473,10 +500,10 @@ def compile_plan(spec: dict | Plan) -> str:
     em.line(f'    label="{_dot_escape(graph_label)}",')
     em.line("    default_max_retry=1,")
     em.line('    default_fidelity="summary:high",')
-    em.line(f'    plan_lanes="{",".join(plan.lane_ids_sorted())}",')
-    em.line(f'    plan_waves="{",".join(str(w) for w in plan.waves)}",')
-    em.line(f'    plan_integration_order="{",".join(order)}",')
-    em.line(f'    plan_terminals="{",".join(plan.terminals)}"')
+    em.line(f'    plan_lanes="{_dot_escape(",".join(plan.lane_ids_sorted()))}",')
+    em.line(f'    plan_waves="{_dot_escape(",".join(str(w) for w in plan.waves))}",')
+    em.line(f'    plan_integration_order="{_dot_escape(",".join(order))}",')
+    em.line(f'    plan_terminals="{_dot_escape(",".join(plan.terminals))}"')
     em.line("  ];")
     em.line("")
     em.line('  Start [shape=Mdiamond, label="Start"];')
@@ -562,7 +589,7 @@ def compile_plan(spec: dict | Plan) -> str:
             ("label", f"Wave {fw}: Launch {' + '.join(fw_lanes)}", True),
             ("join_policy", "wait_all", True),
             ("error_policy", "continue", True),
-            ("max_parallel", str(len(fw_lanes)), False),
+            ("max_parallel", str(plan.concurrency_by_wave[fw]), False),
         ],
     )
     for lane_id in fw_lanes:
@@ -643,8 +670,10 @@ def compile_plan(spec: dict | Plan) -> str:
                 ("label", f"Parent-Verify {lane_id} Candidate", True),
                 (
                     "tool_command",
-                    _PARENT_VERIFY_BODY.replace("@@LANE@@", lane_id).replace(
-                        "@@VERIFIER@@", _pyliteral(lane.verifier_argv)
+                    _PARENT_VERIFY_BODY.replace("@@LANE@@", lane_id)
+                    .replace("@@VERIFIER@@", _pyliteral(lane.verifier_argv))
+                    .replace(
+                        "@@VERIFIER_TIMEOUT@@", str(plan.verifier_timeout_seconds)
                     ),
                     True,
                 ),
@@ -658,7 +687,7 @@ def compile_plan(spec: dict | Plan) -> str:
         em.edge(f"ParentVerify{sfx}", "Residuals", "context.tool.last_line!=PASS")
 
         # Integrate
-        agg = _aggregate_argv(list(integrated_so_far))
+        agg = _aggregate_argv([plan.lanes[lid] for lid in integrated_so_far])
         em.node(
             f"Integrate{sfx}",
             [
@@ -666,8 +695,10 @@ def compile_plan(spec: dict | Plan) -> str:
                 ("label", f"Integrate {lane_id} (merge + aggregate)", True),
                 (
                     "tool_command",
-                    _INTEGRATE_BODY.replace("@@LANE@@", lane_id).replace(
-                        "@@AGG@@", _pyliteral(agg)
+                    _INTEGRATE_BODY.replace("@@LANE@@", lane_id)
+                    .replace("@@AGG@@", _pyliteral(agg))
+                    .replace(
+                        "@@VERIFIER_TIMEOUT@@", str(plan.verifier_timeout_seconds)
                     ),
                     True,
                 ),
@@ -692,12 +723,13 @@ def compile_plan(spec: dict | Plan) -> str:
 
     # ---- Coherence, bounded correction, final sweep -------------------
     all_ids = order  # integration order == full lane list
+    all_lanes = [plan.lanes[lid] for lid in all_ids]
     em.node(
         "PreCoherenceAggregate",
         [
             ("shape", "parallelogram", False),
             ("label", "Pre-Coherence Aggregate", True),
-            ("tool_command", _aggregate_gate_body(all_ids), True),
+            ("tool_command", _aggregate_gate_body(all_lanes), True),
         ],
     )
     em.edge(
@@ -737,7 +769,7 @@ def compile_plan(spec: dict | Plan) -> str:
     em.edge("CoherenceCheck", "Correction", "context.tool.last_line=finding")
     em.edge("CoherenceCheck", "FinalFreeze", "context.tool.last_line=no_finding", "2")
 
-    correction_agg = _aggregate_argv(list(all_ids))
+    correction_agg = _aggregate_argv(all_lanes)
     em.node(
         "Correction",
         [
@@ -747,7 +779,8 @@ def compile_plan(spec: dict | Plan) -> str:
                 "tool_command",
                 _CORRECTION_BODY.replace("@@AGG@@", _pyliteral(correction_agg))
                 .replace("@@CORRECTION_DOT@@", _basename(plan.correction_child_dot))
-                .replace("@@ALLOWED_PATHS@@", ",".join(all_ids)),
+                .replace("@@ALLOWED_PATHS@@", ",".join(all_ids))
+                .replace("@@WALL_TIMEOUT@@", str(plan.lane_wall_timeout_seconds)),
                 True,
             ),
         ],
@@ -766,7 +799,7 @@ def compile_plan(spec: dict | Plan) -> str:
         [
             ("shape", "parallelogram", False),
             ("label", "Affected-Closure + Fresh Coherence Aggregate", True),
-            ("tool_command", _aggregate_gate_body(all_ids), True),
+            ("tool_command", _aggregate_gate_body(all_lanes), True),
         ],
     )
     em.edge(
@@ -786,7 +819,7 @@ def compile_plan(spec: dict | Plan) -> str:
         [
             ("shape", "parallelogram", False),
             ("label", "Freeze Final HEAD + Lane Sweep", True),
-            ("tool_command", _final_freeze_body(all_ids), True),
+            ("tool_command", _final_freeze_body(all_lanes), True),
         ],
     )
     em.edge(
@@ -802,7 +835,7 @@ def compile_plan(spec: dict | Plan) -> str:
         [
             ("shape", "parallelogram", False),
             ("label", "Final Aggregate After Sweep", True),
-            ("tool_command", _aggregate_gate_body(all_ids), True),
+            ("tool_command", _aggregate_gate_body(all_lanes), True),
         ],
     )
     em.edge(
@@ -841,7 +874,7 @@ def compile_plan(spec: dict | Plan) -> str:
         [
             ("shape", "folder", False),
             ("label", "Deliver PR (subgraph)", True),
-            ("dot_file", plan.delivery_child_dot, True),
+            ("dot_file", _resolve_delivery_dot_file(plan.delivery_child_dot), True),
             ("outputs", "delivery.pr_url,delivery.result", True),
         ],
     )
@@ -945,10 +978,34 @@ def compile_plan(spec: dict | Plan) -> str:
 
 
 def _basename(path: str) -> str:
+    """Return the final path component, for joining to ``$subgraphs_dir``.
+
+    Refuses (rather than silently mis-truncating) anything that looks like a
+    cross-repo reference (``://`` or ``#``) -- that class of value must never
+    reach ``rsplit("/", 1)``, which would quietly discard everything except
+    the last path segment.
+    """
+    if "://" in path or "#" in path:
+        raise PlanValidationError(
+            f"cannot resolve a basename for cross-repo reference {path!r} "
+            "(contains '://' or '#'); this field does not support cross-repo "
+            "child_dot values here"
+        )
     return path.rsplit("/", 1)[-1]
 
 
-def _render_launch(template: str, lane, plan: Plan) -> str:
+def _resolve_delivery_dot_file(delivery_child_dot: str) -> str:
+    """delivery.child_dot resolution: a git+https cross-repo reference is
+    emitted verbatim (that is the legitimate cross-repo case); anything else
+    is basenamed and joined to ``$subgraphs_dir``, exactly like lane/
+    correction child_dot.
+    """
+    if delivery_child_dot.startswith("git+https://"):
+        return delivery_child_dot
+    return f"$subgraphs_dir/{_basename(delivery_child_dot)}"
+
+
+def _render_launch(template: str, lane: Lane, plan: Plan) -> str:
     return (
         template.replace("@@LANE@@", lane.lane_id)
         .replace("@@BRANCH@@", lane.branch)
@@ -957,6 +1014,7 @@ def _render_launch(template: str, lane, plan: Plan) -> str:
         .replace("@@MARKER_CONTENT@@", lane.marker_content)
         .replace("@@SEEDED@@", "true" if lane.seeded_failure else "false")
         .replace("@@MAX_ATTEMPTS@@", str(plan.max_attempts))
+        .replace("@@WALL_TIMEOUT@@", str(plan.lane_wall_timeout_seconds))
     )
 
 
@@ -967,7 +1025,11 @@ def _render_classify(lane_ids: list[str]) -> str:
     for idx, lane_id in enumerate(lane_ids):
         var = f"r{idx}"
         var_names.append(var)
-        assigns.append(f'{var} = classify("{lane_id}")')
+        # repr() (the same mechanism _pyliteral() is built from) guarantees a
+        # syntactically valid Python string literal regardless of the lane
+        # id's exact characters -- defense-in-depth on top of plan.py's
+        # charset validation.
+        assigns.append(f"{var} = classify({lane_id!r})")
     body += "\n".join(assigns) + "\n"
     body += 'print(",".join([' + ", ".join(var_names) + "]))\n"
     body += "PYEOF"
