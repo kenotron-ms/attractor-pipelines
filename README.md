@@ -5,6 +5,29 @@ reference and reuse — not fixtures, not throwaway samples. Fetch one
 directly via `git+https://` subdirectory URLs, or copy and adapt it for
 your own pipeline.
 
+## Quick Start: the `goal-batch-attractor` skill
+
+Most pipelines here are compiled and run for you by the **`goal-batch-attractor`**
+skill — it decomposes a pile of work into dependency-ordered `/goal` lanes,
+compiles them into a `goal_plan_smoke`-family pipeline with the deterministic
+`compiler/`, and runs it **locally** against a target repo checkout. Install it
+directly into whatever coding agent you're already using — Claude Code, Cursor,
+Codex, GitHub Copilot, Amplifier, or any of the 70+ other agents that support the
+open [Agent Skills](https://github.com/vercel-labs/skills) ecosystem (npm package
+`skills`, docs at [skills.sh](https://skills.sh)):
+
+```
+npx skills add kenotron-ms/attractor-pipelines --skill goal-batch-attractor
+```
+
+The CLI clones this repo, discovers the skills it ships, and installs just
+`goal-batch-attractor` into your agent's skills directory (e.g. `.claude/skills/`
+for Claude Code). Drop `--skill goal-batch-attractor` to get an interactive picker
+across everything this repo ships instead. Its **cloud** sibling — same compiler,
+same `plan.json` contract, but submitted to the Amplifier Resolve `dot-graph`
+resolver instead of run locally — is the `goal-plan-submit` skill in
+[`microsoft/amplifier-bundle-resolve`](https://github.com/microsoft/amplifier-bundle-resolve).
+
 ## Convention
 
 Each pipeline lives in its own `pipelines/[name]/` folder containing its
