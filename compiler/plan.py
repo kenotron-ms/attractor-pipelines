@@ -89,6 +89,11 @@ class Lane:
     seeded_failure: bool = False
     child_dot: str = DEFAULT_CHILD_DOT
     branch: str = ""  # resolved by Plan.__post_init__ if left empty
+    # Optional per-lane path passed opaquely to the child lane brick as the LAST
+    # runtime --param (goal_condition_file=<value>). The compiler never reads its
+    # contents; it only charset-validates the path and threads it through. Empty
+    # (the default) => no param emitted => byte-identical output to pre-field.
+    goal_condition_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -417,6 +422,7 @@ def build_plan(spec: dict[str, Any]) -> Plan:
             seeded_failure=lane.seeded_failure,
             child_dot=lane.child_dot,
             branch=branch,
+            goal_condition_file=lane.goal_condition_file,
         )
 
     return Plan(
@@ -498,6 +504,21 @@ def _build_lane(lane_id: str, raw: Any) -> Lane:
     if branch:
         _validate_charset(branch, _BRANCH_RE, f"lane '{lane_id}' field 'branch'")
 
+    # Optional path passed opaquely to the child lane brick. Absent/empty => no
+    # runtime --param emitted (byte-identical output). When present it is a path,
+    # so it is charset-validated with the same path validator marker_file uses --
+    # the value is later interpolated into a generated shell/heredoc argv, so it
+    # must be rejected here if it carries any shell/quote metacharacter.
+    goal_condition_file = raw.get("goal_condition_file", "")
+    _require(
+        isinstance(goal_condition_file, str),
+        f"lane '{lane_id}' field 'goal_condition_file' must be a string when provided",
+    )
+    if goal_condition_file:
+        _validate_path_field(
+            goal_condition_file, f"lane '{lane_id}' field 'goal_condition_file'"
+        )
+
     return Lane(
         lane_id=lane_id,
         wave=wave,
@@ -508,6 +529,7 @@ def _build_lane(lane_id: str, raw: Any) -> Lane:
         seeded_failure=seeded_failure,
         child_dot=child_dot,
         branch=branch,
+        goal_condition_file=goal_condition_file,
     )
 
 
