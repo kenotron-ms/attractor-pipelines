@@ -1,0 +1,39 @@
+{
+  "plan_id": "issue_22",
+  "description": "Issue #22: Add BATCH_SMOKE.md marker file at repo root containing 'batch delivery verified'. Single lane \u2014 this issue is intentionally a minimal smoke test for the delivery path.",
+  "lanes": {
+    "add-smoke-marker": {
+      "wave": 1,
+      "depends_on": [],
+      "child_dot": "subgraphs/goal_lane_impl.dot",
+      "goal_condition_file": "/home/runner/work/attractor-pipelines/attractor-pipelines/generated/plans/32911698122/goals/add-smoke-marker.goal.md",
+      "verifier_argv": [
+        "grep",
+        "-q",
+        "batch delivery verified",
+        "BATCH_SMOKE.md"
+      ],
+      "marker_file": "artifacts/add-smoke-marker.done",
+      "marker_content": "add-smoke-marker:ok"
+    }
+  },
+  "waves": [
+    {
+      "wave": 1
+    }
+  ],
+  "integration_order": [
+    "add-smoke-marker"
+  ],
+  "terminals": [
+    "COMPLETE",
+    "RESIDUALS_READY",
+    "INFRA_FAILURE",
+    "ABORTED"
+  ],
+  "budgets": {
+    "max_adaptive_attempts_per_lane": 3,
+    "lane_wall_timeout_seconds": 3600,
+    "verifier_timeout_seconds": 300
+  }
+}
