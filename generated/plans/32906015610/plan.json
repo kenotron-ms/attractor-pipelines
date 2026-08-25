@@ -1,0 +1,31 @@
+{
+  "plan_id": "issue_18",
+  "description": "Decompose issue #18 into two lanes: (1) audit the existing workflows and repo structure to gather accurate facts for the guide, and (2) write the 'Enable the plan-batch flow in your repo' guide into README.md covering prerequisites, repo configuration, flow walkthrough, security model, and troubleshooting. Lane 2 depends on lane 1's audit artifact so the guide is grounded in real workflow content.",
+  "lanes": {
+    "audit_workflows": {
+      "wave": 1,
+      "depends_on": [],
+      "verifier_argv": ["grep", "-q", "audit_workflows:ok", "artifacts/audit_workflows.done"],
+      "marker_file": "artifacts/audit_workflows.done",
+      "marker_content": "audit_workflows:ok"
+    },
+    "write_readme_guide": {
+      "wave": 2,
+      "depends_on": ["audit_workflows"],
+      "verifier_argv": ["grep", "-q", "Enable the plan-batch flow in your repo", "README.md"],
+      "marker_file": "artifacts/write_readme_guide.done",
+      "marker_content": "write_readme_guide:ok"
+    }
+  },
+  "waves": [
+    {"wave": 1},
+    {"wave": 2}
+  ],
+  "integration_order": ["audit_workflows", "write_readme_guide"],
+  "terminals": ["COMPLETE", "RESIDUALS_READY", "INFRA_FAILURE", "ABORTED"],
+  "budgets": {
+    "max_adaptive_attempts_per_lane": 3,
+    "lane_wall_timeout_seconds": 3600,
+    "verifier_timeout_seconds": 300
+  }
+}
