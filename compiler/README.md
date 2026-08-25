@@ -14,7 +14,7 @@ aggregation shell loops — into a generator correct for arbitrary **N lanes
 across M waves**.
 
 > **This document is the integration contract.** Wave-2 lanes (a local-facing
-> skill in this repo and a cloud-facing skill in `amplifier-bundle-resolve`)
+> skill in this repo and a cloud-facing submission skill)
 > integrate against *this file* without reading the implementation. If a field
 > or signature below changes, it is a breaking change for those consumers.
 
