@@ -60,8 +60,7 @@ This skill stops for a human exactly twice. Everything between is mechanical.
 2. **Never auto-submit.** This is the LOCAL front end. It runs against a local
    target-repo checkout only. It never pushes the compiled pipeline to a remote for
    cloud execution and never submits to the Amplifier Resolve platform — that is the
-   sibling cloud skill's job (`goal-plan-submit`, in `amplifier-bundle-resolve`),
-   deliberately out of scope here.
+   sibling cloud submission skill's job, deliberately out of scope here.
 
 ---
 

@@ -281,7 +281,7 @@ digraph goal_plan_smoke {
   // final-aggregate-after-sweep gate.
   FinalFreeze [
     shape=parallelogram, label="Freeze Final HEAD + Lane Sweep",
-    tool_command="#!/bin/sh\nset -e\nfinal_head=$($git_bin rev-parse HEAD)\nprintf '%s' \"$final_head\" > \"$state_root/final_head.txt\"\nfor f in lane_a lane_b lane_c; do\n  test -f SMOKE_MARKER_$f.txt && [ \"$(cat SMOKE_MARKER_$f.txt)\" = \"$f:ok\" ] || { printf 'sweep_fail'; exit 0; }\ndone\nprintf 'sweep_ok'"
+    tool_command="#!/bin/sh\nset -e\nfinal_head=$($git_bin rev-parse HEAD)\nprintf '%s' \"$final_head\" > \"$state_root/final_head.txt\"\nfor f in lane_a lane_b lane_c; do\n  test -f SMOKE_MARKER_$f.txt && grep -qF -e \"$f:ok\" -- SMOKE_MARKER_$f.txt || { printf 'sweep_fail'; exit 0; }\ndone\nprintf 'sweep_ok'"
   ];
   FinalFreeze -> FinalAggregateAfterSweep [condition="context.tool.last_line=sweep_ok", weight="2"];
   FinalFreeze -> InfraCarrier             [condition="context.tool.last_line=sweep_fail"];

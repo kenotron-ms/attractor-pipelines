@@ -14,7 +14,7 @@ aggregation shell loops — into a generator correct for arbitrary **N lanes
 across M waves**.
 
 > **This document is the integration contract.** Wave-2 lanes (a local-facing
-> skill in this repo and a cloud-facing skill in `amplifier-bundle-resolve`)
+> skill in this repo and a cloud-facing submission skill)
 > integrate against *this file* without reading the implementation. If a field
 > or signature below changes, it is a breaking change for those consumers.
 
@@ -79,7 +79,7 @@ text, Python heredocs, or DOT syntax is **allowlist-validated** in
 |---|---|---|
 | `plan_id`, lane ids (`lanes` keys), `terminals[]` | `^[A-Za-z][A-Za-z0-9_-]{0,63}$` | must not contain `..` or the literal `PYEOF` |
 | `branch_namespace`, per-lane `branch` | `^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$` | must not contain `..` or `PYEOF` |
-| `marker_file`, `child_dot`, `correction.child_dot`, `delivery.child_dot` (non-git-ref case) | `^[A-Za-z0-9._/-]{1,255}$` | must not contain `..` or `PYEOF` |
+| `marker_file`, `child_dot`, `correction.child_dot`, `delivery.child_dot` (non-git-ref case), per-lane `goal_condition_file` (when non-empty) | `^[A-Za-z0-9._/-]{1,255}$` | must not contain `..` or `PYEOF` |
 | `delivery.child_dot` (git-ref case, see below) | `^git\+https://[A-Za-z0-9._/:@-]+#subdirectory=[A-Za-z0-9._/-]+$` | must not contain `..` or `PYEOF` |
 | `marker_content` (free-text, denylisted rather than allowlisted) | any string | must not contain `\n`, `\r`, any of `` ; $ ` " ' \ | & ``, the substring `..`, or the literal `PYEOF`; max 4096 chars |
 
@@ -124,6 +124,7 @@ text, Python heredocs, or DOT syntax is **allowlist-validated** in
 | `seeded_failure` | bool | no (default `false`) | Passed through to the child lane pipeline (test-fixture flag). |
 | `child_dot` | string | no (default `subgraphs/goal_lane.dot`) | Child lane pipeline. See child_dot resolution below. |
 | `branch` | string | no (default `<branch_namespace>/<lane_id>`) | The lane's git branch. |
+| `goal_condition_file` | string | no (default: empty ⇒ no param emitted) | Optional path threaded **opaquely** to the child lane brick as the **last** runtime `--param goal_condition_file=<value>` (see the runtime `--param` note below). The compiler never reads the file's contents; it only charset-validates the *path* (same validator as `marker_file`). Omitted/empty ⇒ no param emitted ⇒ output byte-identical to a spec without the field. |
 
 A missing required field, a lane whose `wave` is not declared in `waves`, a
 declared wave with no lanes, an `integration_order` that is not a
@@ -132,6 +133,21 @@ integrity or wave/order enforcement, or a charset/injection violation on any
 of the fields above each raises `PlanValidationError` with a message naming
 the offending lane/field and (for charset failures) the offending value and
 pattern — never a malformed graph.
+
+### `goal_condition_file` — opaque, additive child `--param`
+
+`goal_condition_file` is the one per-lane field the compiler passes *through* to
+the child lane brick rather than acting on. When it is non-empty it is appended
+as the **last** `--param` of **every** launch of that lane —
+`--param goal_condition_file=<value>`, after the existing `max_attempts` param —
+in **both** launch bodies (the wave-1 concurrent launch and the later-wave
+sequential launch). The compiler never opens or reads the file: it only
+charset-validates the *path* (so the value is safe to interpolate into the
+generated launch argv) and threads it **opaquely** to the child, whose own brick
+is responsible for interpreting `$goal_condition_file`. When the field is omitted
+or empty, no such `--param` is emitted and the generated `.dot` is byte-for-byte
+identical to output produced before this field existed (the change is strictly
+additive).
 
 ### `child_dot` resolution (three fields, three different rules)
 
