@@ -87,6 +87,13 @@ jobs:
           ref: ${{ steps.resolve.outputs.branch }}
           fetch-depth: 0
 
+      # A managed Python so `pip install` works (PEP 668 blocks the OS python on
+      # ubuntu-latest) and bare `python3` on PATH is the one the engine installs into.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       # GATE 3 — anti-tamper. The compiler is deterministic (same plan -> byte
       # identical .dot), so a recompile that differs means the branch was edited.
       - name: Verify plan integrity
@@ -102,24 +109,22 @@ jobs:
           fi
           echo "Integrity OK: committed .dot matches plan.json."
 
-      # Bootstrap the attractor engine (loop-pipeline + pipeline-runner CLI).
-      # FIRST-LIVE-SHAKEOUT: this is the one integration point that can only be
-      # finalized against a live runner. The step fails LOUD if the child-lane
-      # runner is not importable, rather than launching lanes that would crash.
+      # Bootstrap the attractor engine so lane child-processes can launch
+      # `python3 -m amplifier_module_pipeline_runner.cli`. The runner CLI lives in
+      # amplifier-bundle-attractor's modules/pipeline-runner (NOT modules/loop-pipeline,
+      # which provides only the amplifier_module_loop_pipeline engine); installing the
+      # runner pulls in the loop-pipeline engine via its own git dependency. Verified in
+      # a clean venv: this install makes `import amplifier_module_pipeline_runner.cli`
+      # succeed. Fails LOUD if the import is unavailable.
       - name: Bootstrap attractor engine
         id: engine
         run: |
           set -euo pipefail
           python3 -m pip install --quiet --upgrade pip
-          # The loop-pipeline engine + pipeline-runner CLI ship in amplifier-bundle-attractor.
-          # If this source path has moved, adjust it here (see docs/plans design notes).
           python3 -m pip install --quiet \
-            "git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=modules/loop-pipeline" \
-            || true
+            "amplifier-module-pipeline-runner @ git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=modules/pipeline-runner"
           if ! python3 -c "import amplifier_module_pipeline_runner.cli" 2>/dev/null; then
-            echo "::error::attractor engine (amplifier_module_pipeline_runner) is not importable on this runner."
-            echo "::error::The executor cannot launch goal_plan lanes without it. Finalize the engine bootstrap"
-            echo "::error::(install amplifier-bundle-attractor's loop-pipeline module, or set AMPLIFIER_LOOP_PIPELINE_DIR)."
+            echo "::error::attractor runner (amplifier_module_pipeline_runner) not importable after install."
             exit 1
           fi
           echo "pp=$(python3 -c 'import site; print(site.getsitepackages()[0])')" >> "$GITHUB_OUTPUT"
