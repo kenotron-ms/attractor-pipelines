@@ -409,15 +409,28 @@ PYEOF"""
 
 def _lane_marker_check(lane: Lane, *, with_content: bool) -> str:
     """Shell boolean expression checking one lane's ACTUAL marker file (and,
-    if requested, that its content exactly matches). Both the marker file
-    path and its expected content are shell-quoted (belt-and-suspenders --
-    ``compiler/plan.py`` already charset/denylist-validates both).
+    if requested, that its content CONTAINS the expected marker_content as a
+    fixed substring). Both the marker file path and its expected content are
+    shell-quoted (belt-and-suspenders -- ``compiler/plan.py`` already
+    charset/denylist-validates both).
+
+    Containment (not exact equality) is required here: marker_file is not
+    always a purpose-built fixture whose ENTIRE contents equal
+    marker_content (e.g. the marker-fixture brick's ``lane_a:ok``) -- for a
+    real-work lane (goal_lane_impl.dot) marker_file is real source (e.g.
+    ``solution/csvparse.py``) that CONTAINS marker_content (e.g.
+    ``parse_csv``) without being equal to it. ``grep -qF`` treats
+    marker_content as a literal fixed string (no regex-metacharacter
+    surprises) and ``-e`` guards against a marker_content value that itself
+    starts with ``-`` being misparsed as a grep option. Containment is
+    correct for BOTH bricks: the fixture file trivially contains its own
+    full contents, and a real file that embeds the token passes too.
     """
     qfile = shlex.quote(lane.marker_file)
     if not with_content:
         return f"test -f {qfile}"
     qcontent = shlex.quote(lane.marker_content)
-    return f'test -f {qfile} && [ "$(cat {qfile})" = {qcontent} ]'
+    return f"test -f {qfile} && grep -qF -e {qcontent} -- {qfile}"
 
 
 def _aggregate_argv(lanes: list[Lane]) -> list[str]:
@@ -561,7 +574,19 @@ def compile_plan(spec: dict | Plan) -> str:
             ("tool_command", _ADMIT_BODY, True),
         ],
     )
-    first_launch_target = f"Wave{fw}Launch"
+    # A single-lane first wave has nothing to fan out: a `component` node
+    # with exactly ONE outgoing edge falls through the attractor engine's
+    # Bug-G component-rerouting fix (which only reroutes component nodes
+    # with >1 outgoing edges to their fan-in), so the sole successor would
+    # be executed TWICE -- once via the ParallelHandler fan-out, once via
+    # normal edge traversal -- and its second worktree creation crashes
+    # with WORKTREE:PATH_EXISTS. Skip the component wrapper entirely for
+    # this case and route Admit straight to the one lane's launch node.
+    single_lane_wave1 = len(fw_lanes) == 1
+    if single_lane_wave1:
+        first_launch_target = f"LaunchLane{suffix_of[fw_lanes[0]]}"
+    else:
+        first_launch_target = f"Wave{fw}Launch"
     em.edge("Admit", first_launch_target, "context.tool.last_line=admitted", "2")
     em.edge("Admit", "PrelaunchBlocked", "context.tool.last_line!=admitted")
 
@@ -582,20 +607,35 @@ def compile_plan(spec: dict | Plan) -> str:
     em.line("")
 
     # ---- First wave: concurrent fan-out / fan-in ----------------------
-    em.node(
-        f"Wave{fw}Launch",
-        [
-            ("shape", "component", False),
-            ("label", f"Wave {fw}: Launch {' + '.join(fw_lanes)}", True),
-            ("join_policy", "wait_all", True),
-            ("error_policy", "continue", True),
-            ("max_parallel", str(plan.concurrency_by_wave[fw]), False),
-        ],
-    )
-    for lane_id in fw_lanes:
-        em.edge(f"Wave{fw}Launch", f"LaunchLane{suffix_of[lane_id]}")
-
-    for lane_id in fw_lanes:
+    if single_lane_wave1:
+        # Exactly one wave-1 lane: no fan-out needed, so no `component`
+        # node is emitted at all (see the Bug-G note above at Admit's
+        # routing). The lane still forks from $product_base_sha via
+        # _LAUNCH_WAVE1_BODY, exactly as it would inside the multi-lane
+        # fan-out -- only the component wrapper is removed.
+        #
+        # _LAUNCH_WAVE1_BODY prints exactly one of two tokens on normal
+        # completion: "launched" (the supervisor subprocess itself
+        # returned rc==0) or "supervisor_infra_failure" (it did not).
+        # These two conditions are exhaustive over the body's real output,
+        # so the lane's launch failure is routed to InfraCarrier instead
+        # of dead-ending.
+        #
+        # Success routes straight to ClassifyWave{fw}, NOT through
+        # Wave{fw}Collect: Wave{fw}Collect is a `tripleoctagon` PARALLEL
+        # fan-in that only has results to aggregate when fed by a
+        # `component` fan-out node's ParallelHandler run -- and the
+        # single-lane path has no fan-out (see above), so the engine
+        # dead-ends there with "No parallel results to evaluate". This is
+        # safe because ClassifyWave{fw}'s classify() reads each lane's
+        # outcome from per-lane result FILES under $state_root
+        # ($state_root/results/<lane>.json and
+        # $state_root/lane-results/<lane>.json) -- it does not touch the
+        # engine's parallel-results context at all, so it runs correctly
+        # for exactly one lane. Wave{fw}Collect itself is not emitted in
+        # this branch (an unreferenced fan-in would be dead weight and
+        # unreachable-lint noise).
+        lane_id = fw_lanes[0]
         lane = plan.lanes[lane_id]
         em.node(
             f"LaunchLane{suffix_of[lane_id]}",
@@ -605,16 +645,60 @@ def compile_plan(spec: dict | Plan) -> str:
                 ("tool_command", _render_launch(_LAUNCH_WAVE1_BODY, lane, plan), True),
             ],
         )
-        em.edge(f"LaunchLane{suffix_of[lane_id]}", f"Wave{fw}Collect")
+        em.edge(
+            f"LaunchLane{suffix_of[lane_id]}",
+            f"ClassifyWave{fw}",
+            "context.tool.last_line=launched",
+            "2",
+        )
+        em.edge(
+            f"LaunchLane{suffix_of[lane_id]}",
+            "InfraCarrier",
+            "context.tool.last_line=supervisor_infra_failure",
+        )
+    else:
+        em.node(
+            f"Wave{fw}Launch",
+            [
+                ("shape", "component", False),
+                ("label", f"Wave {fw}: Launch {' + '.join(fw_lanes)}", True),
+                ("join_policy", "wait_all", True),
+                ("error_policy", "continue", True),
+                ("max_parallel", str(plan.concurrency_by_wave[fw]), False),
+            ],
+        )
+        for lane_id in fw_lanes:
+            em.edge(f"Wave{fw}Launch", f"LaunchLane{suffix_of[lane_id]}")
 
-    em.node(
-        f"Wave{fw}Collect",
-        [
-            ("shape", "tripleoctagon", False),
-            ("label", f"Wave {fw}: Collect {' + '.join(fw_lanes)}", True),
-        ],
-    )
-    em.edge(f"Wave{fw}Collect", f"ClassifyWave{fw}")
+        for lane_id in fw_lanes:
+            lane = plan.lanes[lane_id]
+            em.node(
+                f"LaunchLane{suffix_of[lane_id]}",
+                [
+                    ("shape", "parallelogram", False),
+                    ("label", f"Launch {lane_id}", True),
+                    (
+                        "tool_command",
+                        _render_launch(_LAUNCH_WAVE1_BODY, lane, plan),
+                        True,
+                    ),
+                ],
+            )
+            em.edge(f"LaunchLane{suffix_of[lane_id]}", f"Wave{fw}Collect")
+
+        # Wave{fw}Collect: a `tripleoctagon` PARALLEL fan-in that aggregates
+        # the `component` fan-out's results. Only emitted in the multi-lane
+        # branch above -- with a single lane there is no fan-out feeding it
+        # (see the single-lane branch's comment), so it is omitted entirely
+        # rather than left as an unreachable dead-end node.
+        em.node(
+            f"Wave{fw}Collect",
+            [
+                ("shape", "tripleoctagon", False),
+                ("label", f"Wave {fw}: Collect {' + '.join(fw_lanes)}", True),
+            ],
+        )
+        em.edge(f"Wave{fw}Collect", f"ClassifyWave{fw}")
 
     em.node(
         f"ClassifyWave{fw}",

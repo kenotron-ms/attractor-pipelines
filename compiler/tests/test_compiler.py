@@ -28,6 +28,7 @@ environments that must not silently skip engine-dependent coverage).
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -255,6 +256,201 @@ def test_d2_wave_gating_topology_reachability():
 def test_d3_generated_output_validates(plan_path):
     parse_dot, validate = _engine_or_skip()
     graph = parse_dot(compile_plan(load_plan(plan_path)))
+    diagnostics = validate(graph)
+    errors = [d for d in diagnostics if getattr(d, "severity", "") == "ERROR"]
+    assert not errors, "engine reported ERROR diagnostics: " + "; ".join(
+        f"[{d.rule}] {d.message}" for d in errors
+    )
+
+
+# ----------------------------------------------------------------------------
+# Bug fix: a single-lane wave 1 must not emit a single-outgoing-edge
+# `component` fan-out node.
+#
+# Root cause: the attractor engine's Bug-G fix only reroutes `component`
+# nodes with MORE THAN ONE outgoing edge to their fan-in. A component node
+# with exactly one outgoing edge (a single-lane wave 1's old `Wave1Launch`)
+# falls through to normal edge selection, so its lone successor executes
+# TWICE -- once via the ParallelHandler fan-out, once via ordinary edge
+# traversal -- and the second worktree creation crashes with
+# WORKTREE:PATH_EXISTS. Because the wave-1 LaunchLane node had no failure
+# edge, the pipeline then hard-aborted with "No matching edge from node
+# 'LaunchLaneA'". The fix: skip the component wrapper entirely when wave 1
+# has exactly one lane, route Admit straight to that lane's LaunchLane node,
+# and give it a real failure edge to InfraCarrier.
+# ----------------------------------------------------------------------------
+
+
+def test_single_lane_wave1_emits_no_component_launch_node():
+    """A single-lane, single-wave plan must NOT emit a `Wave1Launch`
+    component-shaped fan-out node at all: Admit routes straight to the lone
+    lane's LaunchLaneA (a parallelogram), never through a component node
+    that would have exactly one outgoing edge."""
+    spec = _minimal_spec()
+    dot = compile_plan(build_plan(spec))
+
+    assert "Wave1Launch" not in dot
+    assert "shape=component" not in dot
+
+    # Admit routes straight to LaunchLaneA (the same admitted/weight=2
+    # condition previously used to reach the component node).
+    assert (
+        '  Admit -> LaunchLaneA [condition="context.tool.last_line=admitted", weight="2"];'
+        in dot
+    )
+
+    # LaunchLaneA itself is a plain parallelogram launch node.
+    laa_start = dot.index("LaunchLaneA [\n")
+    laa_block = dot[laa_start : dot.index("];", laa_start)]
+    assert "shape=parallelogram" in laa_block
+
+
+def test_single_lane_wave1_launch_has_crash_edge_to_infracarrier():
+    """The single wave-1 LaunchLaneA node has BOTH a success edge (to
+    ClassifyWave1 -- NOT the `tripleoctagon` Wave1Collect fan-in, which has
+    no parallel results to aggregate without a fan-out feeding it) and a
+    failure edge (to InfraCarrier), using the EXACT two tokens
+    _LAUNCH_WAVE1_BODY prints on normal completion -- 'launched' (the
+    supervisor subprocess returned rc==0) and 'supervisor_infra_failure' (it
+    did not) -- so a real launch failure is handled instead of dead-ending
+    with 'No matching edge from node LaunchLaneA'."""
+    spec = _minimal_spec()
+    dot = compile_plan(build_plan(spec))
+
+    assert (
+        '  LaunchLaneA -> ClassifyWave1 [condition="context.tool.last_line=launched", weight="2"];'
+        in dot
+    )
+    assert (
+        '  LaunchLaneA -> InfraCarrier [condition="context.tool.last_line=supervisor_infra_failure"];'
+        in dot
+    )
+    # Confirm this is what the launch body itself actually prints (not a
+    # guessed token): _LAUNCH_WAVE1_BODY's own success/failure print line.
+    from compiler.generator import _LAUNCH_WAVE1_BODY
+
+    assert (
+        'print("launched" if rc.returncode == 0 else "supervisor_infra_failure")'
+        in _LAUNCH_WAVE1_BODY
+    )
+
+
+def test_single_lane_wave1_validates_with_zero_engine_errors():
+    parse_dot, validate = _engine_or_skip()
+    spec = _minimal_spec()
+    graph = parse_dot(compile_plan(build_plan(spec)))
+    diagnostics = validate(graph)
+    errors = [d for d in diagnostics if getattr(d, "severity", "") == "ERROR"]
+    assert not errors, "engine reported ERROR diagnostics: " + "; ".join(
+        f"[{d.rule}] {d.message}" for d in errors
+    )
+
+
+def test_multilane_wave1_unaffected_by_single_lane_fix():
+    """Guard: the multi-lane wave-1 fan-out path (>1 lane) is completely
+    unchanged by the single-lane special case above -- still a `component`
+    node with one outgoing edge per lane, still an unconditional edge from
+    each LaunchLane to Wave1Collect (outcome classification happens later,
+    in ClassifyWave1, from the actual per-lane result files)."""
+    dot = compile_plan(load_plan(PLAN_2LANE))
+    assert "Wave1Launch" in dot
+    assert "shape=component" in dot
+    assert "  Wave1Launch -> LaunchLaneA;" in dot
+    assert "  Wave1Launch -> LaunchLaneB;" in dot
+    assert "  LaunchLaneA -> Wave1Collect;" in dot
+    assert "  LaunchLaneB -> Wave1Collect;" in dot
+    assert (
+        '  Admit -> Wave1Launch [condition="context.tool.last_line=admitted", weight="2"];'
+        in dot
+    )
+
+
+# ----------------------------------------------------------------------------
+# Follow-on defect: the single-lane fix above still routed success through
+# `Wave1Collect`, a `tripleoctagon` PARALLEL fan-in node. That node only has
+# results to aggregate when fed by a `component` fan-out's ParallelHandler
+# run; with no fan-out in the single-lane branch, the engine dead-ended at
+# runtime with "No parallel results to evaluate" / "No matching edge from
+# node 'Wave1Collect'". Root-cause data-flow check: `ClassifyWave{fw}`'s
+# `classify()` reads each lane's outcome from per-lane result FILES under
+# $state_root (`$state_root/results/<lane>.json`,
+# `$state_root/lane-results/<lane>.json`) -- never the engine's
+# parallel-results context -- so it is safe to route straight to it for
+# exactly one lane. The fix: skip `Wave{fw}Collect` entirely in the
+# single-lane branch and route `LaunchLane{sfx} -> ClassifyWave{fw}` on
+# 'launched' instead.
+# ----------------------------------------------------------------------------
+
+
+def test_single_lane_wave1_bypasses_parallel_fan_in_with_no_dead_ends():
+    """For a single-lane, single-wave plan the generated DOT must: contain
+    no `tripleoctagon`-shaped node and no `Wave1Collect` node at all; route
+    the launch node's success outcome ('launched') to ClassifyWave1 (which
+    still forwards to ParentVerifyA); keep the failure outcome
+    ('supervisor_infra_failure') routed to InfraCarrier; and have every node
+    reachable from Start with at least one outgoing edge (Exit excepted) --
+    i.e. no dead-ends of the kind that produced the runtime
+    'No matching edge from node Wave1Collect' failure."""
+    spec = _minimal_spec()
+    dot = compile_plan(build_plan(spec))
+
+    assert "tripleoctagon" not in dot
+    assert "Wave1Collect" not in dot
+    assert (
+        '  LaunchLaneA -> ClassifyWave1 [condition="context.tool.last_line=launched", weight="2"];'
+        in dot
+    )
+    assert (
+        '  LaunchLaneA -> InfraCarrier [condition="context.tool.last_line=supervisor_infra_failure"];'
+        in dot
+    )
+    assert (
+        "  ClassifyWave1 -> ParentVerifyA "
+        "[condition=\"context.tool.last_line!=''\"];" in dot
+    )
+
+    # Plain-regex structural reachability / dead-end sweep -- deliberately
+    # engine-independent so this part of the test always runs. Node blocks
+    # are emitted either as multi-line "  Id [\n    attr,\n    ...\n  ];"
+    # (_Emitter.node) or, for Start/Exit only, a one-line
+    # "  Id [shape=..., label=...];" (_Emitter.line); both start with
+    # "  <word> [" followed immediately by either end-of-line or "shape=".
+    # "graph" itself renders identically (it is a graph-attributes block,
+    # not a node) so it is explicitly excluded.
+    node_ids = {
+        n
+        for n in re.findall(r"^  (\w+)\s*\[(?:shape=|$)", dot, re.MULTILINE)
+        if n != "graph"
+    }
+    edges = re.findall(r"^  (\w+) -> (\w+)", dot, re.MULTILINE)
+    assert node_ids and edges
+
+    outgoing: dict[str, set[str]] = {}
+    for src, dst in edges:
+        outgoing.setdefault(src, set()).add(dst)
+
+    reachable = {"Start"}
+    frontier = ["Start"]
+    while frontier:
+        cur = frontier.pop()
+        for nxt in outgoing.get(cur, ()):
+            if nxt not in reachable:
+                reachable.add(nxt)
+                frontier.append(nxt)
+    assert reachable == node_ids, f"unreachable nodes: {node_ids - reachable}"
+
+    # Every node has an outgoing edge except the terminal Exit sink.
+    dead_ends = {n for n in node_ids if n != "Exit" and n not in outgoing}
+    assert not dead_ends, f"dead-end nodes with no outgoing edge: {dead_ends}"
+
+
+def test_single_lane_wave1_validates_with_zero_engine_errors_no_fan_in():
+    """Engine-backed companion to the structural test above: parse + validate
+    the single-lane DOT and require zero ERROR-severity diagnostics (skips
+    gracefully if the attractor engine is unavailable)."""
+    parse_dot, validate = _engine_or_skip()
+    spec = _minimal_spec()
+    graph = parse_dot(compile_plan(build_plan(spec)))
     diagnostics = validate(graph)
     errors = [d for d in diagnostics if getattr(d, "severity", "") == "ERROR"]
     assert not errors, "engine reported ERROR diagnostics: " + "; ".join(
@@ -495,6 +691,77 @@ def test_real_marker_convention_used_in_aggregate_gate():
     assert "artifacts/auth.done" in dot
     assert "SMOKE_MARKER" not in dot
     assert "auth-complete" in dot
+
+
+# ----------------------------------------------------------------------------
+# Bug fix: FinalFreeze's final lane-sweep gated each lane's marker with EXACT
+# STRING EQUALITY of the marker file's ENTIRE contents to marker_content
+# (`[ "$(cat <file>)" = <content> ]`). That is correct only for the
+# marker-FIXTURE brick (goal_lane.dot), whose lane writes a file whose entire
+# contents equal marker_content (e.g. "lane_a:ok"). For a REAL-work lane
+# (goal_lane_impl.dot), marker_file is real source (e.g.
+# "solution/csvparse.py") that CONTAINS marker_content (e.g. "parse_csv")
+# without being equal to it -- so the equality gate printed 'sweep_fail' and
+# drove the whole pipeline to INFRA_FAILURE even after ParentVerify PASS and
+# Integrate ACCEPTED. Fix: gate on CONTAINMENT (`grep -qF` fixed-string)
+# instead of equality -- correct for both bricks.
+# ----------------------------------------------------------------------------
+
+
+def _real_work_marker_spec():
+    return _minimal_spec(
+        plan_id="real_work_plan",
+        lanes={
+            "a": {
+                "wave": 1,
+                "depends_on": [],
+                "verifier_argv": ["/bin/sh", "-c", "true"],
+                # A realistic real-work marker: marker_content is a SUBSTRING
+                # of marker_file's contents (a real source file), never equal
+                # to the file's entire contents -- unlike the fixture brick's
+                # "whole file == marker_content" convention.
+                "marker_file": "solution/csvparse.py",
+                "marker_content": "parse_csv",
+            }
+        },
+        integration_order=["a"],
+    )
+
+
+def test_final_freeze_sweep_uses_containment_not_equality():
+    """The generated FinalFreeze sweep for a real-work lane (marker_content a
+    substring of, not equal to, marker_file's contents) must use a
+    fixed-string containment check (`grep -qF`) and must NOT contain the old
+    exact-equality form (`$(cat ...)` command substitution compared with
+    `=`)."""
+    dot = compile_plan(build_plan(_real_work_marker_spec()))
+
+    m = re.search(r"  FinalFreeze \[\n(.*?)\n  \];", dot, re.DOTALL)
+    assert m, "FinalFreeze node block not found in generated DOT"
+    final_freeze_block = m.group(1)
+
+    # New containment form: existence guard + fixed-string grep, still
+    # correctly quoted/escaped by the same shlex.quote path as before.
+    assert "grep -qF -e parse_csv -- solution/csvparse.py" in final_freeze_block
+    assert "test -f solution/csvparse.py &&" in final_freeze_block
+
+    # Old exact-equality form must be entirely gone.
+    assert "$(cat" not in final_freeze_block
+    assert '" = ' not in final_freeze_block
+
+
+def test_final_freeze_sweep_validates_with_zero_engine_errors_for_real_work_lane():
+    """Engine-backed companion: the generated DOT for a real-work lane (whose
+    marker_content is a substring, not the whole file) still validates with
+    zero ERROR-severity diagnostics (skips gracefully if the attractor engine
+    is unavailable)."""
+    parse_dot, validate = _engine_or_skip()
+    graph = parse_dot(compile_plan(build_plan(_real_work_marker_spec())))
+    diagnostics = validate(graph)
+    errors = [d for d in diagnostics if getattr(d, "severity", "") == "ERROR"]
+    assert not errors, "engine reported ERROR diagnostics: " + "; ".join(
+        f"[{d.rule}] {d.message}" for d in errors
+    )
 
 
 # ----------------------------------------------------------------------------
