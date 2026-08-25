@@ -612,3 +612,108 @@ def test_empty_wave_rejected():
     with pytest.raises(PlanValidationError) as exc:
         build_plan(spec)
     assert "wave 2" in str(exc.value)
+
+
+# ----------------------------------------------------------------------------
+# goal_condition_file -- optional, additive, opaque per-lane child --param.
+#
+# Contract (see compiler/README.md and the lane goal):
+#   * omitted/empty  => output byte-identical to the pre-field compile (strictly
+#     additive; not one byte changes);
+#   * present        => appended as the LAST `--param goal_condition_file=<value>`
+#     of EACH of that lane's launches, in BOTH launch bodies (wave-1 concurrent
+#     AND later-wave sequential);
+#   * the value is a path, charset-validated in plan.py exactly like marker_file
+#     (the compiler passes it through opaquely, never reading its contents).
+# ----------------------------------------------------------------------------
+
+
+def test_goal_condition_file_omitted_is_byte_identical_additive_noop():
+    """(6a) Omitting the field adds zero bytes: the 3-lane exemplar plan (whose
+    fixtures never set the field) compiles with no `goal_condition_file` param and
+    no un-substituted template token, and an explicit empty value is byte-for-byte
+    identical to omission -- so a field-omitting spec's `.dot` is exactly the
+    pre-field output."""
+    # The exemplar plan omits the field entirely.
+    dot_exemplar = compile_plan(load_plan(PLAN_3LANE))
+    assert "goal_condition_file" not in dot_exemplar
+    # The generator token must be fully collapsed -- never leak into output.
+    assert "@@GOAL_CONDITION_FILE_PARAM@@" not in dot_exemplar
+
+    # Omitted vs explicit empty string are byte-identical (empty => no bytes added).
+    dot_omitted = compile_plan(build_plan(_minimal_spec()))
+    with_empty = _minimal_spec()
+    with_empty["lanes"]["a"]["goal_condition_file"] = ""
+    assert compile_plan(build_plan(with_empty)) == dot_omitted
+    assert "goal_condition_file" not in dot_omitted
+
+
+def test_goal_condition_file_threaded_as_last_param_in_both_launch_bodies():
+    """(6b) A lane with goal_condition_file set emits exactly one trailing
+    `--param goal_condition_file=<value>` in EACH of its launches -- proven for
+    BOTH launch bodies at once: lane `a` (wave 1, concurrent launch body) and lane
+    `b` (wave 2, sequential launch body). Distinct per-lane values make the
+    per-launch count and ordering unambiguous."""
+    spec = {
+        "plan_id": "p",
+        "lanes": {
+            "a": {
+                "wave": 1,
+                "depends_on": [],
+                "verifier_argv": ["x"],
+                "marker_file": "ma",
+                "marker_content": "ca",
+                "goal_condition_file": "goals/a.md",
+            },
+            "b": {
+                "wave": 2,
+                "depends_on": ["a"],
+                "verifier_argv": ["x"],
+                "marker_file": "mb",
+                "marker_content": "cb",
+                "goal_condition_file": "goals/b.md",
+            },
+        },
+        "waves": [{"wave": 1}, {"wave": 2}],
+        "integration_order": ["a", "b"],
+        "terminals": ["COMPLETE", "RESIDUALS_READY", "INFRA_FAILURE", "ABORTED"],
+    }
+    dot = compile_plan(build_plan(spec))
+
+    # Exactly one occurrence per lane -> exactly one per launch (each lane launches
+    # once: wave-1 lane a concurrently, wave-2 lane b sequentially).
+    assert dot.count("goal_condition_file=goals/a.md") == 1
+    assert dot.count("goal_condition_file=goals/b.md") == 1
+
+    # ...and it is the LAST --param, appended immediately after max_attempts, in
+    # each launch's child_argv (raw DOT escapes the embedded list literal's
+    # quotes as \"). Asserting the whole trailing fragment proves BOTH position
+    # (last, closing the argv list with `]`) and that it is a real --param.
+    assert (
+        'max_attempts=3\\", \\"--param\\", \\"goal_condition_file=goals/a.md\\"]' in dot
+    )
+    assert (
+        'max_attempts=3\\", \\"--param\\", \\"goal_condition_file=goals/b.md\\"]' in dot
+    )
+
+
+@pytest.mark.parametrize("fragment", HOSTILE_FRAGMENTS)
+def test_injection_rejected_in_goal_condition_file(fragment):
+    """The field is interpolated into the generated launch argv, so it is
+    charset-validated (path charset) exactly like marker_file: every hostile
+    fragment must be rejected at plan.py's boundary, never reaching the
+    generator."""
+    spec = _minimal_spec()
+    spec["lanes"]["a"]["goal_condition_file"] = f"goals/{fragment}x.md"
+    with pytest.raises(PlanValidationError):
+        build_plan(spec)
+
+
+def test_goal_condition_file_non_string_rejected():
+    """A non-string goal_condition_file (when provided) is a named validation
+    error, not a silent default or a downstream crash."""
+    spec = _minimal_spec()
+    spec["lanes"]["a"]["goal_condition_file"] = 12345
+    with pytest.raises(PlanValidationError) as exc:
+        build_plan(spec)
+    assert "goal_condition_file" in str(exc.value)

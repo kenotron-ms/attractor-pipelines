@@ -160,7 +160,7 @@ contract = {
                    "--param", "lane_result_path=$state_root/lane-results/@@LANE@@.json",
                    "--param", "ledger_path=$state_root/budgets/@@LANE@@.json",
                    "--param", "ledger_lock_path=$state_root/budgets/@@LANE@@.lock",
-                   "--param", "run_id=$run_id", "--param", "max_attempts=@@MAX_ATTEMPTS@@"],
+                   "--param", "run_id=$run_id", "--param", "max_attempts=@@MAX_ATTEMPTS@@"@@GOAL_CONDITION_FILE_PARAM@@],
     "child_cwd": wt, "child_env": {"PYTHONPATH": "$runner_pythonpath"},
     "wall_timeout_seconds": @@WALL_TIMEOUT@@, "term_grace_seconds": 10,
     "stdout_path": "$state_root/logs/@@LANE@@.stdout", "stderr_path": "$state_root/logs/@@LANE@@.stderr",
@@ -207,7 +207,7 @@ contract = {
                    "--param", "lane_result_path=$state_root/lane-results/@@LANE@@.json",
                    "--param", "ledger_path=$state_root/budgets/@@LANE@@.json",
                    "--param", "ledger_lock_path=$state_root/budgets/@@LANE@@.lock",
-                   "--param", "run_id=$run_id", "--param", "max_attempts=@@MAX_ATTEMPTS@@"],
+                   "--param", "run_id=$run_id", "--param", "max_attempts=@@MAX_ATTEMPTS@@"@@GOAL_CONDITION_FILE_PARAM@@],
     "child_cwd": wt, "child_env": {"PYTHONPATH": "$runner_pythonpath"},
     "wall_timeout_seconds": @@WALL_TIMEOUT@@, "term_grace_seconds": 10,
     "stdout_path": "$state_root/logs/@@LANE@@.stdout", "stderr_path": "$state_root/logs/@@LANE@@.stderr",
@@ -1006,6 +1006,18 @@ def _resolve_delivery_dot_file(delivery_child_dot: str) -> str:
 
 
 def _render_launch(template: str, lane: Lane, plan: Plan) -> str:
+    # goal_condition_file is ADDITIVE and LAST: when empty the token collapses to
+    # "" so the emitted child_argv is byte-identical to the pre-field output; when
+    # present it appends exactly one trailing `--param goal_condition_file=<value>`
+    # after max_attempts. The value is charset-validated in plan.py (path charset,
+    # no quotes/shell metacharacters), so it is safe to embed directly inside the
+    # double-quoted Python string literal here. This replace is intentionally LAST
+    # in the chain so the interpolated value is never itself re-scanned for tokens.
+    goal_condition_param = (
+        f', "--param", "goal_condition_file={lane.goal_condition_file}"'
+        if lane.goal_condition_file
+        else ""
+    )
     return (
         template.replace("@@LANE@@", lane.lane_id)
         .replace("@@BRANCH@@", lane.branch)
@@ -1015,6 +1027,7 @@ def _render_launch(template: str, lane: Lane, plan: Plan) -> str:
         .replace("@@SEEDED@@", "true" if lane.seeded_failure else "false")
         .replace("@@MAX_ATTEMPTS@@", str(plan.max_attempts))
         .replace("@@WALL_TIMEOUT@@", str(plan.lane_wall_timeout_seconds))
+        .replace("@@GOAL_CONDITION_FILE_PARAM@@", goal_condition_param)
     )
 
 
