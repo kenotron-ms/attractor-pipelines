@@ -94,6 +94,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The engine shells out to `uv` at runtime to materialize child sessions and
+      # resolve child-module deps; without it lanes die with FileNotFoundError: 'uv'.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
       # GATE 3 — anti-tamper. The compiler is deterministic (same plan -> byte
       # identical .dot), so a recompile that differs means the branch was edited.
       - name: Verify plan integrity
