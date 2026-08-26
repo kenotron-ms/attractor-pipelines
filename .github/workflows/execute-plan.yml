@@ -181,8 +181,8 @@ jobs:
             --param worktree_root="$WORK/worktrees" \
             --param delivery_state_root="$WORK/delivery" \
             --param delivery_enabled="true" \
-            --param runtime_py_dir="$GITHUB_WORKSPACE/pipelines/goal_plan_smoke/python" \
-            --param subgraphs_dir="$GITHUB_WORKSPACE/pipelines/goal_plan_smoke/subgraphs" \
+            --param runtime_py_dir="$GITHUB_WORKSPACE/pipelines/goal_plan/python" \
+            --param subgraphs_dir="$GITHUB_WORKSPACE/pipelines/goal_plan/subgraphs" \
             --param git_bin="git" \
             --param runner_pythonpath="${{ steps.engine.outputs.pp }}" \
             --param plan_json_path="$OUTDIR/plan.json" \

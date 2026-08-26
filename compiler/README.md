@@ -8,7 +8,7 @@ re-authoring the parent graph per request risks reintroducing the exact class
 of bug fixed in commit `fc27a29`.)
 
 It generalizes the hand-authored exemplar
-`pipelines/goal_plan_smoke/goal_plan_smoke.dot` — the `LaunchLaneX` /
+`pipelines/goal_plan/goal_plan_smoke.dot` — the `LaunchLaneX` /
 `ParentVerifyX` / `IntegrateX` node triples, the wave-gating edges, and the
 aggregation shell loops — into a generator correct for arbitrary **N lanes
 across M waves**.

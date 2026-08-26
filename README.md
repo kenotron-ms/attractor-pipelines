@@ -347,51 +347,90 @@ Point the attractor bundle at it via:
 git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelines/ship_ready/ship_ready.dot
 ```
 
-## Pipeline: goal_plan_smoke (multi-lane parallel goal/plan attractor family)
+## Pipeline: goal_plan (compiled multi-lane goal/plan attractor)
 
-`pipelines/goal_plan_smoke/goal_plan_smoke.dot` — the canonical member of the
-Goal Plan Attractor family: a static, reviewed parent program that runs an
-explicit three-lane dependency plan (`lane_a` and `lane_b` concurrently in
-Wave 1, `lane_c` in Wave 2 once both are integrated) as visible DOT control
-flow, not a hidden runtime scheduler. Each lane runs in its own Git worktree
-and its own headless child Attractor process, reaped by a small
-Python-standard-library supervisor that owns raw `waitpid` truth — an
-artifact existing on disk is never treated as success without that
+`pipelines/goal_plan/` is the first-class home of the **Goal Plan Attractor**
+family: a deterministic compiler turns a `plan.json`-shaped spec into a
+runnable parent `.dot`, which drives N real-work lanes (each a bounded
+attempt/verify/diagnose convergence loop, `subgraphs/goal_lane.dot`) across
+dependency-ordered waves, then parent-verifies, integrates, coheres, and
+delivers the result as a PR. Two-step user flow:
+
+1. **Author a `plan.json`** — lanes, waves, and per-lane `verifier_argv` /
+   `goal_condition_file` (the lane's `/goal`-style stop condition). Every
+   lane's `child_dot` defaults to `subgraphs/goal_lane.dot` (the real-work
+   brick) — see [`compiler/README.md`](compiler/README.md) for the full
+   schema.
+2. **Compile it deterministically** (no LLM in this step, same spec in ->
+   byte-identical DOT out):
+   ```bash
+   python3 -m compiler plan.json -o goal_plan.dot
+   ```
+3. **Run the compiled `goal_plan.dot`** via the attractor / `pipeline-runner`
+   CLI, pointing `$subgraphs_dir` at `pipelines/goal_plan/subgraphs` and
+   `$runtime_py_dir` at `pipelines/goal_plan/python` (both reused unchanged
+   by the compiler). The full `$param` contract is documented in
+   `compiler/README.md` "What the generated pipeline needs at run time" and
+   echoed in every generated `.dot`'s header comment.
+
+The **`goal-batch-attractor`** skill (see Quick Start above) automates all
+three steps locally; its cloud sibling (`goal-plan-submit`, in
+`microsoft/amplifier-bundle-resolve`) submits the same two-step artifact to
+the Amplifier Resolve `dot-graph` resolver.
+
+`pipelines/goal_plan/goal_plan_smoke.dot` is the **hand-authored reference
+member** of the same family — see below.
+
+## Pipeline: goal_plan_smoke (hand-authored fixture member)
+
+`pipelines/goal_plan/goal_plan_smoke.dot` — the canonical hand-authored,
+reviewed member of the Goal Plan Attractor family: a static parent program
+that runs an explicit three-lane dependency plan (`lane_a` and `lane_b`
+concurrently in Wave 1, `lane_c` in Wave 2 once both are integrated) as
+visible DOT control flow, not a hidden runtime scheduler. Each lane runs in
+its own Git worktree and its own headless child Attractor process, reaped by
+a small Python-standard-library supervisor that owns raw `waitpid` truth —
+an artifact existing on disk is never treated as success without that
 supervisor's exit/signal evidence. Parent candidate verification runs in a
 clean, disposable, detached worktree at the exact candidate commit;
 passing commits integrate sequentially with an aggregate check after every
 merge; a bounded (one-round) cross-lane coherence correction and a
 final-HEAD lane sweep run before an optional exact-head-verified PR
 delivery, cleanup, and one of four explicit terminal states
-(`COMPLETE` / `RESIDUALS_READY` / `INFRA_FAILURE` / `ABORTED`).
+(`COMPLETE` / `RESIDUALS_READY` / `INFRA_FAILURE` / `ABORTED`). Its lanes run
+`subgraphs/goal_lane_smoke.dot` (a marker-writing fixture brick), not the
+real-work `subgraphs/goal_lane.dot` brick the compiled `goal_plan` pipeline
+above uses.
 
-See `pipelines/goal_plan_smoke/goal_plan_smoke.md` for the stable
+See `pipelines/goal_plan/goal_plan_smoke.md` for the stable
 identity-anchor guide (prerequisites, trusted-verification route, terminal
 states) and `docs/primer.md` + `docs/RUBRIC.md` for the attractor doctrine
 this family is authored against.
 
 ```
-pipelines/goal_plan_smoke/
-  goal_plan_smoke.dot            # static parent: waves, integration, coherence, delivery, terminals
+pipelines/goal_plan/
+  goal_plan_smoke.dot            # static parent (fixture member): waves, integration, coherence, delivery, terminals
   goal_plan_smoke.md              # identity-stable history-anchor guide
-  plan.json                       # immutable design-time/audit data (lanes, waves, budgets, terminals)
+  plan.json                       # immutable design-time/audit data for the fixture member (lanes, waves, budgets, terminals)
   python/
     goal_plan_bootstrap.py          # trusted external bootstrap (descriptor auth, sealed runtime materialization)
     goal_plan_runtime.py            # admission, worktrees, budgets, verifier envelopes, integration, cleanup (library, no CLI)
     goal_plan_supervisor.py         # per-child reaper: run/poll/terminate/reconcile, authoritative exit/signal truth
     tests/                          # pytest coverage for all three modules
   subgraphs/
-    goal_lane.dot                    # bounded per-lane attempt/verify/diagnose convergence loop
+    goal_lane.dot                    # REAL-WORK per-lane attempt/verify/diagnose convergence loop (default child_dot for a compiled plan)
+    goal_lane_smoke.dot               # marker-writing FIXTURE per-lane convergence loop (used only by goal_plan_smoke.dot)
     integration_correction.dot        # bounded (1-round) shared-branch coherence correction
     deliver_pr.dot                    # exact-final-HEAD PR delivery, adapted from this repo's proven deliver_pr pattern
 ```
 
-This pipeline is not meant to be fetched and run standalone the way the
-other pipelines in this repo are — it requires an externally installed
-trusted bootstrap, launch descriptor, and process-supervision prerequisites
-described in `goal_plan_smoke.md`. It is included here as the reference
-example for a multi-lane, worktree-isolated, supervisor-verified parallel
-goal/plan attractor.
+The `goal_plan_smoke.dot` fixture member is not meant to be fetched and run
+standalone the way the other pipelines in this repo are — it requires an
+externally installed trusted bootstrap, launch descriptor, and
+process-supervision prerequisites described in `goal_plan_smoke.md`. It is
+included here as the reference example for a multi-lane, worktree-isolated,
+supervisor-verified parallel goal/plan attractor; a compiled `goal_plan` run
+(above) needs the same prerequisites.
 
 ## Namespace: generated/ (machine-generated, NOT curated)
 

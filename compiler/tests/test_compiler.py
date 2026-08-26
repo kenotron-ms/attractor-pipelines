@@ -4,7 +4,7 @@ Covers, per the lane goal:
 
 * **D2** -- regenerating the known-good exemplar: feed the compiler a
   ``plan.json``-shaped spec equivalent to
-  ``pipelines/goal_plan_smoke/plan.json`` and prove the *parsed graph
+  ``pipelines/goal_plan/plan.json`` and prove the *parsed graph
   structure* (node ids, shapes, edges, wave-gating topology, graph attrs) is
   equivalent to the hand-authored ``goal_plan_smoke.dot`` -- structural, not
   byte-for-byte.
@@ -49,7 +49,7 @@ PLAN_3LANE = FIXTURES / "plan_3lane_2wave.json"
 PLAN_2LANE = FIXTURES / "plan_2lane_1wave.json"
 PLAN_INVALID = FIXTURES / "plan_invalid_missing_wave.json"
 
-EXEMPLAR_DOT = _REPO_ROOT / "pipelines" / "goal_plan_smoke" / "goal_plan_smoke.dot"
+EXEMPLAR_DOT = _REPO_ROOT / "pipelines" / "goal_plan" / "goal_plan_smoke.dot"
 
 
 def _engine_or_skip():
@@ -697,9 +697,9 @@ def test_real_marker_convention_used_in_aggregate_gate():
 # Bug fix: FinalFreeze's final lane-sweep gated each lane's marker with EXACT
 # STRING EQUALITY of the marker file's ENTIRE contents to marker_content
 # (`[ "$(cat <file>)" = <content> ]`). That is correct only for the
-# marker-FIXTURE brick (goal_lane.dot), whose lane writes a file whose entire
+# marker-FIXTURE brick (goal_lane_smoke.dot), whose lane writes a file whose entire
 # contents equal marker_content (e.g. "lane_a:ok"). For a REAL-work lane
-# (goal_lane_impl.dot), marker_file is real source (e.g.
+# (goal_lane.dot), marker_file is real source (e.g.
 # "solution/csvparse.py") that CONTAINS marker_content (e.g. "parse_csv")
 # without being equal to it -- so the equality gate printed 'sweep_fail' and
 # drove the whole pipeline to INFRA_FAILURE even after ParentVerify PASS and

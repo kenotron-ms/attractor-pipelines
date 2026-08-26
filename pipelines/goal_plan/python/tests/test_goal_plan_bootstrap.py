@@ -245,7 +245,7 @@ def harness(tmp_path: Path) -> Harness:
     worktree_root = root / "worktrees"
     descriptor_path = launch_control / "launch_descriptor.json"
     launcher = launcher_root / "goal_plan_bootstrap.py"
-    plan_path = repo / "pipelines/goal_plan_smoke/plan.json"
+    plan_path = repo / "pipelines/goal_plan/plan.json"
     sentinel = root / "TARGET_MODULE_WAS_IMPORTED"
     repo.mkdir()
     launch_control.mkdir(mode=0o700)
@@ -259,7 +259,7 @@ def harness(tmp_path: Path) -> Harness:
     git(repo, "commit", "-q", "-m", "product base")
     product_base_sha = git(repo, "rev-parse", "HEAD").stdout.strip()
 
-    anchor_relative = "pipelines/goal_plan_smoke/goal_plan_smoke.md"
+    anchor_relative = "pipelines/goal_plan/goal_plan_smoke.md"
     anchor_path = repo / anchor_relative
     anchor_path.parent.mkdir(parents=True)
     anchor_path.write_text("immutable history anchor\n")
@@ -268,7 +268,7 @@ def harness(tmp_path: Path) -> Harness:
     anchor_sha = git(repo, "rev-parse", "HEAD").stdout.strip()
     anchor_blob_sha256 = digest(anchor_path.read_bytes())
 
-    python_dir = repo / "pipelines/goal_plan_smoke/python"
+    python_dir = repo / "pipelines/goal_plan/python"
     python_dir.mkdir(parents=True)
     bootstrap_source = BOOTSTRAP_PATH.read_bytes()
     (python_dir / "goal_plan_bootstrap.py").write_bytes(bootstrap_source)
@@ -278,7 +278,7 @@ def harness(tmp_path: Path) -> Harness:
     )
     (python_dir / "goal_plan_runtime.py").write_bytes(runtime_bytes)
     (python_dir / "goal_plan_supervisor.py").write_bytes(supervisor_bytes)
-    dot_path = repo / "pipelines/goal_plan_smoke/goal_plan_smoke.dot"
+    dot_path = repo / "pipelines/goal_plan/goal_plan_smoke.dot"
     dot_path.write_text("digraph goal_plan_smoke { Start -> Done }\n")
     malicious_module = repo / "malicious_target_module.py"
     malicious_module.write_text(
@@ -306,22 +306,22 @@ def harness(tmp_path: Path) -> Harness:
     bootstrap_record = source_record(
         repo,
         "bootstrap",
-        "pipelines/goal_plan_smoke/python/goal_plan_bootstrap.py",
+        "pipelines/goal_plan/python/goal_plan_bootstrap.py",
     )
     runtime_record = source_record(
         repo,
         "runtime",
-        "pipelines/goal_plan_smoke/python/goal_plan_runtime.py",
+        "pipelines/goal_plan/python/goal_plan_runtime.py",
     )
     supervisor_record = source_record(
         repo,
         "supervisor",
-        "pipelines/goal_plan_smoke/python/goal_plan_supervisor.py",
+        "pipelines/goal_plan/python/goal_plan_supervisor.py",
     )
     dot_record = source_record(
         repo,
         "parent-dot",
-        "pipelines/goal_plan_smoke/goal_plan_smoke.dot",
+        "pipelines/goal_plan/goal_plan_smoke.dot",
     )
 
     launcher_binding: dict[str, Any] = {
@@ -476,7 +476,7 @@ def harness(tmp_path: Path) -> Harness:
     git(repo, "commit", "-q", "-m", "compiled goal plan")
     source_sha = git(repo, "rev-parse", "HEAD").stdout.strip()
     plan_blob_id = git(
-        repo, "rev-parse", f"{source_sha}:pipelines/goal_plan_smoke/plan.json"
+        repo, "rev-parse", f"{source_sha}:pipelines/goal_plan/plan.json"
     ).stdout.strip()
     plan_bytes = plan_path.read_bytes()
     common_output = git(repo, "rev-parse", "--git-common-dir").stdout.strip()
@@ -493,7 +493,7 @@ def harness(tmp_path: Path) -> Harness:
             "git_common_dir": str(common),
             "git_common_dir_realpath": str(common),
         },
-        "plan_path": "pipelines/goal_plan_smoke/plan.json",
+        "plan_path": "pipelines/goal_plan/plan.json",
         "plan_blob_id": plan_blob_id,
         "plan_blob_sha256": digest(plan_bytes),
         "plan_blob_length": len(plan_bytes),
@@ -525,7 +525,7 @@ def harness(tmp_path: Path) -> Harness:
     write_canonical(descriptor_path, descriptor, 0o444)
 
     plan_blob_identity = {
-        "path": "pipelines/goal_plan_smoke/plan.json",
+        "path": "pipelines/goal_plan/plan.json",
         "blob_id": plan_blob_id,
         "length": len(plan_bytes),
         "sha256": digest(plan_bytes),
@@ -690,7 +690,7 @@ def _fresh_harness_for_second_assertion(harness: Harness) -> Harness:
     original = git(
         harness.repo,
         "show",
-        f"{harness.source_sha}:pipelines/goal_plan_smoke/plan.json",
+        f"{harness.source_sha}:pipelines/goal_plan/plan.json",
     ).stdout.encode()
     harness.plan_path.write_bytes(original)
     descriptor = copy.deepcopy(harness.descriptor)
@@ -772,9 +772,9 @@ def test_rejects_closed_environment_mismatch(harness: Harness) -> None:
 @pytest.mark.parametrize(
     "relative",
     [
-        "pipelines/goal_plan_smoke/python/goal_plan_bootstrap.py",
-        "pipelines/goal_plan_smoke/python/goal_plan_runtime.py",
-        "pipelines/goal_plan_smoke/python/goal_plan_supervisor.py",
+        "pipelines/goal_plan/python/goal_plan_bootstrap.py",
+        "pipelines/goal_plan/python/goal_plan_runtime.py",
+        "pipelines/goal_plan/python/goal_plan_supervisor.py",
     ],
     ids=["bootstrap", "runtime", "supervisor"],
 )

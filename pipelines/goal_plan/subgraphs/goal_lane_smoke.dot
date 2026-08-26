@@ -8,7 +8,7 @@
 // parent; the parent independently re-verifies the candidate (see
 // goal_plan_smoke.dot's ParentVerify node).
 //
-// Reuses pipelines/goal_plan_smoke/python/goal_plan_runtime.py's
+// Reuses pipelines/goal_plan/python/goal_plan_runtime.py's
 // `run_child_attempt_verifier_envelope` (dirty-tolerant child verifier
 // envelope) unchanged -- this DOT file never edits that module, only calls
 // it via inline python3, per the lane's ownership contract.
@@ -24,7 +24,7 @@
 //                          the existing goal_plan_smoke.dot parent still
 //                          passes it; new callers may omit it (default /
 //                          omitted == run the normal real task).
-//   $runtime_py_dir      - absolute path to pipelines/goal_plan_smoke/python
+//   $runtime_py_dir      - absolute path to pipelines/goal_plan/python
 //   $output_root         - external per-attempt verifier output root
 //   $evidence_path        - external evidence JSON path for this lane
 //   $max_attempts         - budget-ledger reservation cap surfaced by the
@@ -37,7 +37,7 @@
 //   lane.candidate_sha    - set only when lane.result="candidate"
 //   lane.blocker_reason    - set only when lane.result="blocked"
 
-digraph goal_lane {
+digraph goal_lane_smoke {
   graph [rankdir=LR, default_max_retry=1, default_fidelity="summary:high"];
 
   Start [shape=Mdiamond, label="Start"];

@@ -104,7 +104,7 @@ jobs:
       #
       #    WHY ABSOLUTE (verified against execute-plan.yml + the goal_plan compiler):
       #    at execution time each lane runs the real-work brick
-      #    subgraphs/goal_lane_impl.dot inside its OWN git worktree, which execute-plan
+      #    subgraphs/goal_lane.dot inside its OWN git worktree, which execute-plan
       #    forks from origin/main (it passes product_base_sha=origin/main). A goal
       #    file committed to THIS disposable plan branch is therefore NOT present
       #    in that worktree, so a repo-relative goal_condition_file would be

@@ -3,7 +3,7 @@
   "plan_id": "goal_plan_smoke",
   "branch_namespace": "goal-plan-smoke",
   "product_base_sha": "e832f6ebdf293b04cfbbe59cab0743bb2ff81bde",
-  "description": "D2 fixture: a plan.json-shaped spec structurally equivalent to pipelines/goal_plan_smoke/plan.json (3 lanes, 2 waves, same dependency shape). The compiler must regenerate a parent .dot structurally equivalent to the hand-authored goal_plan_smoke.dot from this.",
+  "description": "D2 fixture: a plan.json-shaped spec structurally equivalent to pipelines/goal_plan/plan.json (3 lanes, 2 waves, same dependency shape). The compiler must regenerate a parent .dot structurally equivalent to the hand-authored goal_plan_smoke.dot from this.",
   "lanes": {
     "lane_a": {
       "wave": 1,

@@ -1,6 +1,6 @@
-// goal_lane_impl.dot
+// goal_lane.dot
 //
-// Real-work sibling of subgraphs/goal_lane.dot for the goal_plan_smoke
+// Real-work sibling of subgraphs/goal_lane_smoke.dot for the goal_plan_smoke
 // family. Same bounded child-convergence SHAPE (orient -> reserve budget ->
 // attempt -> independent verify -> candidate, with a diagnose/retry/budget
 // backstop), but the attempt does REAL work: it reads the goal described in
@@ -8,24 +8,24 @@
 // marker string. Runs headless inside one lane's own git worktree (the
 // parent launches it with `--cwd .`).
 //
-// Like goal_lane.dot, this graph never certifies its own final success to
+// Like goal_lane_smoke.dot, this graph never certifies its own final success to
 // the parent -- it hands back only a candidate commit plus evidence, and the
 // parent independently re-verifies the candidate (see goal_plan_smoke.dot's
 // ParentVerify node). The lane->parent contract file ($lane_result_path) and
-// the budget-ledger machinery are byte-compatible with goal_lane.dot so the
+// the budget-ledger machinery are byte-compatible with goal_lane_smoke.dot so the
 // parent graph can consume this brick unchanged.
 //
-// WHY A SEPARATE BRICK (not an edit to goal_lane.dot): goal_lane.dot's
+// WHY A SEPARATE BRICK (not an edit to goal_lane_smoke.dot): goal_lane_smoke.dot's
 // Attempt node writes a fixed $marker_content string and its ChildVerify
 // runs a marker-equality check -- a smoke fixture, not real work. This brick
 // keeps that proven envelope's shape but swaps the marker attempt/verify for
 // a real implement step (modeled on pipelines/idea_to_pr/idea_to_pr.dot's
 // Implement node -- read a referenced file, do real work, gather evidence)
 // and an independent LLM judge + deterministic file gate (modeled on
-// idea_to_pr.dot's SelfEvaluate -> CheckRubric). goal_lane.dot is left
+// idea_to_pr.dot's SelfEvaluate -> CheckRubric). goal_lane_smoke.dot is left
 // unchanged; both bricks coexist.
 //
-// Reuses pipelines/goal_plan_smoke/python/goal_plan_runtime.py's BudgetLedger
+// Reuses pipelines/goal_plan/python/goal_plan_runtime.py's BudgetLedger
 // (flock-protected attempt accounting) unchanged -- this DOT file never edits
 // that module, only calls it via inline python3, per the lane's ownership
 // contract.
@@ -38,7 +38,7 @@
 //                          machine check that proves it). THIS is the seam
 //                          the sibling compiler lane emits; the Implement and
 //                          Verify nodes both read it.
-//   $runtime_py_dir       - absolute path to pipelines/goal_plan_smoke/python
+//   $runtime_py_dir       - absolute path to pipelines/goal_plan/python
 //   $ledger_path          - external budget-ledger JSON path (parent-owned)
 //   $ledger_lock_path      - external budget-ledger flock path (parent-owned)
 //   $run_id               - parent run id used for ledger reservations
@@ -50,16 +50,16 @@
 //                          by the independent Verify node
 //   $lane_result_path     - external lane->parent result contract file
 //
-// NOTE: $marker_file / $marker_content (goal_lane.dot's inputs) are NOT read
+// NOTE: $marker_file / $marker_content (goal_lane_smoke.dot's inputs) are NOT read
 // by this brick. A parent that still passes them is harmless -- they are
 // simply ignored here.
 //
-// Context outputs (identical contract to goal_lane.dot):
+// Context outputs (identical contract to goal_lane_smoke.dot):
 //   lane.result          - "candidate" | "blocked"
 //   lane.candidate_sha    - set only when lane.result="candidate"
 //   lane.blocker_reason    - set only when lane.result="blocked"
 
-digraph goal_lane_impl {
+digraph goal_lane {
   graph [rankdir=LR, default_max_retry=1, default_fidelity="summary:high"];
 
   Start [shape=Mdiamond, label="Start"];

@@ -132,7 +132,7 @@ Real work usually wants `budgets.lane_wall_timeout_seconds` well above the smoke
 default (real lanes need minutes, not seconds) and `budgets.max_adaptive_attempts_per_lane`
 per the lane's difficulty. Both are optional and documented in `compiler/README.md`.
 
-> The hand-authored `pipelines/goal_plan_smoke/plan.json` is **audit-era fixture
+> The hand-authored `pipelines/goal_plan/plan.json` is **audit-era fixture
 > data, not a compiler input** — it carries `waves[].concurrency` as a description
 > string and will be rejected by the compiler (`concurrency must be an integer`).
 > Use `compiler/README.md`'s field list as the schema, not that file.
@@ -176,7 +176,7 @@ The generated pipeline needs a set of engine-substituted `$param` values at laun
 with meanings, is in `compiler/README.md` "What the generated pipeline needs at run
 time" and is echoed in the header comment of every generated `.dot`** — supply them
 from there rather than memorizing a copy. `$runtime_py_dir` and `$subgraphs_dir`
-point at this repo's reused `pipelines/goal_plan_smoke/python/` and `subgraphs/`
+point at this repo's reused `pipelines/goal_plan/python/` and `subgraphs/`
 (unchanged by the compiler).
 
 **Trust mode — default vs `--light`:**
@@ -191,7 +191,7 @@ point at this repo's reused `pipelines/goal_plan_smoke/python/` and `subgraphs/`
 - **Default** keeps the bootstrap/descriptor/sealing trust layer (`goal_plan_bootstrap.py`).
   It is already generic and free to reuse; local hosts can be shared or CI too. Its
   external launch-descriptor + disjoint-roots prerequisites are documented in
-  `pipelines/goal_plan_smoke/goal_plan_smoke.md` — follow that, do not restate it.
+  `pipelines/goal_plan/goal_plan_smoke.md` — follow that, do not restate it.
 - **`--light`** (passed in `$ARGUMENTS`) drops only the bootstrap layer and runs
   supervisor + worktrees directly. It is a flag on this skill, not a separate
   architecture. Use it only when that ceremony is unwarranted.
@@ -217,6 +217,6 @@ holds only:
 
 For the decomposition discipline it points at the **`goalify`** skill; for the
 default-mode bootstrap prerequisites it points at
-`pipelines/goal_plan_smoke/goal_plan_smoke.md`. Nothing here restates a schema, a
+`pipelines/goal_plan/goal_plan_smoke.md`. Nothing here restates a schema, a
 param table, or a lint rule that lives elsewhere — so when the compiler contract
 changes, this skill does not silently drift.
