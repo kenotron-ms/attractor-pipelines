@@ -24,7 +24,7 @@ the compiler accepts -- or aborts honestly.
 
 **It does not run the plan.** Compiling and executing the generated parent
 `.dot` is the consuming workflow's job (and, downstream of that, the
-[`goal_plan_smoke`](../goal_plan_smoke/) family's). This pipeline's entire
+[`goal_plan`](../goal_plan/) family's). This pipeline's entire
 output contract is one file.
 
 ---
@@ -316,7 +316,7 @@ git+https://github.com/kenotron-ms/attractor-pipelines@main#subdirectory=pipelin
 - [`compiler/README.md`](../../compiler/README.md) -- the authoritative
   `plan.json` schema and the compiler's invocation contract. **Read this
   before hand-authoring a plan.**
-- [`pipelines/goal_plan_smoke/`](../goal_plan_smoke/) -- the hand-authored
+- [`pipelines/goal_plan/`](../goal_plan/) -- the hand-authored
   exemplar of the parent `.dot` family this plan compiles into.
 - [`docs/primer.md`](../../docs/primer.md) /
   [`docs/RUBRIC.md`](../../docs/RUBRIC.md) -- the doctrine and the checklist
