@@ -32,16 +32,46 @@ digraph deliver_pr {
   Start [shape=Mdiamond, label="Start"];
   Exit  [shape=Msquare,  label="Exit"];
 
+  // Deterministic bridge: pull the two parent-produced facts this subgraph
+  // needs into its OWN context, because the compiled goal_plan parent does
+  // NOT emit them as context ($param) even though this graph's header lists
+  // them as required inputs -- it only writes final_head to a file and never
+  // binds a delivery branch at all. Without this node both $final_head and
+  // $delivery_branch substitute empty and delivery can never succeed:
+  //   * final_head -- the parent's FinalFreeze computes the frozen integrated
+  //     HEAD and writes it to $state_root/final_head.txt (a well-known file),
+  //     but never puts it in context. Read it here so BOTH ConfirmHead and
+  //     CheckPROpened compare the PR against the REAL integrated HEAD. Honour
+  //     a context-provided $final_head first if some future parent DOES set
+  //     it; fall back to the file otherwise. Missing file => empty => a real
+  //     head_mismatch downstream (fail-closed, never a false pass).
+  //   * delivery_branch -- the parent compile-binds none, so derive a unique,
+  //     collision-free branch from $run_id (a fresh run_id => a fresh branch,
+  //     so the deliberately non-force push below can't be tripped by a stale
+  //     remote branch). Honour a parent-provided $delivery_branch first.
+  // $state_root and $run_id ARE in this subgraph's context (the folder node
+  // clones the full parent context), so both are available here. Emitted via
+  // parse_json so every downstream node's $final_head / $delivery_branch
+  // resolves. Also sets a fallback git identity so any incidental commit on a
+  // fresh CI runner won't abort with "empty ident" (the push itself needs
+  // none). Writes ONLY the JSON to stdout -- parse_json requires clean JSON.
+  ResolveDelivery [
+    shape=parallelogram, label="Resolve final_head + delivery_branch",
+    tool_command="#!/bin/sh\nfh=\"$final_head\"\nif [ -z \"$fh\" ]; then fh=$(cat \"$state_root/final_head.txt\" 2>/dev/null); fi\nbr=\"$delivery_branch\"\nif [ -z \"$br\" ]; then rid=\"$run_id\"; if [ -z \"$rid\" ]; then rid=$(date +%s); fi; br=\"goal-plan-delivery/$rid\"; fi\ngit config user.email >/dev/null 2>&1 || git config user.email \"amplifier-bot@users.noreply.github.com\" >/dev/null 2>&1 || true\ngit config user.name >/dev/null 2>&1 || git config user.name \"amplifier-bot\" >/dev/null 2>&1 || true\nprintf '{\"final_head\": \"%s\", \"delivery_branch\": \"%s\"}' \"$fh\" \"$br\"",
+    parse_json="true"
+  ];
+  Start -> ResolveDelivery;
+  ResolveDelivery -> ConfirmHead;
+
   // Deterministic: the branch and HEAD are parent-supplied, compile-bound
   // facts, not something this graph is allowed to (re)decide. Reject a
   // worktree that isn't actually sitting on $final_head before any network
   // mutation (design doc Task 9 step 3: reject stale/unexplained state
-  // before pushing).
+  // before pushing). $final_head is now populated by ResolveDelivery above.
   ConfirmHead [
     shape=parallelogram, label="Confirm Final HEAD",
     tool_command="#!/bin/sh\nset -e\ncur=$(git rev-parse HEAD)\nif [ \"$cur\" = \"$final_head\" ]; then printf 'head_ok'; else printf 'head_mismatch'; fi"
   ];
-  Start -> ConfirmHead;
   ConfirmHead -> CommitPush [condition="context.tool.last_line=head_ok", weight="2"];
   ConfirmHead -> Failed     [condition="context.tool.last_line=head_mismatch"];
 
@@ -85,9 +115,19 @@ digraph deliver_pr {
   // merely "some PR exists". Deliberately gh/curl only (no
   // platform-specific helper) -- same portability rationale as the proven
   // pattern this is adapted from.
+  // NOTE on the URL var: ExtractPRUrl above sets the context key
+  // `delivery.pr_url` (dotted -- required verbatim so the parent Deliver
+  // folder node's `outputs="delivery.pr_url,delivery.result"` propagates it
+  // back). The engine's bare `$name` substitution matches [A-Za-z0-9_] only,
+  // so `$delivery_pr_url` would NOT resolve a dotted key and stayed literal
+  // (verified) -- the claimed URL never reached this gate, so a genuinely
+  // opened PR was still reported not_verified. The brace form `${delivery.pr_url}`
+  // is the one that resolves a dotted context key. $final_head is populated by
+  // ResolveDelivery, so the exact-head proof below now compares against the
+  // real integrated HEAD.
   CheckPROpened [
     shape=parallelogram, label="Verify PR Opened At Final HEAD",
-    tool_command="#!/bin/sh\nnum=$(printf '%s' \"$delivery_pr_url\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -z \"$num\" ]; then printf 'not_verified'; exit 0; fi\nhead_sha=$(gh pr view \"$num\" --repo \"$repo\" --json headRefOid --jq .headRefOid 2>/dev/null || true)\nif [ -z \"$head_sha\" ]; then\n  head_sha=$(curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" 2>/dev/null | python3 -c \"import sys,json;print(json.load(sys.stdin).get('head',{}).get('sha',''))\" 2>/dev/null || true)\nfi\nif [ \"$head_sha\" = \"$final_head\" ]; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
+    tool_command="#!/bin/sh\nnum=$(printf '%s' \"${delivery.pr_url}\" | grep -oE '[0-9]+$' 2>/dev/null || true)\nif [ -z \"$num\" ]; then printf 'not_verified'; exit 0; fi\nhead_sha=$(gh pr view \"$num\" --repo \"$repo\" --json headRefOid --jq .headRefOid 2>/dev/null || true)\nif [ -z \"$head_sha\" ]; then\n  head_sha=$(curl -sf -H \"Authorization: token ${GH_TOKEN}\" \"https://api.github.com/repos/$repo/pulls/$num\" 2>/dev/null | python3 -c \"import sys,json;print(json.load(sys.stdin).get('head',{}).get('sha',''))\" 2>/dev/null || true)\nfi\nif [ \"$head_sha\" = \"$final_head\" ]; then\n  printf 'verified'\nelse\n  printf 'not_verified'\nfi"
   ];
 
   CheckPROpened -> MarkOpened  [condition="context.tool.last_line=verified && outcome=success", weight="2"];

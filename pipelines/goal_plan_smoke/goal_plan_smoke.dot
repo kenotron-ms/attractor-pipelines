@@ -309,7 +309,15 @@ digraph goal_plan_smoke {
     dot_file="subgraphs/deliver_pr.dot",
     outputs="delivery.pr_url,delivery.result"
   ];
-  Deliver -> PreTerminalCleanup;
+  // Route on the delivery subgraph's REPORTED result, not its run_subgraph
+  // outcome (a folder subgraph returns SUCCESS even when its internal Failed
+  // node ran -- RUBRIC.md 2 / 3.7). An unconditional edge here let a FAILED
+  // delivery (no PR) still reach COMPLETE. delivery.result is merged back via
+  // outputs= and deliver_pr.dot always sets it to "opened"|"failed", so both
+  // edges are reachable; a failed delivery routes to Residuals (RESIDUALS_READY),
+  // never COMPLETE.
+  Deliver -> PreTerminalCleanup [condition="context.delivery.result=opened", weight="2"];
+  Deliver -> Residuals          [condition="context.delivery.result=failed"];
 
   // ---------------------------------------------------------------------
   // Cleanup + terminals
