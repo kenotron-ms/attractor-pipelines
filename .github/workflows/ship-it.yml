@@ -44,9 +44,7 @@ jobs:
       (github.event_name == 'issues' &&
        github.event.label.name == 'ship-it')
     runs-on: ubuntu-latest
-    # NOTE: the `batch-execute` required-reviewer gate is TEMPORARILY removed for the
-    # autonomous shakeout loop. Restore `environment: batch-execute` before treating
-    # this workflow as production — it executes arbitrary lane verifier_argv.
+    environment: batch-execute # required-reviewer gate — human approval before any execution
     steps:
       # GATE 1 — the actor must have write/maintain/admin on the repo.
       - name: Authorize actor
