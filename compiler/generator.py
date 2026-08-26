@@ -962,7 +962,19 @@ def compile_plan(spec: dict | Plan) -> str:
             ("outputs", "delivery.pr_url,delivery.result", True),
         ],
     )
-    em.edge("Deliver", "PreTerminalCleanup")
+    # Route on the delivery subgraph's REPORTED result, never on its
+    # run_subgraph outcome. A folder subgraph silently returns SUCCESS even when
+    # its internal `Failed` node ran (RUBRIC.md 2 / 3.7), so an unconditional
+    # `Deliver -> PreTerminalCleanup` edge let a FAILED delivery (no PR) still
+    # reach the COMPLETE terminal -- a run that never opened a PR reporting
+    # done. `delivery.result` is merged back into parent context via the node's
+    # `outputs=` declaration, and deliver_pr.dot always sets it to exactly
+    # "opened" or "failed" (every leaf is MarkOpened/Failed), so both edges are
+    # reachable and exhaustive. Failed delivery routes to Residuals
+    # (RESIDUALS_READY) -- integrated work exists but was not shipped -- rather
+    # than masquerading as COMPLETE.
+    em.edge("Deliver", "PreTerminalCleanup", "context.delivery.result=opened", "2")
+    em.edge("Deliver", "Residuals", "context.delivery.result=failed")
     em.line("")
 
     # ---- Cleanup + terminals ------------------------------------------
