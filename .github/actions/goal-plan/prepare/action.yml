@@ -1,0 +1,229 @@
+# Goal Plan / Prepare — turn a GitHub issue into a compiler-accepted plan.json,
+# compiled goal_plan.dot, and reviewable Mermaid, committed to a disposable branch.
+#
+# PORTED from .github/workflows/plan-batch.yml (the planner/compile/commit
+# steps). Like goal-plan/execute, this action reads engine assets from ITS
+# OWN checkout (resolved via $GITHUB_ACTION_PATH -- see step 1), not the
+# consumer's. Two engine assets specifically need to live INSIDE the
+# consumer's workspace during this run (the planner .dot, read by the
+# third-party planner action; the compiler package, imported at a
+# workspace-relative PYTHONPATH by both the planner pipeline's own
+# CompilerGate node and this action's own compile step) -- those are staged
+# to the caller-visible, gitignored `.attractor-engine/` directory. Every
+# other engine asset (scripts/, pipelines/goal_plan/) is read straight from
+# the engine root and never touches the consumer's workspace.
+#
+# Callers MUST pin `uses:` to a commit SHA (not @main / @<branch>) and use
+# the SAME SHA for both goal-plan/prepare and goal-plan/execute -- the
+# compiler_fingerprint this action records is checked for drift by
+# goal-plan/execute's anti-tamper step.
+name: "Goal Plan / Prepare"
+description: >-
+  Runs the plan-batch planner attractor against a GitHub issue, compiles and
+  renders the resulting plan, and commits it to a disposable plan branch.
+
+inputs:
+  issue_number:
+    description: "The issue number being planned."
+    required: true
+  anthropic_api_key:
+    description: "ANTHROPIC_API_KEY for the planner attractor (an LLM-driven pipeline)."
+    required: true
+  github_token:
+    description: "Token used for GH_TOKEN (issue access) and to push the plan branch."
+    required: true
+  run_id:
+    description: "Identifier for this run; used to namespace the output directory and default branch name."
+    required: false
+    default: ${{ github.run_id }}
+  branch_prefix:
+    description: "Prefix for the disposable plan branch name (branch = <branch_prefix><issue_number>-<run_id>)."
+    required: false
+    default: "plan-batch/issue-"
+
+outputs:
+  plan_produced:
+    description: "'true' if the planner produced a compiler-valid plan.json, 'false' otherwise."
+    value: ${{ steps.gate.outputs.plan_produced }}
+  plan_branch:
+    description: "The disposable branch the plan (and its compiled .dot) was committed and pushed to. Set only when plan_produced is 'true'."
+    value: ${{ steps.commit.outputs.plan_branch }}
+  outdir:
+    description: "Workspace-relative directory holding plan.json, goal_plan.dot, plan.mmd, and engine.txt. Set only when plan_produced is 'true'."
+    value: ${{ steps.compile.outputs.outdir }}
+  plan_json_path:
+    description: "Workspace-relative path to the committed plan.json. Set only when plan_produced is 'true'."
+    value: ${{ steps.compile.outputs.plan_json_path }}
+  parent_dot_path:
+    description: "Workspace-relative path to the compiled parent .dot. Set only when plan_produced is 'true'."
+    value: ${{ steps.compile.outputs.parent_dot_path }}
+  mermaid_path:
+    description: "Workspace-relative path to the rendered Mermaid diagram. Set only when plan_produced is 'true'."
+    value: ${{ steps.compile.outputs.mermaid_path }}
+  residual_path:
+    description: "Workspace-relative path to the residual note explaining why no plan was produced. Set only when plan_produced is 'false'."
+    value: ${{ steps.noplan.outputs.residual_path }}
+  compiler_fingerprint:
+    description: "sha256 fingerprint of the compiler source at the pinned engine ref, for drift detection at execute time."
+    value: ${{ steps.fingerprint.outputs.fingerprint }}
+
+runs:
+  using: "composite"
+  steps:
+    # This action lives 4 path segments below the repo root
+    # (.github/actions/goal-plan/prepare), so 4 levels of ".." from
+    # $GITHUB_ACTION_PATH reaches this repo's checkout root -- the ENGINE.
+    # Only the compiler package and the planner .dot are staged into the
+    # consumer's workspace (as .attractor-engine/, gitignored); everything
+    # else is read from $ENGINE directly.
+    - name: Resolve engine root and stage
+      shell: bash
+      run: |
+        set -euo pipefail
+        ENGINE="$(cd "$GITHUB_ACTION_PATH/../../../.." && pwd)"
+        echo "ENGINE=$ENGINE" >> "$GITHUB_ENV"
+        OUTDIR="generated/plans/${{ inputs.run_id }}"
+        echo "OUTDIR=$OUTDIR" >> "$GITHUB_ENV"
+        mkdir -p "$GITHUB_WORKSPACE/.attractor-engine"
+        printf '*\n' > "$GITHUB_WORKSPACE/.attractor-engine/.gitignore"
+        cp -R "$ENGINE/compiler" "$GITHUB_WORKSPACE/.attractor-engine/"
+        cp "$ENGINE/pipelines/plan-batch/plan-batch.dot" "$GITHUB_WORKSPACE/.attractor-engine/"
+        echo "Resolved engine root: $ENGINE"
+
+    # The compiler is the anti-tamper oracle in goal-plan/execute, so record
+    # its fingerprint at prepare time for that action to compare against.
+    - name: Compute compiler fingerprint
+      id: fingerprint
+      shell: bash
+      run: |
+        set -euo pipefail
+        FP="$(find "$ENGINE/compiler" -name '*.py' -not -path '*/__pycache__/*' -not -path '*/tests/*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')"
+        echo "fingerprint=$FP" >> "$GITHUB_OUTPUT"
+        echo "Compiler fingerprint: $FP"
+
+    # 1. Author plan.json from the issue. amplifier-app-actions sets $goal to the
+    #    issue context block; the pipeline converges on a compiler-valid plan.json
+    #    written to the workspace root (or aborts, leaving plan-batch-residual.md).
+    - name: Author plan.json (planner attractor)
+      uses: microsoft/amplifier-app-actions@main
+      with:
+        attractor_source: .attractor-engine/plan-batch.dot
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        GH_TOKEN: ${{ inputs.github_token }}
+
+    # 2. Gate on the ARTIFACT, not the job status (per plan-batch.md output
+    #    contract): on abort the pipeline deliberately removes plan.json. This
+    #    action does NOT fail the job on a missing plan -- it reports
+    #    plan_produced=false and lets the caller decide how to respond.
+    - name: Check planner produced a plan
+      id: gate
+      shell: bash
+      run: |
+        if [ ! -f plan.json ]; then
+          echo "plan_produced=false" >> "$GITHUB_OUTPUT"
+          echo "Planner did not produce a compiler-valid plan.json." >&2
+        else
+          echo "plan_produced=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Handle no-plan case
+      id: noplan
+      if: steps.gate.outputs.plan_produced == 'false'
+      shell: bash
+      run: |
+        set -uo pipefail
+        if [ ! -s plan-batch-residual.md ]; then
+          echo "_No residual note was produced._" > plan-batch-residual.md
+        fi
+        echo "residual_path=plan-batch-residual.md" >> "$GITHUB_OUTPUT"
+
+    # 3. Relocate the plan AND the per-lane goal-condition files, rewrite each
+    #    lane's goal_condition_file to its committed ABSOLUTE path, then compile
+    #    (deterministic, via the staged .attractor-engine/compiler) and render
+    #    Mermaid (deterministic).
+    #
+    #    WHY ABSOLUTE (verified against execute-plan.yml + the goal_plan compiler):
+    #    at execution time each lane runs the real-work brick
+    #    subgraphs/goal_lane.dot inside its OWN git worktree, which execute-plan
+    #    forks from origin/main (it passes product_base_sha=origin/main). A goal
+    #    file committed to THIS disposable plan branch is therefore NOT present
+    #    in that worktree, so a repo-relative goal_condition_file would be
+    #    unreadable by the lane. What IS readable is the plan-branch checkout,
+    #    which execute-plan lays down at $GITHUB_WORKSPACE and which persists there
+    #    for the whole run; that path is the same deterministic
+    #    /home/runner/work/<repo>/<repo> on the GitHub-hosted runner in BOTH
+    #    workflows. So we bake the absolute $GITHUB_WORKSPACE/<outdir>/goals/...
+    #    path into plan.json here. The compiler is deterministic on the
+    #    committed plan.json, so goal-plan/execute's anti-tamper recompile still
+    #    matches byte-for-byte. (Assumption: GitHub-hosted ubuntu runner; a
+    #    self-hosted runner with a different $GITHUB_WORKSPACE would need this
+    #    rewrite, or execute-plan's product_base_sha, revisited.)
+    - name: Relocate, rewrite goal paths, compile and render
+      id: compile
+      if: steps.gate.outputs.plan_produced == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$OUTDIR/goals"
+        mv plan.json "$OUTDIR/plan.json"
+        # The planner staged one goal-condition file per lane at the workspace
+        # root (the pipeline's InstallGoals gate asserted every one is present
+        # and non-empty before it produced plan.json). Move them under OUTDIR so
+        # they are committed to the plan branch alongside plan.json.
+        if [ -d plan-batch-goals ]; then
+          cp plan-batch-goals/*.goal.md "$OUTDIR/goals/" 2>/dev/null || true
+        fi
+        # Rewrite every lane's goal_condition_file -> committed ABSOLUTE path,
+        # failing loud if any lane's goal file is missing/empty on disk.
+        python3 - "$OUTDIR/plan.json" "$GITHUB_WORKSPACE" "$OUTDIR" <<'PY'
+        import json, os, sys
+        plan_path, ws, outdir = sys.argv[1], sys.argv[2], sys.argv[3]
+        plan = json.load(open(plan_path))
+        goals_rel = os.path.join(outdir, "goals")
+        missing = []
+        for lid, lane in plan.get("lanes", {}).items():
+            gcf = lane.get("goal_condition_file")
+            if not gcf:
+                missing.append(lid + " (no goal_condition_file)")
+                continue
+            base = os.path.basename(gcf)
+            disk = os.path.join(goals_rel, base)
+            if not (os.path.isfile(disk) and os.path.getsize(disk) > 0):
+                missing.append(lid + " (" + base + " missing/empty)")
+                continue
+            lane["goal_condition_file"] = os.path.join(ws, goals_rel, base)
+        if missing:
+            sys.stderr.write("::error::goal files missing at compile time: " + ", ".join(missing) + "\n")
+            sys.exit(1)
+        json.dump(plan, open(plan_path, "w"), indent=2)
+        print("rewrote %d lane goal_condition_file path(s) to absolute" % len(plan["lanes"]))
+        PY
+        rm -rf plan-batch-goals
+        PYTHONPATH="$GITHUB_WORKSPACE/.attractor-engine" python3 -m compiler "$OUTDIR/plan.json" -o "$OUTDIR/goal_plan.dot"
+        python3 "$ENGINE/scripts/dot_to_mermaid.py" "$OUTDIR/goal_plan.dot" -o "$OUTDIR/plan.mmd"
+        echo "${{ steps.fingerprint.outputs.fingerprint }}" > "$OUTDIR/engine.txt"
+        echo "outdir=$OUTDIR" >> "$GITHUB_OUTPUT"
+        echo "plan_json_path=$OUTDIR/plan.json" >> "$GITHUB_OUTPUT"
+        echo "parent_dot_path=$OUTDIR/goal_plan.dot" >> "$GITHUB_OUTPUT"
+        echo "mermaid_path=$OUTDIR/plan.mmd" >> "$GITHUB_OUTPUT"
+
+    # 4. Commit the artifacts to a disposable branch -- this is the hand-off
+    #    channel to goal-plan/execute (SHA-pinned, auditable).
+    - name: Commit plan branch
+      id: commit
+      if: steps.gate.outputs.plan_produced == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        set -euo pipefail
+        PLAN_BRANCH="${{ inputs.branch_prefix }}${{ inputs.issue_number }}-${{ inputs.run_id }}"
+        echo "plan_branch=$PLAN_BRANCH" >> "$GITHUB_OUTPUT"
+        git switch -c "$PLAN_BRANCH"
+        git add "$OUTDIR"
+        git \
+          -c user.name='amplifier-bot' \
+          -c user.email='240397093+microsoft-amplifier@users.noreply.github.com' \
+          commit -m "plan-batch: issue #${{ inputs.issue_number }} (${{ inputs.run_id }})"
+        git push --force-with-lease "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" HEAD:"$PLAN_BRANCH"

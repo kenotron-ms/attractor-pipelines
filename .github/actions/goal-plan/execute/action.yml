@@ -1,0 +1,260 @@
+# Goal Plan / Execute — run a compiled goal-plan batch against the calling repo.
+#
+# PORTED from .github/workflows/execute-plan.yml (the engine steps). This
+# action reads engine assets (compiler/, scripts/, pipelines/goal_plan/) from
+# ITS OWN checkout (resolved via $GITHUB_ACTION_PATH -- see step 1), never
+# from the consumer's checkout, so a consumer need not vendor any of this
+# repo's files. Product work (the plan branch's plan.json/goal_plan.dot, the
+# lane worktrees the run creates) happens in $GITHUB_WORKSPACE, the caller's
+# checkout.
+#
+# Callers MUST pin `uses:` to a commit SHA (not @main / @<branch>) and use
+# the SAME SHA for both goal-plan/prepare and goal-plan/execute -- the
+# fingerprint check in this action fails closed on drift between the two.
+name: "Goal Plan / Execute"
+description: >-
+  Provisions the runtime, anti-tamper-verifies a committed plan branch
+  against a fresh recompile, and runs the compiled goal_plan pipeline against
+  the calling repository's checkout.
+
+inputs:
+  outdir:
+    description: "Workspace-relative directory holding plan.json and goal_plan.dot (e.g. generated/plans/<run_id>)."
+    required: true
+  run_id:
+    description: "Identifier for this run; used to namespace scratch dirs under RUNNER_TEMP."
+    required: true
+  anthropic_api_key:
+    description: "ANTHROPIC_API_KEY for the batch run (lanes call out to an LLM provider)."
+    required: true
+  github_token:
+    description: "Token the batch run uses for GH_TOKEN (issue/PR operations performed by lanes)."
+    required: true
+  repo:
+    description: "owner/repo passed to the pipeline as --param repo=."
+    required: false
+    default: ${{ github.repository }}
+  base_ref:
+    description: "Git ref the run diffs lane candidates against (--param product_base_sha=)."
+    required: false
+    default: "origin/main"
+  python_version:
+    description: "Python version to provision."
+    required: false
+    default: "3.12"
+  node_version:
+    description: "Node version to provision (only used when install_playwright is true)."
+    required: false
+    default: "20"
+  install_playwright:
+    description: "Whether to provision Node + Chromium for lanes that verify a web UI headlessly."
+    required: false
+    default: "true"
+  runner_ref:
+    description: "pip install spec for the attractor pipeline-runner engine."
+    required: false
+    default: "amplifier-module-pipeline-runner @ git+https://github.com/microsoft/amplifier-bundle-attractor@main#subdirectory=modules/pipeline-runner"
+
+outputs:
+  terminal:
+    description: "Terminal state reached by the attractor run (COMPLETE, RESIDUALS_READY, INFRA_FAILURE, ABORTED, PRELAUNCH_INFRASTRUCTURE_BLOCKED, or unknown)."
+    value: ${{ steps.run.outputs.terminal }}
+  pr_url:
+    description: "URL of the PR opened by the run, if any."
+    value: ${{ steps.run.outputs.pr_url }}
+  logs_dir:
+    description: "Path to the run's logs directory (outside the checkout, under RUNNER_TEMP)."
+    value: ${{ steps.run.outputs.logs_dir }}
+  summary_path:
+    description: "Path to the generated Markdown run summary."
+    value: ${{ steps.summary.outputs.summary_path }}
+  work_dir:
+    description: "Path to the run's scratch work directory (state/worktrees/delivery/logs)."
+    value: ${{ steps.run.outputs.work_dir }}
+
+runs:
+  using: "composite"
+  steps:
+    # This action lives 4 path segments below the repo root
+    # (.github/actions/goal-plan/execute), so 4 levels of ".." from
+    # $GITHUB_ACTION_PATH reaches this repo's checkout root -- the ENGINE,
+    # distinct from $GITHUB_WORKSPACE (the CONSUMER's checkout, where product
+    # work happens).
+    - name: Resolve engine root
+      shell: bash
+      run: |
+        set -euo pipefail
+        ENGINE="$(cd "$GITHUB_ACTION_PATH/../../../.." && pwd)"
+        echo "ENGINE=$ENGINE" >> "$GITHUB_ENV"
+        echo "Resolved engine root: $ENGINE"
+
+    # A managed Python so `pip install` works (PEP 668 blocks the OS python on
+    # ubuntu-latest) and bare `python3` on PATH is the one the engine installs into.
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    # The engine shells out to `uv` at runtime to materialize child sessions and
+    # resolve child-module deps; without it lanes die with FileNotFoundError: 'uv'.
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
+
+    # Web-app scenario lanes verify their UI with a real headless browser
+    # (Playwright). Provision Node + Chromium (and its OS libraries) so a lane's
+    # `npx playwright test` can build, serve, and browser-check the app it wrote.
+    # Without this a UI lane has no automated way to prove the app works, which is
+    # what forced the planner back to an (unattended-fatal) manual check.
+    - name: Set up Node
+      if: inputs.install_playwright == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+
+    - name: Install Playwright system deps + Chromium
+      if: inputs.install_playwright == 'true'
+      shell: bash
+      run: npx --yes playwright@latest install --with-deps chromium
+
+    # Drift guard. The compiler is the anti-tamper oracle below, so if THIS
+    # ref's compiler differs from the one that produced the committed
+    # goal_plan.dot, a mismatch is expected and misleading as "tampering".
+    # Name it as engine drift instead so the fix (re-pin both workflows to
+    # the same ref) is obvious.
+    - name: Verify engine fingerprint
+      shell: bash
+      run: |
+        set -euo pipefail
+        OUTDIR="${{ inputs.outdir }}"
+        ACTUAL="$(find "$ENGINE/compiler" -name '*.py' -not -path '*/__pycache__/*' -not -path '*/tests/*' | sort | xargs sha256sum | sha256sum | awk '{print $1}')"
+        if [ -f "$OUTDIR/engine.txt" ]; then
+          EXPECTED="$(cat "$OUTDIR/engine.txt")"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::engine drift -- the compiler at this pinned ref ($ACTUAL) does not match the fingerprint recorded when this plan was prepared ($EXPECTED). Re-pin both workflows (plan-batch and execute-plan) to the same attractor-pipelines ref and re-plan."
+            exit 1
+          fi
+          echo "Engine fingerprint OK: $ACTUAL"
+        else
+          echo "::warning::no $OUTDIR/engine.txt found -- cannot verify engine fingerprint (older plan branch?); continuing."
+        fi
+
+    # GATE -- anti-tamper. The compiler is deterministic (same plan -> byte
+    # identical .dot), so a recompile that differs means the branch was edited.
+    - name: Verify plan integrity (anti-tamper recompile)
+      shell: bash
+      run: |
+        set -euo pipefail
+        OUTDIR="${{ inputs.outdir }}"
+        test -f "$OUTDIR/plan.json" || { echo "::error::missing $OUTDIR/plan.json"; exit 1; }
+        test -f "$OUTDIR/goal_plan.dot" || { echo "::error::missing $OUTDIR/goal_plan.dot"; exit 1; }
+        PYTHONPATH="$ENGINE" python3 -m compiler "$OUTDIR/plan.json" -o /tmp/recompiled.dot
+        if ! diff -u "$OUTDIR/goal_plan.dot" /tmp/recompiled.dot; then
+          echo "::error::committed goal_plan.dot does not match a fresh recompile of plan.json -- refusing (tamper check)."
+          exit 1
+        fi
+        echo "Integrity OK: committed .dot matches plan.json."
+
+    # Bootstrap the attractor engine so lane child-processes can launch
+    # `python3 -m amplifier_module_pipeline_runner.cli`. The runner CLI lives in
+    # amplifier-bundle-attractor's modules/pipeline-runner (NOT modules/loop-pipeline,
+    # which provides only the amplifier_module_loop_pipeline engine); installing the
+    # runner pulls in the loop-pipeline engine via its own git dependency. Verified in
+    # a clean venv: this install makes `import amplifier_module_pipeline_runner.cli`
+    # succeed. Fails LOUD if the import is unavailable.
+    - name: Bootstrap attractor engine
+      id: engine
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m pip install --quiet --upgrade pip
+        python3 -m pip install --quiet \
+          "${{ inputs.runner_ref }}"
+        if ! python3 -c "import amplifier_module_pipeline_runner.cli" 2>/dev/null; then
+          echo "::error::attractor runner (amplifier_module_pipeline_runner) not importable after install."
+          exit 1
+        fi
+        echo "pp=$(python3 -c 'import site; print(site.getsitepackages()[0])')" >> "$GITHUB_OUTPUT"
+
+    # Execute the compiled batch in --light trust mode (running the parent .dot
+    # directly via the pipeline-runner IS light mode -- no bootstrap descriptor).
+    # State/worktree/delivery roots live OUTSIDE the checkout, under $RUNNER_TEMP.
+    - name: Run batch
+      id: run
+      shell: bash
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        set -uo pipefail
+        # Lane worktrees run `git commit`; GitHub runners have no git identity by
+        # default, so a lane's Candidate commit dies with "Author identity unknown".
+        git config --global user.email "amplifier-bot@users.noreply.github.com"
+        git config --global user.name "Amplifier Bot"
+        OUTDIR="${{ inputs.outdir }}"
+        RUN_ID="${{ inputs.run_id }}"
+        WORK="$RUNNER_TEMP/goal-plan-$RUN_ID"
+        mkdir -p "$WORK/state" "$WORK/worktrees" "$WORK/delivery" "$WORK/logs"
+        echo "logs_dir=$WORK/logs" >> "$GITHUB_OUTPUT"
+        echo "work_dir=$WORK" >> "$GITHUB_OUTPUT"
+        BASE_REF="${{ inputs.base_ref }}"
+        git fetch --quiet origin "${BASE_REF#origin/}" || true
+        BASE_SHA="$(git rev-parse "$BASE_REF" 2>/dev/null || git rev-parse HEAD)"
+        RUN_OUT="$WORK/run.out"
+        python3 -m amplifier_module_pipeline_runner.cli run "$OUTDIR/goal_plan.dot" \
+          --cwd "$GITHUB_WORKSPACE" \
+          --logs-root "$WORK/logs" \
+          --on-human-gate fail \
+          --param target_repo="$GITHUB_WORKSPACE" \
+          --param repo="${{ inputs.repo }}" \
+          --param run_id="$RUN_ID" \
+          --param product_base_sha="$BASE_SHA" \
+          --param state_root="$WORK/state" \
+          --param worktree_root="$WORK/worktrees" \
+          --param delivery_state_root="$WORK/delivery" \
+          --param delivery_enabled="true" \
+          --param runtime_py_dir="$ENGINE/pipelines/goal_plan/python" \
+          --param subgraphs_dir="$ENGINE/pipelines/goal_plan/subgraphs" \
+          --param git_bin="git" \
+          --param runner_pythonpath="${{ steps.engine.outputs.pp }}" \
+          --param plan_json_path="$OUTDIR/plan.json" \
+          --param parent_dot_path="$OUTDIR/goal_plan.dot" 2>&1 | tee "$RUN_OUT"
+        rc=${PIPESTATUS[0]}
+        terminal="$(grep -oaE 'COMPLETE|RESIDUALS_READY|INFRA_FAILURE|ABORTED|PRELAUNCH_INFRASTRUCTURE_BLOCKED' "$RUN_OUT" | tail -1 || true)"
+        pr_url="$(grep -oaE 'https://github.com/[^[:space:]]+/pull/[0-9]+' "$RUN_OUT" | tail -1 || true)"
+        {
+          echo "terminal=${terminal:-unknown}"
+          echo "pr_url=${pr_url}"
+        } >> "$GITHUB_OUTPUT"
+        echo "attractor terminal: ${terminal:-unknown} | pr_url: ${pr_url:-none} | rc: $rc"
+        exit "$rc"
+
+    # Render the run's state/logs into a readable Markdown summary and surface
+    # it IN the workflow (Step Summary page + collapsible job-log group) so the
+    # per-lane "why" is visible without downloading the run artifact.
+    - name: Attractor run summary
+      id: summary
+      if: always()
+      shell: bash
+      env:
+        RUN_ID: ${{ inputs.run_id }}
+        TERMINAL: ${{ steps.run.outputs.terminal }}
+        PR_URL: ${{ steps.run.outputs.pr_url }}
+      run: |
+        set -uo pipefail
+        WORK="$RUNNER_TEMP/goal-plan-$RUN_ID"
+        MD="$WORK/attractor-summary.md"
+        mkdir -p "$WORK"
+        if ! python3 "$ENGINE/scripts/attractor_run_summary.py" \
+               --state "$WORK/state" --logs "$WORK/logs" \
+               --run-id "$RUN_ID" --terminal "${TERMINAL:-unknown}" --pr-url "${PR_URL:-}" > "$MD"; then
+          {
+            echo "## Attractor batch $RUN_ID - ${TERMINAL:-unknown}"
+            echo ""
+            echo "_(summary generation failed; download the attractor-run-logs artifact)_"
+          } > "$MD"
+        fi
+        cat "$MD" >> "$GITHUB_STEP_SUMMARY"
+        echo "::group::Attractor run summary ($RUN_ID)"
+        cat "$MD"
+        echo "::endgroup::"
+        echo "summary_path=$MD" >> "$GITHUB_OUTPUT"
